@@ -1,0 +1,7 @@
+pyspark
+duckdb
+pandas
+faker
+pyarrow
+pytest
+python-dotenv
