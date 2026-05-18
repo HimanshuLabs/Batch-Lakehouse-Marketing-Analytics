@@ -1,7 +1,7 @@
-pyspark
-duckdb
-pandas
-faker
-pyarrow
-pytest
-python-dotenv
+duckdb==1.5.2
+Faker==40.18.0
+pandas==3.0.3
+pyarrow==24.0.0
+pyspark==4.1.1
+pytest==9.0.3
+python-dotenv==1.2.2
