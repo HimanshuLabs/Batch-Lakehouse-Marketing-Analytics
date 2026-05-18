@@ -21,9 +21,12 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Logs
-logs/*.log
+# Logs and runtime reports
+logs/*
 *.log
+
+# Keep folder placeholder
+!logs/.gitkeep
 
 # Large generated lakehouse data
 data/raw/*
