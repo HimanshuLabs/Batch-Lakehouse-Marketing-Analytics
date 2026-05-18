@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+venv/
+.venv/
+env/
+ENV/
+pip-wheel-metadata/
+.pytest_cache/
+.mypy_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Logs
+logs/*.log
+*.log
+
+# Large generated lakehouse data
+data/raw/*
+data/bronze/*
+data/silver/*
+data/gold/*
+data/quarantine/*
+
+# Keep folder placeholders
+!data/raw/.gitkeep
+!data/bronze/.gitkeep
+!data/silver/.gitkeep
+!data/gold/.gitkeep
+!data/quarantine/.gitkeep
+!logs/.gitkeep
+!images/.gitkeep
+
+# Spark
+spark-warehouse/
+metastore_db/
+derby.log
+checkpoints/
+
+# Delta / Parquet temp files
+*.crc
+_SUCCESS
+_committed_*
+_started_*
+
+# Airflow local
+airflow/logs/
+airflow/*.db
+airflow/airflow.cfg
+airflow/webserver_config.py
+
+# Environment
+.env
