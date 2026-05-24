@@ -1,0 +1,70 @@
+{
+  "job_name": "point_in_time_fact_joins",
+  "started_at_utc": "2026-05-24T09:56:34.928520+00:00",
+  "facts": {
+    "fact_orders_scd2": {
+      "source_path": "/home/manshu/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics/data/silver/silver_orders",
+      "output_path": "/home/manshu/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics/data/gold/fact_orders_scd2",
+      "validation": {
+        "fact_name": "fact_orders_scd2",
+        "status": "PASS",
+        "total_rows": 1869,
+        "primary_key": "order_id",
+        "duplicate_primary_keys": 0,
+        "required_surrogate_keys": [
+          "customer_sk",
+          "campaign_sk"
+        ],
+        "missing_required_columns": [],
+        "null_surrogate_key_counts": {
+          "customer_sk": 0,
+          "campaign_sk": 0
+        }
+      },
+      "rejected_path": "/home/manshu/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics/data/quarantine/fact_orders_scd2_rejects",
+      "rejected_rows": 128
+    },
+    "fact_order_items_scd2": {
+      "source_path": "/home/manshu/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics/data/silver/silver_order_items",
+      "output_path": "/home/manshu/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics/data/gold/fact_order_items_scd2",
+      "validation": {
+        "fact_name": "fact_order_items_scd2",
+        "status": "PASS",
+        "total_rows": 4584,
+        "primary_key": "order_item_id",
+        "duplicate_primary_keys": 0,
+        "required_surrogate_keys": [
+          "product_sk"
+        ],
+        "missing_required_columns": [],
+        "null_surrogate_key_counts": {
+          "product_sk": 0
+        }
+      },
+      "rejected_path": "/home/manshu/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics/data/quarantine/fact_order_items_scd2_rejects",
+      "rejected_rows": 84
+    },
+    "fact_campaign_spend_scd2": {
+      "source_path": "/home/manshu/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics/data/silver/silver_ad_spend",
+      "output_path": "/home/manshu/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics/data/gold/fact_campaign_spend_scd2",
+      "validation": {
+        "fact_name": "fact_campaign_spend_scd2",
+        "status": "PASS",
+        "total_rows": 951,
+        "primary_key": "spend_id",
+        "duplicate_primary_keys": 0,
+        "required_surrogate_keys": [
+          "campaign_sk"
+        ],
+        "missing_required_columns": [],
+        "null_surrogate_key_counts": {
+          "campaign_sk": 0
+        }
+      },
+      "rejected_path": "/home/manshu/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics/data/quarantine/fact_campaign_spend_scd2_rejects",
+      "rejected_rows": 46
+    }
+  },
+  "finished_at_utc": "2026-05-24T09:56:49.055514+00:00",
+  "overall_status": "PASS"
+}

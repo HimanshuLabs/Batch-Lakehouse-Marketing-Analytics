@@ -1,0 +1,81 @@
+{
+  "job_name": "scd2_dimensions",
+  "started_at_utc": "2026-05-24T05:32:39.390490+00:00",
+  "dimensions": {
+    "customers": {
+      "source_path": "/home/manshu/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics/data/silver/silver_customers",
+      "output_path": "/home/manshu/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics/data/gold/dim_customers_scd2",
+      "natural_key": "customer_id",
+      "surrogate_key": "customer_sk",
+      "tracked_columns": [
+        "customer_name",
+        "email",
+        "city",
+        "state",
+        "country",
+        "customer_segment",
+        "loyalty_tier"
+      ],
+      "validation": {
+        "status": "PASS",
+        "total_rows": 497,
+        "natural_key_count": 497,
+        "current_rows": 497,
+        "duplicate_current_rows": 0,
+        "null_surrogate_keys": 0,
+        "null_natural_keys": 0,
+        "invalid_date_ranges": 0
+      }
+    },
+    "products": {
+      "source_path": "/home/manshu/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics/data/silver/silver_products",
+      "output_path": "/home/manshu/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics/data/gold/dim_products_scd2",
+      "natural_key": "product_id",
+      "surrogate_key": "product_sk",
+      "tracked_columns": [
+        "product_name",
+        "category",
+        "brand",
+        "price",
+        "status"
+      ],
+      "validation": {
+        "status": "PASS",
+        "total_rows": 147,
+        "natural_key_count": 147,
+        "current_rows": 147,
+        "duplicate_current_rows": 0,
+        "null_surrogate_keys": 0,
+        "null_natural_keys": 0,
+        "invalid_date_ranges": 0
+      }
+    },
+    "campaigns": {
+      "source_path": "/home/manshu/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics/data/silver/silver_campaigns",
+      "output_path": "/home/manshu/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics/data/gold/dim_campaigns_scd2",
+      "natural_key": "campaign_id",
+      "surrogate_key": "campaign_sk",
+      "tracked_columns": [
+        "campaign_name",
+        "channel",
+        "target_segment",
+        "budget",
+        "campaign_status",
+        "start_date",
+        "end_date"
+      ],
+      "validation": {
+        "status": "PASS",
+        "total_rows": 37,
+        "natural_key_count": 37,
+        "current_rows": 37,
+        "duplicate_current_rows": 0,
+        "null_surrogate_keys": 0,
+        "null_natural_keys": 0,
+        "invalid_date_ranges": 0
+      }
+    }
+  },
+  "finished_at_utc": "2026-05-24T05:32:51.949284+00:00",
+  "overall_status": "PASS"
+}
