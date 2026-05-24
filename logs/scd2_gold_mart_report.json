@@ -1,0 +1,50 @@
+{
+  "job_name": "scd2_gold_marts",
+  "started_at_utc": "2026-05-24T10:23:53.241641+00:00",
+  "marts": {
+    "mart_campaign_performance_scd2": {
+      "output_path": "/home/manshu/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics/data/gold/mart_campaign_performance_scd2",
+      "rows": 37
+    },
+    "mart_customer_lifetime_value_scd2": {
+      "output_path": "/home/manshu/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics/data/gold/mart_customer_lifetime_value_scd2",
+      "rows": 422
+    },
+    "mart_product_performance_scd2": {
+      "output_path": "/home/manshu/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics/data/gold/mart_product_performance_scd2",
+      "rows": 147
+    },
+    "mart_marketing_funnel_scd2": {
+      "output_path": "/home/manshu/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics/data/gold/mart_marketing_funnel_scd2",
+      "rows": 240
+    }
+  },
+  "validation": {
+    "status": "PASS",
+    "checks": {
+      "campaign_revenue_reconciles_to_fact_orders": true,
+      "clv_revenue_reconciles_to_fact_orders": true,
+      "product_revenue_reconciles_to_fact_order_items": true,
+      "campaign_spend_reconciles_to_fact_campaign_spend": true,
+      "campaign_mart_has_rows": true,
+      "clv_mart_has_rows": true,
+      "product_mart_has_rows": true,
+      "funnel_mart_has_rows": true
+    },
+    "metrics": {
+      "fact_order_revenue": 214154604.53000018,
+      "campaign_mart_revenue": 214154604.53000006,
+      "clv_mart_revenue": 214154604.53000012,
+      "fact_item_revenue": 554606647.2499994,
+      "product_mart_revenue": 554606647.2499999,
+      "fact_campaign_spend": 47552145.04000005,
+      "campaign_mart_spend": 47552145.03999999,
+      "campaign_mart_rows": 37,
+      "clv_mart_rows": 422,
+      "product_mart_rows": 147,
+      "funnel_mart_rows": 240
+    }
+  },
+  "finished_at_utc": "2026-05-24T10:24:07.262259+00:00",
+  "overall_status": "PASS"
+}
