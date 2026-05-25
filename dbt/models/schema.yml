@@ -1,0 +1,190 @@
+version: 2
+
+models:
+  - name: stg_dim_customers_scd2
+    description: SCD Type 2 customer dimension loaded from Gold Parquet.
+    columns:
+      - name: customer_sk
+        description: Deterministic customer surrogate key generated from natural key, effective timestamp, and record hash.
+        tests:
+          - not_null
+          - unique
+      - name: customer_id
+        description: Customer natural key.
+        tests:
+          - not_null
+      - name: effective_from
+        tests:
+          - not_null
+      - name: effective_to
+        tests:
+          - not_null
+      - name: is_current
+        tests:
+          - not_null
+
+  - name: stg_dim_products_scd2
+    description: SCD Type 2 product dimension loaded from Gold Parquet.
+    columns:
+      - name: product_sk
+        tests:
+          - not_null
+          - unique
+      - name: product_id
+        tests:
+          - not_null
+      - name: effective_from
+        tests:
+          - not_null
+      - name: effective_to
+        tests:
+          - not_null
+      - name: is_current
+        tests:
+          - not_null
+
+  - name: stg_dim_campaigns_scd2
+    description: SCD Type 2 campaign dimension loaded from Gold Parquet.
+    columns:
+      - name: campaign_sk
+        tests:
+          - not_null
+          - unique
+      - name: campaign_id
+        tests:
+          - not_null
+      - name: effective_from
+        tests:
+          - not_null
+      - name: effective_to
+        tests:
+          - not_null
+      - name: is_current
+        tests:
+          - not_null
+
+  - name: stg_fact_orders_scd2
+    description: Valid order fact table after SCD2 point-in-time customer and campaign joins.
+    columns:
+      - name: order_id
+        tests:
+          - not_null
+          - unique
+      - name: customer_sk
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_dim_customers_scd2')
+                field: customer_sk
+      - name: campaign_sk
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_dim_campaigns_scd2')
+                field: campaign_sk
+      - name: total_amount
+        tests:
+          - not_null
+
+  - name: stg_fact_order_items_scd2
+    description: Valid order item fact table after SCD2 point-in-time product joins.
+    columns:
+      - name: order_item_id
+        tests:
+          - not_null
+          - unique
+      - name: order_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_fact_orders_scd2')
+                field: order_id
+      - name: product_sk
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_dim_products_scd2')
+                field: product_sk
+      - name: line_amount
+        tests:
+          - not_null
+
+  - name: stg_fact_campaign_spend_scd2
+    description: Valid campaign spend fact table after SCD2 point-in-time campaign joins.
+    columns:
+      - name: spend_id
+        tests:
+          - not_null
+          - unique
+      - name: campaign_sk
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_dim_campaigns_scd2')
+                field: campaign_sk
+      - name: spend_amount
+        tests:
+          - not_null
+
+  - name: stg_mart_campaign_performance_scd2
+    description: Campaign performance mart rebuilt from SCD2-aware facts.
+    columns:
+      - name: campaign_sk
+        tests:
+          - not_null
+          - unique
+      - name: total_revenue
+        tests:
+          - not_null
+      - name: total_spend
+        tests:
+          - not_null
+      - name: roas
+        tests:
+          - not_null
+
+  - name: stg_mart_customer_lifetime_value_scd2
+    description: Customer lifetime value mart rebuilt from SCD2-aware order facts.
+    columns:
+      - name: customer_sk
+        tests:
+          - not_null
+          - unique
+      - name: total_orders
+        tests:
+          - not_null
+      - name: total_revenue
+        tests:
+          - not_null
+
+  - name: stg_mart_product_performance_scd2
+    description: Product performance mart rebuilt from SCD2-aware order item facts.
+    columns:
+      - name: product_sk
+        tests:
+          - not_null
+          - unique
+      - name: units_sold
+        tests:
+          - not_null
+      - name: total_revenue
+        tests:
+          - not_null
+
+  - name: stg_mart_marketing_funnel_scd2
+    description: Marketing funnel mart with campaign/channel-level conversion metrics.
+    columns:
+      - name: channel
+        tests:
+          - not_null
+      - name: sessions_count
+        tests:
+          - not_null
+      - name: purchases
+        tests:
+          - not_null

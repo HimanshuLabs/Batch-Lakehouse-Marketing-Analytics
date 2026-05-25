@@ -64,3 +64,8 @@ airflow/webserver_config.py
 
 # Environment
 .env
+
+# Local dbt runtime database
+data/dbt/
+dbt/target/
+dbt/dbt_packages/

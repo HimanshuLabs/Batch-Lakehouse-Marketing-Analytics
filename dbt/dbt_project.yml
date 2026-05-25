@@ -1,0 +1,16 @@
+name: batch_lakehouse_marketing_analytics
+version: "1.0.0"
+config-version: 2
+
+profile: batch_lakehouse_marketing_analytics
+
+model-paths: ["models"]
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+models:
+  batch_lakehouse_marketing_analytics:
+    staging:
+      +materialized: view

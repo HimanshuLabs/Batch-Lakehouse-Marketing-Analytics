@@ -8,3 +8,5 @@ python-dotenv==1.2.2
 psycopg==3.3.4
 psycopg-binary==3.3.4
 SQLAlchemy==2.0.49
+dbt-core==1.10.15
+dbt-duckdb==1.9.6

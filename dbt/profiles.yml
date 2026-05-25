@@ -1,0 +1,7 @@
+batch_lakehouse_marketing_analytics:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: "../data/dbt/batch_lakehouse.duckdb"
+      threads: 4
