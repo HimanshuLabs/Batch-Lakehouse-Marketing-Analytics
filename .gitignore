@@ -69,3 +69,7 @@ airflow/webserver_config.py
 data/dbt/
 dbt/target/
 dbt/dbt_packages/
+
+# dbt local/user artifacts
+dbt/.user.yml
+dbt/logs/
