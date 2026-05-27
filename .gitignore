@@ -73,3 +73,6 @@ dbt/dbt_packages/
 # dbt local/user artifacts
 dbt/.user.yml
 dbt/logs/
+
+# Power BI generated exports
+data/bi_exports/
