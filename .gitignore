@@ -76,3 +76,12 @@ dbt/logs/
 
 # Power BI generated exports
 data/bi_exports/
+# Terraform local state and secrets
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+crash.*.log
+tfplan
