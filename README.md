@@ -685,22 +685,3 @@ ORDER BY table_name;
 
 ---
 
-## 12. Git Commit History
-
-```text
-ecef405 Add PostgreSQL analytical query pack
-ade1c08 Publish gold marts to PostgreSQL
-3552b3c Add DuckDB SQL analytics over gold marts
-c27e2d9 Add gold quality checks and mart reconciliation
-0d5b07a Build gold analytics marts
-6b10d49 Add silver quality checks and reconciliation
-16e7240 Build silver transformation layer with quarantine handling
-a04b80e Add bronze quality checks
-a9b8c11 Build bronze ingestion layer with metadata
-ec2e2f8 Add synthetic marketing analytics data generator
-f4dbc2a Lock Python dependency versions
-74fb0a9 Add Python dependencies for batch lakehouse
-60c6a2f Initialize batch lakehouse project structure
-```
-
----
