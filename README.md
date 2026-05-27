@@ -4,8 +4,6 @@
 
 This project is an end-to-end batch data engineering lakehouse pipeline that simulates marketing analytics data, processes it through Bronze, Silver, and Gold Medallion layers, applies data quality checks and reconciliation at every stage, publishes business-ready Gold marts to PostgreSQL, and provides reusable SQL analytics through DuckDB and PostgreSQL.
 
-The goal is to demonstrate a production-style batch lakehouse pipeline, not a one-shot notebook.
-
 ---
 
 ## 2. Architecture
