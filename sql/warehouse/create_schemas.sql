@@ -1,17 +1,41 @@
--- Warehouse reporting integration schemas.
--- Project 2 owns the lakehouse layers: Raw, Bronze, Silver, Gold, and Gold/SCD2.
--- This PostgreSQL warehouse layer starts only after trusted Gold/SCD2 outputs exist.
+/*
+PostgreSQL Warehouse Schema Layer
+==================================
+
+Boundary:
+- Project 2 lakehouse owns Raw/Bronze/Silver/Gold.
+- PostgreSQL starts from trusted Gold/SCD2 outputs.
+- No duplicate lakehouse raw/bronze/silver logic belongs here.
+
+Schema ownership:
+- staging   : relational landing area for trusted Gold/SCD2 lakehouse outputs
+- warehouse : dimensional warehouse model; SCD2 dimensions, facts, surrogate-key joins
+- marts     : BI-ready reporting tables/views for dashboards and analytics
+- audit     : reconciliation, validation, freshness checks, and publish health results
+*/
 
 BEGIN;
 
 CREATE SCHEMA IF NOT EXISTS staging;
-CREATE SCHEMA IF NOT EXISTS warehouse;
-CREATE SCHEMA IF NOT EXISTS marts;
-CREATE SCHEMA IF NOT EXISTS audit;
+COMMENT ON SCHEMA staging IS
+'Relational landing schema for trusted Project 2 Gold and SCD2 lakehouse outputs. Does not own raw, bronze, or silver processing.';
 
-COMMENT ON SCHEMA staging IS 'Relational landing area for trusted Project 2 Gold and SCD2 outputs.';
-COMMENT ON SCHEMA warehouse IS 'Dimensional warehouse layer with SCD2 dimensions and fact tables.';
-COMMENT ON SCHEMA marts IS 'BI-ready reporting marts for customer, revenue, campaign, product, and funnel analytics.';
-COMMENT ON SCHEMA audit IS 'Reconciliation, SCD2 validation, freshness, and warehouse quality results.';
+CREATE SCHEMA IF NOT EXISTS warehouse;
+COMMENT ON SCHEMA warehouse IS
+'Core dimensional warehouse schema containing SCD2 dimensions, fact tables, surrogate keys, and point-in-time reporting structures.';
+
+CREATE SCHEMA IF NOT EXISTS marts;
+COMMENT ON SCHEMA marts IS
+'Business-facing BI/reporting schema containing curated marts for revenue, customer, campaign, product, and funnel analytics.';
+
+CREATE SCHEMA IF NOT EXISTS audit;
+COMMENT ON SCHEMA audit IS
+'Trust and control schema for reconciliation checks, data quality results, freshness checks, and warehouse publish validation.';
 
 COMMIT;
+
+SELECT
+    schema_name
+FROM information_schema.schemata
+WHERE schema_name IN ('staging', 'warehouse', 'marts', 'audit')
+ORDER BY schema_name;
