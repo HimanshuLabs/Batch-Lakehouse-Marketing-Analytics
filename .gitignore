@@ -85,3 +85,6 @@ data/bi_exports/
 crash.log
 crash.*.log
 tfplan
+
+# Warehouse runtime logs
+logs/warehouse/*.log
