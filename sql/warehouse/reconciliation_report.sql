@@ -27,17 +27,16 @@ INSERT INTO audit.reconciliation_report (
 )
 SELECT
     'order_count_staging_vs_warehouse',
-    (SELECT COUNT(*) FROM staging.gold_fact_orders_scd2),
-    (SELECT COUNT(*) FROM warehouse.fact_orders),
-    (SELECT COUNT(*) FROM staging.gold_fact_orders_scd2) - (SELECT COUNT(*) FROM warehouse.fact_orders),
+    src.source_count,
+    tgt.target_count,
+    src.source_count - tgt.target_count,
     NULL,
     NULL,
     NULL,
-    CASE
-        WHEN (SELECT COUNT(*) FROM staging.gold_fact_orders_scd2) = (SELECT COUNT(*) FROM warehouse.fact_orders)
-        THEN 'PASS'
-        ELSE 'FAIL'
-    END;
+    CASE WHEN src.source_count = tgt.target_count THEN 'PASS' ELSE 'FAIL' END
+FROM
+    (SELECT COUNT(*)::NUMERIC(18,2) AS source_count FROM staging.stg_gold_fact_orders_scd2) src,
+    (SELECT COUNT(*)::NUMERIC(18,2) AS target_count FROM warehouse.fact_orders) tgt;
 
 INSERT INTO audit.reconciliation_report (
     check_name,
@@ -54,16 +53,19 @@ SELECT
     NULL,
     NULL,
     NULL,
-    COALESCE((SELECT SUM(net_revenue) FROM staging.gold_fact_orders_scd2), 0),
-    COALESCE((SELECT SUM(net_revenue) FROM warehouse.fact_orders), 0),
-    COALESCE((SELECT SUM(net_revenue) FROM staging.gold_fact_orders_scd2), 0)
-      - COALESCE((SELECT SUM(net_revenue) FROM warehouse.fact_orders), 0),
-    CASE
-        WHEN COALESCE((SELECT SUM(net_revenue) FROM staging.gold_fact_orders_scd2), 0)
-           = COALESCE((SELECT SUM(net_revenue) FROM warehouse.fact_orders), 0)
-        THEN 'PASS'
-        ELSE 'FAIL'
-    END;
+    src.source_amount,
+    tgt.target_amount,
+    src.source_amount - tgt.target_amount,
+    CASE WHEN src.source_amount = tgt.target_amount THEN 'PASS' ELSE 'FAIL' END
+FROM
+    (
+        SELECT ROUND(COALESCE(SUM(total_amount), 0)::NUMERIC, 2)::NUMERIC(18,2) AS source_amount
+        FROM staging.stg_gold_fact_orders_scd2
+    ) src,
+    (
+        SELECT ROUND(COALESCE(SUM(net_revenue), 0)::NUMERIC, 2)::NUMERIC(18,2) AS target_amount
+        FROM warehouse.fact_orders
+    ) tgt;
 
 INSERT INTO audit.reconciliation_report (
     check_name,
@@ -76,20 +78,121 @@ INSERT INTO audit.reconciliation_report (
     status
 )
 SELECT
-    'campaign_spend_staging_vs_warehouse',
+    'campaign_spend_count_staging_vs_warehouse',
+    src.source_count,
+    tgt.target_count,
+    src.source_count - tgt.target_count,
     NULL,
     NULL,
     NULL,
-    COALESCE((SELECT SUM(spend_amount) FROM staging.gold_fact_campaign_spend_scd2), 0),
-    COALESCE((SELECT SUM(spend_amount) FROM warehouse.fact_campaign_spend), 0),
-    COALESCE((SELECT SUM(spend_amount) FROM staging.gold_fact_campaign_spend_scd2), 0)
-      - COALESCE((SELECT SUM(spend_amount) FROM warehouse.fact_campaign_spend), 0),
-    CASE
-        WHEN COALESCE((SELECT SUM(spend_amount) FROM staging.gold_fact_campaign_spend_scd2), 0)
-           = COALESCE((SELECT SUM(spend_amount) FROM warehouse.fact_campaign_spend), 0)
-        THEN 'PASS'
-        ELSE 'FAIL'
-    END;
+    CASE WHEN src.source_count = tgt.target_count THEN 'PASS' ELSE 'FAIL' END
+FROM
+    (SELECT COUNT(*)::NUMERIC(18,2) AS source_count FROM staging.stg_gold_fact_campaign_spend_scd2) src,
+    (SELECT COUNT(*)::NUMERIC(18,2) AS target_count FROM warehouse.fact_campaign_spend) tgt;
+
+INSERT INTO audit.reconciliation_report (
+    check_name,
+    source_count,
+    target_count,
+    count_difference,
+    source_amount,
+    target_amount,
+    amount_difference,
+    status
+)
+SELECT
+    'campaign_spend_amount_staging_vs_warehouse',
+    NULL,
+    NULL,
+    NULL,
+    src.source_amount,
+    tgt.target_amount,
+    src.source_amount - tgt.target_amount,
+    CASE WHEN src.source_amount = tgt.target_amount THEN 'PASS' ELSE 'FAIL' END
+FROM
+    (
+        SELECT ROUND(COALESCE(SUM(spend_amount), 0)::NUMERIC, 2)::NUMERIC(18,2) AS source_amount
+        FROM staging.stg_gold_fact_campaign_spend_scd2
+    ) src,
+    (
+        SELECT ROUND(COALESCE(SUM(spend_amount), 0)::NUMERIC, 2)::NUMERIC(18,2) AS target_amount
+        FROM warehouse.fact_campaign_spend
+    ) tgt;
+
+INSERT INTO audit.reconciliation_report (
+    check_name,
+    source_count,
+    target_count,
+    count_difference,
+    source_amount,
+    target_amount,
+    amount_difference,
+    status
+)
+SELECT
+    'order_item_count_staging_vs_warehouse',
+    src.source_count,
+    tgt.target_count,
+    src.source_count - tgt.target_count,
+    NULL,
+    NULL,
+    NULL,
+    CASE WHEN src.source_count = tgt.target_count THEN 'PASS' ELSE 'FAIL' END
+FROM
+    (SELECT COUNT(*)::NUMERIC(18,2) AS source_count FROM staging.stg_gold_fact_order_items_scd2) src,
+    (SELECT COUNT(*)::NUMERIC(18,2) AS target_count FROM warehouse.fact_order_items) tgt;
+
+INSERT INTO audit.reconciliation_report (
+    check_name,
+    source_count,
+    target_count,
+    count_difference,
+    source_amount,
+    target_amount,
+    amount_difference,
+    status
+)
+SELECT
+    'order_item_revenue_staging_vs_warehouse',
+    NULL,
+    NULL,
+    NULL,
+    src.source_amount,
+    tgt.target_amount,
+    src.source_amount - tgt.target_amount,
+    CASE WHEN src.source_amount = tgt.target_amount THEN 'PASS' ELSE 'FAIL' END
+FROM
+    (
+        SELECT ROUND(COALESCE(SUM(line_amount), 0)::NUMERIC, 2)::NUMERIC(18,2) AS source_amount
+        FROM staging.stg_gold_fact_order_items_scd2
+    ) src,
+    (
+        SELECT ROUND(COALESCE(SUM(line_revenue), 0)::NUMERIC, 2)::NUMERIC(18,2) AS target_amount
+        FROM warehouse.fact_order_items
+    ) tgt;
+
+INSERT INTO audit.reconciliation_report (
+    check_name,
+    source_count,
+    target_count,
+    count_difference,
+    source_amount,
+    target_amount,
+    amount_difference,
+    status
+)
+SELECT
+    'web_event_count_staging_vs_warehouse',
+    src.source_count,
+    tgt.target_count,
+    src.source_count - tgt.target_count,
+    NULL,
+    NULL,
+    NULL,
+    CASE WHEN src.source_count = tgt.target_count THEN 'PASS' ELSE 'FAIL' END
+FROM
+    (SELECT COUNT(*)::NUMERIC(18,2) AS source_count FROM staging.stg_gold_fact_web_events) src,
+    (SELECT COUNT(*)::NUMERIC(18,2) AS target_count FROM warehouse.fact_web_events) tgt;
 
 INSERT INTO audit.reconciliation_report (
     check_name,
@@ -104,8 +207,8 @@ INSERT INTO audit.reconciliation_report (
 SELECT
     'null_customer_keys_in_fact_orders',
     0,
-    COUNT(*),
-    0 - COUNT(*),
+    COUNT(*)::NUMERIC(18,2),
+    0 - COUNT(*)::NUMERIC(18,2),
     NULL,
     NULL,
     NULL,
@@ -124,10 +227,32 @@ INSERT INTO audit.reconciliation_report (
     status
 )
 SELECT
+    'null_product_keys_in_fact_order_items',
+    0,
+    COUNT(*)::NUMERIC(18,2),
+    0 - COUNT(*)::NUMERIC(18,2),
+    NULL,
+    NULL,
+    NULL,
+    CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END
+FROM warehouse.fact_order_items
+WHERE product_sk IS NULL;
+
+INSERT INTO audit.reconciliation_report (
+    check_name,
+    source_count,
+    target_count,
+    count_difference,
+    source_amount,
+    target_amount,
+    amount_difference,
+    status
+)
+SELECT
     'duplicate_order_ids_in_warehouse',
     0,
-    COUNT(*),
-    0 - COUNT(*),
+    COUNT(*)::NUMERIC(18,2),
+    0 - COUNT(*)::NUMERIC(18,2),
     NULL,
     NULL,
     NULL,

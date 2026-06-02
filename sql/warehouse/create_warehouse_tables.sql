@@ -1166,10 +1166,9 @@ BEGIN
                     ) AS unit_price,
                     coalesce(warehouse.safe_numeric(r->>'discount_percent'), 0) AS discount_percent,
                     coalesce(
+                        warehouse.safe_numeric(r->>'line_amount'),
                         warehouse.safe_numeric(r->>'line_revenue'),
                         warehouse.safe_numeric(r->>'line_total'),
-                        warehouse.safe_numeric(r->>'cart_value'),
-                        warehouse.safe_numeric(r->>'discounted_price'),
                         0
                     ) AS source_line_revenue
                 FROM src
@@ -1291,6 +1290,7 @@ BEGIN
             base AS (
                 SELECT
                     coalesce(
+                        nullif(r->>'spend_id', ''),
                         nullif(r->>'campaign_spend_id', ''),
                         nullif(r->>'ad_spend_id', ''),
                         coalesce(nullif(r->>'campaign_id', ''), 'UNKNOWN')
