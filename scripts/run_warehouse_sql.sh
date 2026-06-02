@@ -7,7 +7,7 @@ RUN_MODE="${RUN_MODE:-docker}"
 
 PGCONTAINER="${PGCONTAINER:-project2_postgres}"
 PGHOST="${PGHOST:-localhost}"
-PGPORT="${PGPORT:-5433}"
+PGPORT="${PGPORT:-5434}"
 PGDATABASE="${PGDATABASE:-marketing_analytics}"
 PGUSER="${PGUSER:-project2}"
 
@@ -23,6 +23,8 @@ LOG_FILE="logs/warehouse/$(basename "$SQL_FILE" .sql)_$(date +%Y%m%d_%H%M%S).log
 echo "Running warehouse SQL"
 echo "SQL file : $SQL_FILE"
 echo "Mode     : $RUN_MODE"
+echo "Host     : $PGHOST"
+echo "Port     : $PGPORT"
 echo "Database : $PGDATABASE"
 echo "User     : $PGUSER"
 echo "Log file : $LOG_FILE"
