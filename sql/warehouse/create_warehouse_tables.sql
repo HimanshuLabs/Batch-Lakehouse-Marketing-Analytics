@@ -1057,8 +1057,8 @@ BEGIN
             )
             SELECT DISTINCT ON (b.order_id)
                 b.order_id,
-                coalesce(b.source_customer_sk, dc.customer_sk, 0) AS customer_sk,
-                coalesce(b.source_campaign_sk, dcamp.campaign_sk, 0) AS campaign_sk,
+                coalesce(dc.customer_sk, nullif(b.source_customer_sk, 0), 0) AS customer_sk,
+                coalesce(dcamp.campaign_sk, nullif(b.source_campaign_sk, 0), 0) AS campaign_sk,
                 warehouse.date_sk(b.order_ts::DATE) AS order_date_sk,
                 coalesce(dr.region_sk, 0) AS region_sk,
                 coalesce(dch.channel_sk, 0) AS channel_sk,
@@ -1182,12 +1182,12 @@ BEGIN
                 b.order_item_nk,
                 fo.order_sk,
                 b.order_id,
-                coalesce(b.source_customer_sk, fo.customer_sk, dc.customer_sk, 0) AS customer_sk,
-                coalesce(b.source_product_sk, dp.product_sk, 0) AS product_sk,
+                coalesce(nullif(fo.customer_sk, 0), dc.customer_sk, nullif(b.source_customer_sk, 0), 0) AS customer_sk,
+                coalesce(dp.product_sk, nullif(b.source_product_sk, 0), 0) AS product_sk,
                 coalesce(nullif(warehouse.date_sk(b.order_ts::DATE), 0), fo.order_date_sk, 0) AS order_date_sk,
                 coalesce(dr.region_sk, fo.region_sk, 0) AS region_sk,
                 coalesce(dch.channel_sk, fo.channel_sk, 0) AS channel_sk,
-                coalesce(b.order_ts, fo.order_timestamp) AS order_timestamp,
+                coalesce(fo.order_timestamp, b.order_ts) AS order_timestamp,
                 b.quantity,
                 b.unit_price,
                 b.discount_percent,
@@ -1203,8 +1203,8 @@ BEGIN
                 FROM warehouse.dim_customer dc
                 WHERE dc.customer_id = b.customer_id
                   AND (
-                    (b.order_ts IS NOT NULL AND b.order_ts >= dc.effective_from AND b.order_ts < dc.effective_to)
-                    OR (b.order_ts IS NULL AND dc.is_current)
+                    (coalesce(fo.order_timestamp, b.order_ts) IS NOT NULL AND coalesce(fo.order_timestamp, b.order_ts) >= dc.effective_from AND coalesce(fo.order_timestamp, b.order_ts) < dc.effective_to)
+                    OR (coalesce(fo.order_timestamp, b.order_ts) IS NULL AND dc.is_current)
                   )
                 ORDER BY dc.is_current DESC, dc.effective_from DESC
                 LIMIT 1
@@ -1214,8 +1214,8 @@ BEGIN
                 FROM warehouse.dim_product dp
                 WHERE dp.product_id = b.product_id
                   AND (
-                    (b.order_ts IS NOT NULL AND b.order_ts >= dp.effective_from AND b.order_ts < dp.effective_to)
-                    OR (b.order_ts IS NULL AND dp.is_current)
+                    (coalesce(fo.order_timestamp, b.order_ts) IS NOT NULL AND coalesce(fo.order_timestamp, b.order_ts) >= dp.effective_from AND coalesce(fo.order_timestamp, b.order_ts) < dp.effective_to)
+                    OR (coalesce(fo.order_timestamp, b.order_ts) IS NULL AND dp.is_current)
                   )
                 ORDER BY dp.is_current DESC, dp.effective_from DESC
                 LIMIT 1
@@ -1320,7 +1320,7 @@ BEGIN
             )
             SELECT DISTINCT ON (b.campaign_spend_nk)
                 b.campaign_spend_nk,
-                coalesce(b.source_campaign_sk, dc.campaign_sk, 0) AS campaign_sk,
+                coalesce(dc.campaign_sk, nullif(b.source_campaign_sk, 0), 0) AS campaign_sk,
                 warehouse.date_sk(b.spend_date) AS spend_date_sk,
                 coalesce(dr.region_sk, 0) AS region_sk,
                 coalesce(dch.channel_sk, 0) AS channel_sk,
@@ -1434,9 +1434,9 @@ BEGIN
             SELECT DISTINCT ON (b.event_id)
                 b.event_id,
                 b.session_id,
-                coalesce(b.source_customer_sk, dc.customer_sk, 0) AS customer_sk,
-                coalesce(b.source_product_sk, dp.product_sk, 0) AS product_sk,
-                coalesce(b.source_campaign_sk, dcamp.campaign_sk, 0) AS campaign_sk,
+                coalesce(dc.customer_sk, nullif(b.source_customer_sk, 0), 0) AS customer_sk,
+                coalesce(dp.product_sk, nullif(b.source_product_sk, 0), 0) AS product_sk,
+                coalesce(dcamp.campaign_sk, nullif(b.source_campaign_sk, 0), 0) AS campaign_sk,
                 warehouse.date_sk(b.event_ts::DATE) AS event_date_sk,
                 coalesce(dr.region_sk, 0) AS region_sk,
                 coalesce(dch.channel_sk, 0) AS channel_sk,
@@ -1573,6 +1573,8 @@ ON CONFLICT (conversion_nk) DO UPDATE SET
     conversion_value = EXCLUDED.conversion_value,
     warehouse_loaded_at = CURRENT_TIMESTAMP;
 
+
+-- ---------------------------------------------------------------------------
 -- ---------------------------------------------------------------------------
 -- Practical warehouse indexes
 -- ---------------------------------------------------------------------------
