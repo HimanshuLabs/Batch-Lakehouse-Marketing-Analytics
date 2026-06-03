@@ -22,7 +22,17 @@ env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/create_marts.sql
 echo "==> Running warehouse reconciliation"
 env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/reconciliation_report.sql
 
-echo "==> Final reconciliation status"
+echo "==> Final mart validation status"
+docker exec project2_postgres psql -U project2 -d marketing_analytics -c "
+SELECT
+    status,
+    COUNT(*) AS check_count
+FROM audit.v_latest_mart_validation_report
+GROUP BY status
+ORDER BY status;
+"
+
+echo "==> Final warehouse reconciliation status"
 docker exec project2_postgres psql -U project2 -d marketing_analytics -c "
 SELECT
     status,
