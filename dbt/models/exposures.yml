@@ -1,0 +1,46 @@
+version: 2
+
+exposures:
+  - name: executive_revenue_dashboard
+    label: "Executive Revenue Dashboard"
+    type: dashboard
+    maturity: high
+    url: "https://example.com/power-bi/executive-revenue-dashboard"
+    description: "Dashboard for daily revenue, customer value, product sales, and campaign performance."
+    depends_on:
+      - ref('mart_revenue_daily')
+      - ref('mart_customer_360')
+      - ref('mart_product_sales')
+      - ref('mart_campaign_performance')
+    owner:
+      name: "Data Engineering Portfolio"
+      email: "data-engineering@example.com"
+
+  - name: marketing_performance_report
+    label: "Marketing Performance Report"
+    type: dashboard
+    maturity: high
+    url: "https://example.com/power-bi/marketing-performance-report"
+    description: "Marketing reporting consumer for ROAS, funnel conversion, campaign spend, and web engagement."
+    depends_on:
+      - ref('mart_campaign_performance')
+      - ref('mart_marketing_funnel')
+      - ref('fact_campaign_spend')
+      - ref('fact_web_events')
+    owner:
+      name: "Data Engineering Portfolio"
+      email: "data-engineering@example.com"
+
+  - name: warehouse_reconciliation_report
+    label: "Warehouse Reconciliation Report"
+    type: analysis
+    maturity: high
+    description: "Audit-facing exposure proving warehouse outputs reconcile against lakehouse/staging inputs."
+    depends_on:
+      - ref('reconciliation_report')
+      - ref('fact_orders')
+      - ref('fact_order_items')
+      - ref('fact_campaign_spend')
+    owner:
+      name: "Data Engineering Portfolio"
+      email: "data-engineering@example.com"

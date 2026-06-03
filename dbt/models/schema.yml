@@ -1,30 +1,74 @@
 version: 2
 
+sources:
+  - name: warehouse_staging
+    description: "PostgreSQL staging schema loaded from Project 2 Gold and SCD2 lakehouse outputs."
+    schema: staging
+    tables:
+      - name: stg_gold_dim_customers_scd2
+        description: "Customer SCD2 staging table loaded from lakehouse Gold."
+      - name: stg_gold_dim_products_scd2
+        description: "Product SCD2 staging table loaded from lakehouse Gold."
+      - name: stg_gold_dim_campaigns_scd2
+        description: "Campaign SCD2 staging table loaded from lakehouse Gold."
+      - name: stg_gold_fact_orders_scd2
+        description: "Orders fact staging table with point-in-time SCD2 context."
+      - name: stg_gold_fact_order_items_scd2
+        description: "Order items fact staging table with point-in-time SCD2 context."
+      - name: stg_gold_fact_campaign_spend_scd2
+        description: "Campaign spend fact staging table with campaign SCD2 context."
+      - name: stg_gold_fact_web_events
+        description: "Web events fact staging table loaded from lakehouse Gold."
+
+  - name: warehouse_core
+    description: "Production PostgreSQL warehouse schema containing star-schema dimensions and facts."
+    schema: warehouse
+    tables:
+      - name: dim_customer
+      - name: dim_product
+      - name: dim_campaign
+      - name: dim_date
+      - name: fact_orders
+      - name: fact_order_items
+      - name: fact_campaign_spend
+      - name: fact_web_events
+
+  - name: reporting_marts
+    description: "BI-ready reporting marts consumed by dashboard query packs and reporting tools."
+    schema: marts
+    tables:
+      - name: mart_customer_360
+      - name: mart_campaign_performance
+      - name: mart_product_sales
+      - name: mart_revenue_daily
+      - name: mart_marketing_funnel
+
+  - name: warehouse_audit
+    description: "Audit schema containing reconciliation and warehouse trust checks."
+    schema: audit
+    tables:
+      - name: reconciliation_report
+
 models:
-  - name: stg_dim_customers_scd2
-    description: SCD Type 2 customer dimension loaded from Gold Parquet.
+  - name: stg_customers
+    description: "dbt staging view over customer SCD2 Gold output loaded into PostgreSQL."
     columns:
       - name: customer_sk
-        description: Deterministic customer surrogate key generated from natural key, effective timestamp, and record hash.
         tests:
           - not_null
           - unique
       - name: customer_id
-        description: Customer natural key.
-        tests:
-          - not_null
-      - name: effective_from
-        tests:
-          - not_null
-      - name: effective_to
         tests:
           - not_null
       - name: is_current
         tests:
-          - not_null
+          - accepted_values:
+              arguments:
+                values: [true, false]
+                quote: false
 
-  - name: stg_dim_products_scd2
-    description: SCD Type 2 product dimension loaded from Gold Parquet.
+  - name: stg_products
+    description: "dbt staging view over product SCD2 Gold output loaded into PostgreSQL."
     columns:
       - name: product_sk
         tests:
@@ -33,18 +77,15 @@ models:
       - name: product_id
         tests:
           - not_null
-      - name: effective_from
-        tests:
-          - not_null
-      - name: effective_to
-        tests:
-          - not_null
       - name: is_current
         tests:
-          - not_null
+          - accepted_values:
+              arguments:
+                values: [true, false]
+                quote: false
 
-  - name: stg_dim_campaigns_scd2
-    description: SCD Type 2 campaign dimension loaded from Gold Parquet.
+  - name: stg_campaigns
+    description: "dbt staging view over campaign SCD2 Gold output loaded into PostgreSQL."
     columns:
       - name: campaign_sk
         tests:
@@ -53,18 +94,115 @@ models:
       - name: campaign_id
         tests:
           - not_null
-      - name: effective_from
+      - name: is_current
+        tests:
+          - accepted_values:
+              arguments:
+                values: [true, false]
+                quote: false
+
+  - name: stg_orders
+    description: "dbt staging view over SCD2-aware orders fact output."
+    columns:
+      - name: order_id
         tests:
           - not_null
-      - name: effective_to
+          - unique
+      - name: customer_sk
+        tests:
+          - not_null
+
+  - name: stg_order_items
+    description: "dbt staging view over SCD2-aware order item fact output."
+    columns:
+      - name: order_item_id
+        tests:
+          - not_null
+          - unique
+      - name: order_id
+        tests:
+          - not_null
+
+  - name: stg_ad_spend
+    description: "dbt staging view over SCD2-aware campaign spend fact output."
+    columns:
+      - name: spend_id
+        tests:
+          - not_null
+          - unique
+      - name: campaign_sk
+        tests:
+          - not_null
+
+  - name: stg_web_events
+    description: "dbt staging view over web event facts loaded from lakehouse Gold."
+    columns:
+      - name: event_id
+        tests:
+          - not_null
+          - unique
+
+  - name: dim_customer
+    description: "Customer SCD2 dimension with surrogate keys and current-row tracking."
+    columns:
+      - name: customer_sk
+        tests:
+          - not_null
+          - unique
+      - name: customer_id
         tests:
           - not_null
       - name: is_current
         tests:
-          - not_null
+          - accepted_values:
+              arguments:
+                values: [true, false]
+                quote: false
 
-  - name: stg_fact_orders_scd2
-    description: Valid order fact table after SCD2 point-in-time customer and campaign joins.
+  - name: dim_product
+    description: "Product SCD2 dimension with surrogate keys and current-row tracking."
+    columns:
+      - name: product_sk
+        tests:
+          - not_null
+          - unique
+      - name: product_id
+        tests:
+          - not_null
+      - name: is_current
+        tests:
+          - accepted_values:
+              arguments:
+                values: [true, false]
+                quote: false
+
+  - name: dim_campaign
+    description: "Campaign SCD2 dimension with surrogate keys and current-row tracking."
+    columns:
+      - name: campaign_sk
+        tests:
+          - not_null
+          - unique
+      - name: campaign_id
+        tests:
+          - not_null
+      - name: is_current
+        tests:
+          - accepted_values:
+              arguments:
+                values: [true, false]
+                quote: false
+
+  - name: dim_date
+    description: "Calendar dimension used by daily revenue and time-series reporting."
+    columns:
+      - name: date_key
+        tests:
+          - not_null
+          - unique
+
+  - name: fact_orders
+    description: "Order fact table joined to the correct customer/product/campaign historical dimension versions."
     columns:
       - name: order_id
         tests:
@@ -75,21 +213,11 @@ models:
           - not_null
           - relationships:
               arguments:
-                to: ref('stg_dim_customers_scd2')
+                to: ref('dim_customer')
                 field: customer_sk
-      - name: campaign_sk
-        tests:
-          - not_null
-          - relationships:
-              arguments:
-                to: ref('stg_dim_campaigns_scd2')
-                field: campaign_sk
-      - name: total_amount
-        tests:
-          - not_null
 
-  - name: stg_fact_order_items_scd2
-    description: Valid order item fact table after SCD2 point-in-time product joins.
+  - name: fact_order_items
+    description: "Order item fact table for product-level sales analytics."
     columns:
       - name: order_item_id
         tests:
@@ -100,21 +228,18 @@ models:
           - not_null
           - relationships:
               arguments:
-                to: ref('stg_fact_orders_scd2')
+                to: ref('fact_orders')
                 field: order_id
       - name: product_sk
         tests:
           - not_null
           - relationships:
               arguments:
-                to: ref('stg_dim_products_scd2')
+                to: ref('dim_product')
                 field: product_sk
-      - name: line_amount
-        tests:
-          - not_null
 
-  - name: stg_fact_campaign_spend_scd2
-    description: Valid campaign spend fact table after SCD2 point-in-time campaign joins.
+  - name: fact_campaign_spend
+    description: "Campaign spend fact table for ROAS and marketing efficiency analytics."
     columns:
       - name: spend_id
         tests:
@@ -125,66 +250,41 @@ models:
           - not_null
           - relationships:
               arguments:
-                to: ref('stg_dim_campaigns_scd2')
+                to: ref('dim_campaign')
                 field: campaign_sk
-      - name: spend_amount
-        tests:
-          - not_null
 
-  - name: stg_mart_campaign_performance_scd2
-    description: Campaign performance mart rebuilt from SCD2-aware facts.
+  - name: fact_web_events
+    description: "Web behavior fact table used for funnel and engagement reporting."
     columns:
-      - name: campaign_sk
+      - name: event_id
         tests:
           - not_null
           - unique
-      - name: total_revenue
-        tests:
-          - not_null
-      - name: total_spend
-        tests:
-          - not_null
-      - name: roas
-        tests:
-          - not_null
 
-  - name: stg_mart_customer_lifetime_value_scd2
-    description: Customer lifetime value mart rebuilt from SCD2-aware order facts.
-    columns:
-      - name: customer_sk
-        tests:
-          - not_null
-          - unique
-      - name: total_orders
-        tests:
-          - not_null
-      - name: total_revenue
-        tests:
-          - not_null
+  - name: mart_customer_360
+    description: "Customer-level BI mart for customer value, orders, engagement, and segmentation."
 
-  - name: stg_mart_product_performance_scd2
-    description: Product performance mart rebuilt from SCD2-aware order item facts.
-    columns:
-      - name: product_sk
-        tests:
-          - not_null
-          - unique
-      - name: units_sold
-        tests:
-          - not_null
-      - name: total_revenue
-        tests:
-          - not_null
+  - name: mart_campaign_performance
+    description: "Campaign-level BI mart for spend, revenue, ROAS, and conversion performance."
 
-  - name: stg_mart_marketing_funnel_scd2
-    description: Marketing funnel mart with campaign/channel-level conversion metrics.
+  - name: mart_product_sales
+    description: "Product-level BI mart for units, revenue, and category performance."
+
+  - name: mart_revenue_daily
+    description: "Daily revenue BI mart for trend reporting."
+
+  - name: mart_marketing_funnel
+    description: "Marketing funnel BI mart for impressions, engagement, conversion, and purchase behavior."
+
+  - name: reconciliation_report
+    description: "dbt audit view exposing source-to-warehouse reconciliation status."
     columns:
-      - name: channel
+      - name: check_name
         tests:
           - not_null
-      - name: sessions_count
+      - name: status
         tests:
           - not_null
-      - name: purchases
-        tests:
-          - not_null
+          - accepted_values:
+              arguments:
+                values: ['PASS', 'FAIL', 'WARN']

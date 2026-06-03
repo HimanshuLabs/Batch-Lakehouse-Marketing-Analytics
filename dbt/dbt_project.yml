@@ -1,16 +1,39 @@
-name: batch_lakehouse_marketing_analytics
+name: marketing_lakehouse_warehouse
 version: "1.0.0"
 config-version: 2
 
-profile: batch_lakehouse_marketing_analytics
+profile: marketing_lakehouse_warehouse
 
 model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
 target-path: "target"
 clean-targets:
   - "target"
   - "dbt_packages"
 
 models:
-  batch_lakehouse_marketing_analytics:
+  marketing_lakehouse_warehouse:
+    +persist_docs:
+      relation: true
+      columns: true
+
     staging:
       +materialized: view
+      +schema: dbt_staging
+      +tags: ["staging", "contract"]
+
+    warehouse:
+      +materialized: view
+      +schema: dbt_warehouse
+      +tags: ["warehouse", "star_schema"]
+
+    marts:
+      +materialized: view
+      +schema: dbt_marts
+      +tags: ["marts", "reporting", "bi"]
+
+    audit:
+      +materialized: view
+      +schema: dbt_audit
+      +tags: ["audit", "reconciliation", "quality"]

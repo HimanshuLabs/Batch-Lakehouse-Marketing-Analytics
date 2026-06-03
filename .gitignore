@@ -88,3 +88,5 @@ tfplan
 
 # Warehouse runtime logs
 logs/warehouse/*.log
+dbt/profiles.yml
+logs/dbt/
