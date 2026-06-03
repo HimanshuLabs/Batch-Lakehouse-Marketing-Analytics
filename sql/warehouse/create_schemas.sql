@@ -1,3 +1,11 @@
+-- Airflow rerun safety:
+-- dbt creates views/models that depend on staging.stg_gold_* tables.
+-- The staging loader replaces those tables, so old dbt schemas must be removed first.
+DROP SCHEMA IF EXISTS dbt_audit CASCADE;
+DROP SCHEMA IF EXISTS dbt_marts CASCADE;
+DROP SCHEMA IF EXISTS dbt_warehouse CASCADE;
+DROP SCHEMA IF EXISTS dbt_staging CASCADE;
+
 /*
 PostgreSQL Warehouse Schema Layer
 ==================================

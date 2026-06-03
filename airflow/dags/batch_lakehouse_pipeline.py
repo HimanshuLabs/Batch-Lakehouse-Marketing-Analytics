@@ -132,6 +132,71 @@ with DAG(
         env=DEFAULT_ENV,
     )
 
+    create_postgresql_schemas = BashOperator(
+        task_id="create_postgresql_schemas",
+        bash_command=(
+            "set -euo pipefail\n"
+            "cd /home/manshu/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics\n"
+            "env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/create_schemas.sql"
+        ),
+        env=DEFAULT_ENV,
+    )
+
+    load_gold_scd2_to_staging = BashOperator(
+        task_id="load_gold_scd2_to_staging",
+        bash_command=(
+            "set -euo pipefail\n"
+            "cd /home/manshu/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics\n"
+            "if [ -f scripts/load_gold_to_postgres_staging.py ]; then\n"
+            "  source venv/bin/activate\n"
+            "  python scripts/load_gold_to_postgres_staging.py\n"
+            "else\n"
+            "  env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/load_gold_to_staging.sql\n"
+            "fi"
+        ),
+        env=DEFAULT_ENV,
+    )
+
+    build_warehouse_tables = BashOperator(
+        task_id="build_warehouse_tables",
+        bash_command=(
+            "set -euo pipefail\n"
+            "cd /home/manshu/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics\n"
+            "env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/create_warehouse_tables.sql"
+        ),
+        env=DEFAULT_ENV,
+    )
+
+    run_scd2_validation = BashOperator(
+        task_id="run_scd2_validation",
+        bash_command=(
+            "set -euo pipefail\n"
+            "cd /home/manshu/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics\n"
+            "env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/scd2_validation_queries.sql"
+        ),
+        env=DEFAULT_ENV,
+    )
+
+    run_warehouse_reconciliation = BashOperator(
+        task_id="run_warehouse_reconciliation",
+        bash_command=(
+            "set -euo pipefail\n"
+            "cd /home/manshu/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics\n"
+            "env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/reconciliation_report.sql"
+        ),
+        env=DEFAULT_ENV,
+    )
+
+    build_reporting_marts = BashOperator(
+        task_id="build_reporting_marts",
+        bash_command=(
+            "set -euo pipefail\n"
+            "cd /home/manshu/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics\n"
+            "env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/create_marts.sql"
+        ),
+        env=DEFAULT_ENV,
+    )
+
     dbt_run = BashOperator(
         task_id="dbt_run",
         bash_command=f"bash {RUNNER} dbt_run",
@@ -169,6 +234,12 @@ with DAG(
         >> point_in_time_fact_joins
         >> scd2_gold_marts
         >> scd2_duckdb_analytics
+        >> create_postgresql_schemas
+        >> load_gold_scd2_to_staging
+        >> build_warehouse_tables
+        >> run_scd2_validation
+        >> build_reporting_marts
+        >> run_warehouse_reconciliation
         >> dbt_run
         >> dbt_test
         >> dbt_docs

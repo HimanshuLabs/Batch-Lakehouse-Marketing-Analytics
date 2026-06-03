@@ -855,7 +855,7 @@ BEGIN
                             || coalesce(nullif(r->>'effective_from', ''), nullif(r->>'valid_from', ''), '1900-01-01')
                         )
                     ) AS campaign_sk,
-                    coalesce(nullif(r->>'campaign_id', ''), 'UNKNOWN') AS campaign_id,
+                    coalesce(nullif((warehouse.safe_numeric(r->>'campaign_id')::BIGINT)::TEXT, ''), nullif(r->>'campaign_id', ''), 'UNKNOWN') AS campaign_id,
                     coalesce(nullif(r->>'campaign_name', ''), nullif(r->>'name', '')) AS campaign_name,
                     coalesce(nullif(r->>'campaign_type', ''), nullif(r->>'type', ''), 'Unknown') AS campaign_type,
                     coalesce(nullif(r->>'channel', ''), nullif(r->>'marketing_channel', ''), nullif(r->>'traffic_source', ''), 'Unknown') AS channel,
@@ -1014,7 +1014,7 @@ BEGIN
                     warehouse.safe_bigint(r->>'customer_sk') AS source_customer_sk,
                     warehouse.safe_bigint(r->>'campaign_sk') AS source_campaign_sk,
                     coalesce(nullif(r->>'customer_id', ''), nullif(r->>'user_id', ''), 'UNKNOWN') AS customer_id,
-                    coalesce(nullif(r->>'campaign_id', ''), 'UNKNOWN') AS campaign_id,
+                    coalesce(nullif((warehouse.safe_numeric(r->>'campaign_id')::BIGINT)::TEXT, ''), nullif(r->>'campaign_id', ''), 'UNKNOWN') AS campaign_id,
                     coalesce(
                         warehouse.safe_timestamp(r->>'order_timestamp'),
                         warehouse.safe_timestamp(r->>'event_timestamp'),
@@ -1301,7 +1301,7 @@ BEGIN
                         'spend|' || md5(r::TEXT)
                     ) AS campaign_spend_nk,
                     warehouse.safe_bigint(r->>'campaign_sk') AS source_campaign_sk,
-                    coalesce(nullif(r->>'campaign_id', ''), 'UNKNOWN') AS campaign_id,
+                    coalesce(nullif((warehouse.safe_numeric(r->>'campaign_id')::BIGINT)::TEXT, ''), nullif(r->>'campaign_id', ''), 'UNKNOWN') AS campaign_id,
                     coalesce(warehouse.safe_date(r->>'spend_date'), warehouse.safe_date(r->>'date')) AS spend_date,
                     coalesce(nullif(r->>'city', ''), 'Unknown') AS city,
                     coalesce(nullif(r->>'state', ''), 'Unknown') AS state,
@@ -1363,6 +1363,171 @@ BEGIN
     END IF;
 END $$;
 
+-- ---------------------------------------------------------------------------
+-- Inferred late-arriving web-event dimension members
+-- ---------------------------------------------------------------------------
+-- Web events can contain natural keys that are not present in Gold/SCD2 dims.
+-- These rows create current inferred dimension members so facts do not collapse
+-- source-provided natural keys into the Unknown surrogate key.
+INSERT INTO warehouse.dim_customer (
+    customer_sk,
+    customer_id,
+    customer_name,
+    email,
+    gender,
+    age,
+    membership_tier,
+    loyalty_points,
+    preferred_language,
+    customer_segment,
+    is_prime_user,
+    home_city,
+    home_state,
+    country,
+    effective_from,
+    effective_to,
+    is_current,
+    source_updated_at,
+    scd_hash,
+    warehouse_loaded_at
+)
+SELECT
+    warehouse.deterministic_sk('web_event_customer', web.customer_id) AS customer_sk,
+    web.customer_id,
+    'Inferred Customer ' || web.customer_id AS customer_name,
+    NULL AS email,
+    'Unknown' AS gender,
+    NULL AS age,
+    'Unknown' AS membership_tier,
+    0 AS loyalty_points,
+    NULL AS preferred_language,
+    'Inferred Web Event Customer' AS customer_segment,
+    FALSE AS is_prime_user,
+    web.home_city,
+    'Unknown' AS home_state,
+    web.country,
+    TIMESTAMP '1900-01-01 00:00:00' AS effective_from,
+    TIMESTAMP '9999-12-31 00:00:00' AS effective_to,
+    TRUE AS is_current,
+    web.source_updated_at,
+    md5('inferred_web_event_customer|' || web.customer_id) AS scd_hash,
+    CURRENT_TIMESTAMP AS warehouse_loaded_at
+FROM (
+    SELECT DISTINCT ON (s.customer_id::TEXT)
+        s.customer_id::TEXT AS customer_id,
+        coalesce(nullif(s.city, ''), 'Unknown') AS home_city,
+        coalesce(nullif(s.country, ''), 'Unknown') AS country,
+        s.event_timestamp AS source_updated_at
+    FROM staging.stg_gold_fact_web_events s
+    WHERE s.customer_id IS NOT NULL
+    ORDER BY s.customer_id::TEXT, s.event_timestamp DESC NULLS LAST
+) web
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM warehouse.dim_customer d
+    WHERE d.customer_id = web.customer_id
+)
+ON CONFLICT DO NOTHING;
+
+INSERT INTO warehouse.dim_product (
+    product_sk,
+    product_id,
+    product_name,
+    category,
+    brand,
+    original_price,
+    current_price,
+    inventory_remaining,
+    effective_from,
+    effective_to,
+    is_current,
+    source_updated_at,
+    scd_hash,
+    warehouse_loaded_at
+)
+SELECT
+    warehouse.deterministic_sk('web_event_product', web.product_id) AS product_sk,
+    web.product_id,
+    coalesce(web.product_name, 'Inferred Product ' || web.product_id) AS product_name,
+    coalesce(web.category, 'Unknown') AS category,
+    'Unknown' AS brand,
+    NULL AS original_price,
+    NULL AS current_price,
+    NULL AS inventory_remaining,
+    TIMESTAMP '1900-01-01 00:00:00' AS effective_from,
+    TIMESTAMP '9999-12-31 00:00:00' AS effective_to,
+    TRUE AS is_current,
+    web.source_updated_at,
+    md5('inferred_web_event_product|' || web.product_id) AS scd_hash,
+    CURRENT_TIMESTAMP AS warehouse_loaded_at
+FROM (
+    SELECT DISTINCT ON (s.product_id::TEXT)
+        s.product_id::TEXT AS product_id,
+        nullif(s.product_name, '') AS product_name,
+        nullif(s.category, '') AS category,
+        s.event_timestamp AS source_updated_at
+    FROM staging.stg_gold_fact_web_events s
+    WHERE s.product_id IS NOT NULL
+    ORDER BY s.product_id::TEXT, s.event_timestamp DESC NULLS LAST
+) web
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM warehouse.dim_product d
+    WHERE d.product_id = web.product_id
+)
+ON CONFLICT DO NOTHING;
+
+INSERT INTO warehouse.dim_campaign (
+    campaign_sk,
+    campaign_id,
+    campaign_name,
+    campaign_type,
+    channel,
+    traffic_source,
+    target_segment,
+    campaign_start_date,
+    campaign_end_date,
+    budget,
+    effective_from,
+    effective_to,
+    is_current,
+    source_updated_at,
+    scd_hash,
+    warehouse_loaded_at
+)
+SELECT
+    warehouse.deterministic_sk('web_event_campaign', web.campaign_id) AS campaign_sk,
+    web.campaign_id,
+    'Inferred Campaign ' || web.campaign_id AS campaign_name,
+    'inferred_web_event' AS campaign_type,
+    coalesce(web.traffic_source, 'Unknown') AS channel,
+    coalesce(web.traffic_source, 'Unknown') AS traffic_source,
+    'Unknown' AS target_segment,
+    NULL AS campaign_start_date,
+    NULL AS campaign_end_date,
+    NULL AS budget,
+    TIMESTAMP '1900-01-01 00:00:00' AS effective_from,
+    TIMESTAMP '9999-12-31 00:00:00' AS effective_to,
+    TRUE AS is_current,
+    web.source_updated_at,
+    md5('inferred_web_event_campaign|' || web.campaign_id) AS scd_hash,
+    CURRENT_TIMESTAMP AS warehouse_loaded_at
+FROM (
+    SELECT DISTINCT ON ((s.campaign_id::BIGINT)::TEXT)
+        (s.campaign_id::BIGINT)::TEXT AS campaign_id,
+        nullif(s.traffic_source, '') AS traffic_source,
+        s.event_timestamp AS source_updated_at
+    FROM staging.stg_gold_fact_web_events s
+    WHERE s.campaign_id IS NOT NULL
+    ORDER BY (s.campaign_id::BIGINT)::TEXT, s.event_timestamp DESC NULLS LAST
+) web
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM warehouse.dim_campaign d
+    WHERE d.campaign_id = web.campaign_id
+)
+ON CONFLICT DO NOTHING;
+
 DO $$
 DECLARE
     source_table TEXT;
@@ -1389,7 +1554,7 @@ BEGIN
                     warehouse.safe_bigint(r->>'campaign_sk') AS source_campaign_sk,
                     coalesce(nullif(r->>'customer_id', ''), nullif(r->>'user_id', ''), 'UNKNOWN') AS customer_id,
                     coalesce(nullif(r->>'product_id', ''), 'UNKNOWN') AS product_id,
-                    coalesce(nullif(r->>'campaign_id', ''), 'UNKNOWN') AS campaign_id,
+                    coalesce(nullif((warehouse.safe_numeric(r->>'campaign_id')::BIGINT)::TEXT, ''), nullif(r->>'campaign_id', ''), 'UNKNOWN') AS campaign_id,
                     coalesce(warehouse.safe_timestamp(r->>'event_timestamp'), warehouse.safe_timestamp(r->>'event_time')) AS event_ts,
                     coalesce(nullif(r->>'city', ''), nullif(r->>'home_city', ''), 'Unknown') AS city,
                     coalesce(nullif(r->>'state', ''), nullif(r->>'home_state', ''), 'Unknown') AS state,
@@ -1465,33 +1630,45 @@ BEGIN
                 SELECT customer_sk
                 FROM warehouse.dim_customer dc
                 WHERE dc.customer_id = b.customer_id
-                  AND (
-                    (b.event_ts IS NOT NULL AND b.event_ts >= dc.effective_from AND b.event_ts < dc.effective_to)
-                    OR (b.event_ts IS NULL AND dc.is_current)
-                  )
-                ORDER BY dc.is_current DESC, dc.effective_from DESC
+                ORDER BY
+                    CASE
+                        WHEN b.event_ts IS NOT NULL
+                         AND b.event_ts >= dc.effective_from
+                         AND b.event_ts < dc.effective_to THEN 1
+                        WHEN dc.is_current THEN 2
+                        ELSE 3
+                    END,
+                    dc.effective_from DESC
                 LIMIT 1
             ) dc ON TRUE
             LEFT JOIN LATERAL (
                 SELECT product_sk
                 FROM warehouse.dim_product dp
                 WHERE dp.product_id = b.product_id
-                  AND (
-                    (b.event_ts IS NOT NULL AND b.event_ts >= dp.effective_from AND b.event_ts < dp.effective_to)
-                    OR (b.event_ts IS NULL AND dp.is_current)
-                  )
-                ORDER BY dp.is_current DESC, dp.effective_from DESC
+                ORDER BY
+                    CASE
+                        WHEN b.event_ts IS NOT NULL
+                         AND b.event_ts >= dp.effective_from
+                         AND b.event_ts < dp.effective_to THEN 1
+                        WHEN dp.is_current THEN 2
+                        ELSE 3
+                    END,
+                    dp.effective_from DESC
                 LIMIT 1
             ) dp ON TRUE
             LEFT JOIN LATERAL (
                 SELECT campaign_sk
                 FROM warehouse.dim_campaign dcamp
                 WHERE dcamp.campaign_id = b.campaign_id
-                  AND (
-                    (b.event_ts IS NOT NULL AND b.event_ts >= dcamp.effective_from AND b.event_ts < dcamp.effective_to)
-                    OR (b.event_ts IS NULL AND dcamp.is_current)
-                  )
-                ORDER BY dcamp.is_current DESC, dcamp.effective_from DESC
+                ORDER BY
+                    CASE
+                        WHEN b.event_ts IS NOT NULL
+                         AND b.event_ts >= dcamp.effective_from
+                         AND b.event_ts < dcamp.effective_to THEN 1
+                        WHEN dcamp.is_current THEN 2
+                        ELSE 3
+                    END,
+                    dcamp.effective_from DESC
                 LIMIT 1
             ) dcamp ON TRUE
             LEFT JOIN warehouse.dim_region dr
