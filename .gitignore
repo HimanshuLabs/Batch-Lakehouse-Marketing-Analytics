@@ -90,3 +90,4 @@ tfplan
 logs/warehouse/*.log
 dbt/profiles.yml
 logs/dbt/
+.airflow/
