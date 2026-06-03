@@ -12,3 +12,4 @@ dbt-duckdb==1.9.6
 
 # Warehouse staging loader dependencies
 psycopg[binary]==3.3.4
+psycopg2-binary
