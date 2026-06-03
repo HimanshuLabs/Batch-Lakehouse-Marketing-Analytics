@@ -1,0 +1,13 @@
+marketing_lakehouse_warehouse:
+  target: local
+  outputs:
+    local:
+      type: postgres
+      host: "{{ env_var('WAREHOUSE_DB_HOST', 'localhost') }}"
+      user: "{{ env_var('WAREHOUSE_DB_USER', 'project2') }}"
+      password: "{{ env_var('WAREHOUSE_DB_PASSWORD', 'project2') }}"
+      port: "{{ env_var('WAREHOUSE_DB_PORT', '5434') | as_number }}"
+      dbname: "{{ env_var('WAREHOUSE_DB_NAME', 'marketing_analytics') }}"
+      schema: dbt
+      threads: 4
+      connect_timeout: 10
