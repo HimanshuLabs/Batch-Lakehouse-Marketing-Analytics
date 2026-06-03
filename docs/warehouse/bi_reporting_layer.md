@@ -29,3 +29,43 @@ warehouse star schema
 marts views
         ↓
 dashboard query pack / BI tool
+
+---
+
+# Dashboard Query Pack
+
+SQL file:
+
+~~~text
+sql/warehouse/dashboard_query_pack.sql
+~~~
+
+## Query list
+
+| # | Query | Source |
+|---|---|---|
+| 1 | Daily Revenue Trend | `marts.mart_revenue_daily` |
+| 2 | Revenue by State | `marts.mart_customer_360` |
+| 3 | Top Customers by Lifetime Value | `marts.mart_customer_360` |
+| 4 | Campaign ROAS | `marts.mart_campaign_performance` |
+| 5 | Product Category Performance | `marts.mart_product_sales` |
+| 6 | Customer Segment Performance | `marts.mart_customer_360` |
+| 7 | Marketing Funnel Conversion | `marts.mart_marketing_funnel` |
+| 8 | Repeat Purchase Rate | `marts.mart_customer_360` |
+| 9 | Average Order Value | `marts.mart_revenue_daily` |
+| 10 | Revenue Reconciliation | `audit.reconciliation_report` |
+
+## Validation
+
+~~~bash
+env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/dashboard_query_pack.sql \
+  2>&1 | tee logs/warehouse/dashboard_query_pack_run.log
+
+grep -n "ERROR:" logs/warehouse/dashboard_query_pack_run.log || echo "No SQL error found"
+~~~
+
+Expected result:
+
+~~~text
+No SQL error found
+~~~
