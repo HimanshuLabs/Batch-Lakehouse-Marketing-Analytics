@@ -237,7 +237,7 @@ BEGIN
         'Gold order item count equals warehouse fact_order_items count',
         'Gold-to-warehouse count',
         COALESCE(source_table, 'missing Gold order item staging table'),
-        'warehouse.fact_order_items',
+        'warehouse.fact_order_items joined to warehouse.dim_product excluding UNKNOWN product',
         'order_item_count',
         'COUNT',
         source_value,
@@ -375,23 +375,19 @@ BEGIN
     END IF;
 
     IF to_regclass('staging.stg_gold_fact_web_events') IS NOT NULL THEN
-        SELECT COALESCE(source_value, 0) + COUNT(*)::NUMERIC
-        INTO source_value
-        FROM (
-            SELECT DISTINCT
-                warehouse.normalized_natural_key(
-                    COALESCE(to_jsonb(src)->>'customer_id', to_jsonb(src)->>'user_id')
-                ) AS customer_id_norm
-            FROM staging.stg_gold_fact_web_events src
-        ) web_keys
-        WHERE customer_id_norm IS NOT NULL
-          AND NOT EXISTS (
-              SELECT 1
-              FROM warehouse.dim_customer dc
-              WHERE dc.scd_hash NOT LIKE 'INFERRED_WEB_EVENT_CUSTOMER|%%'
-                AND dc.customer_sk <> 0
-                AND warehouse.normalized_natural_key(dc.customer_id) = web_keys.customer_id_norm
-          );
+        SELECT COUNT(*)::NUMERIC
+    INTO source_value
+    FROM (
+        SELECT DISTINCT customer_id::TEXT AS customer_id
+        FROM staging.stg_gold_dim_customers_scd2
+        WHERE customer_id IS NOT NULL
+
+        UNION
+
+        SELECT DISTINCT customer_id::TEXT AS customer_id
+        FROM staging.stg_gold_fact_web_events
+        WHERE customer_id IS NOT NULL
+    ) expected_customers;
     END IF;
 
     SELECT COUNT(*)::NUMERIC
@@ -427,21 +423,19 @@ BEGIN
     END IF;
 
     IF to_regclass('staging.stg_gold_fact_web_events') IS NOT NULL THEN
-        SELECT COALESCE(source_value, 0) + COUNT(*)::NUMERIC
-        INTO source_value
-        FROM (
-            SELECT DISTINCT
-                warehouse.normalized_natural_key(to_jsonb(src)->>'product_id') AS product_id_norm
-            FROM staging.stg_gold_fact_web_events src
-        ) web_keys
-        WHERE product_id_norm IS NOT NULL
-          AND NOT EXISTS (
-              SELECT 1
-              FROM warehouse.dim_product dp
-              WHERE dp.scd_hash NOT LIKE 'INFERRED_WEB_EVENT_PRODUCT|%%'
-                AND dp.product_sk <> 0
-                AND warehouse.normalized_natural_key(dp.product_id) = web_keys.product_id_norm
-          );
+        SELECT COUNT(*)::NUMERIC
+    INTO source_value
+    FROM (
+        SELECT DISTINCT product_id::TEXT AS product_id
+        FROM staging.stg_gold_dim_products_scd2
+        WHERE product_id IS NOT NULL
+
+        UNION
+
+        SELECT DISTINCT product_id::TEXT AS product_id
+        FROM staging.stg_gold_fact_web_events
+        WHERE product_id IS NOT NULL
+    ) expected_products;
     END IF;
 
     SELECT COUNT(*)::NUMERIC
@@ -477,21 +471,24 @@ BEGIN
     END IF;
 
     IF to_regclass('staging.stg_gold_fact_web_events') IS NOT NULL THEN
-        SELECT COALESCE(source_value, 0) + COUNT(*)::NUMERIC
-        INTO source_value
-        FROM (
-            SELECT DISTINCT
-                warehouse.normalized_natural_key(to_jsonb(src)->>'campaign_id') AS campaign_id_norm
-            FROM staging.stg_gold_fact_web_events src
-        ) web_keys
-        WHERE campaign_id_norm IS NOT NULL
-          AND NOT EXISTS (
-              SELECT 1
-              FROM warehouse.dim_campaign dc
-              WHERE dc.scd_hash NOT LIKE 'INFERRED_WEB_EVENT_CAMPAIGN|%%'
-                AND dc.campaign_sk <> 0
-                AND warehouse.normalized_natural_key(dc.campaign_id) = web_keys.campaign_id_norm
-          );
+        SELECT COUNT(*)::NUMERIC
+    INTO source_value
+    FROM (
+        SELECT DISTINCT campaign_id::TEXT AS campaign_id
+        FROM staging.stg_gold_dim_campaigns_scd2
+        WHERE campaign_id IS NOT NULL
+
+        UNION
+
+        SELECT DISTINCT
+            CASE
+                WHEN campaign_id = FLOOR(campaign_id)
+                    THEN campaign_id::BIGINT::TEXT
+                ELSE campaign_id::TEXT
+            END AS campaign_id
+        FROM staging.stg_gold_fact_web_events
+        WHERE campaign_id IS NOT NULL
+    ) expected_campaigns;
     END IF;
 
     SELECT COUNT(*)::NUMERIC
@@ -795,9 +792,12 @@ BEGIN
         'Compares fact_orders.net_revenue to mart_revenue_daily.net_revenue.'
     );
 
-    SELECT ROUND(COALESCE(SUM(line_revenue), 0)::NUMERIC, 2)
+    SELECT ROUND(COALESCE(SUM(foi.line_revenue), 0)::NUMERIC, 2)
     INTO source_value
-    FROM warehouse.fact_order_items;
+    FROM warehouse.fact_order_items foi
+    JOIN warehouse.dim_product dp
+        ON foi.product_sk = dp.product_sk
+    WHERE dp.product_id <> 'UNKNOWN';
 
     SELECT ROUND(COALESCE(SUM(product_revenue), 0)::NUMERIC, 2)
     INTO target_value
@@ -805,7 +805,7 @@ BEGIN
 
     PERFORM audit.record_reconciliation_check(
         run_id,
-        'Mart product revenue equals warehouse fact_order_items revenue',
+        'Mart product revenue equals BI-visible warehouse fact_order_items revenue',
         'Mart-to-fact amount',
         'warehouse.fact_order_items',
         'marts.mart_product_sales',
@@ -815,7 +815,7 @@ BEGIN
         target_value,
         0.01,
         checked_time,
-        'Compares fact_order_items.line_revenue to mart_product_sales.product_revenue.'
+        'Compares BI-visible fact_order_items.line_revenue to mart_product_sales.product_revenue, excluding UNKNOWN product rows because the product mart is business-facing.'
     );
 END $$;
 
