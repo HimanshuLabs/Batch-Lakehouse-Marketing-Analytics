@@ -64,6 +64,7 @@ jobs:
         run: |
           mkdir -p data/dbt
           cd dbt
+          cp profiles.yml.example profiles.yml
           dbt parse --profiles-dir .
 
   terraform-validation:
