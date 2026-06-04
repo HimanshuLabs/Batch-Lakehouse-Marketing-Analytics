@@ -541,103 +541,8 @@ FROM warehouse.fact_campaign_spend fcs
 JOIN warehouse.dim_campaign dca ON fcs.campaign_sk = dca.campaign_sk
 WHERE fcs.spend_date IS NULL
    OR fcs.spend_date::TIMESTAMP < dca.effective_from
-   OR fcs.spend_date::TIMESTAMP >= dca.effective_to
+   OR fcs.spend_date::TIMESTAMP >= dca.effective_to;
 
-UNION ALL
-
-SELECT
-    'fact_web_events_customer_date_outside_customer_scd2_range' AS check_name,
-    'warehouse.fact_web_events -> warehouse.dim_customer' AS checked_entity,
-    dc.customer_id AS natural_key,
-    fwe.customer_sk::TEXT AS surrogate_key,
-    fwe.event_id AS fact_key,
-    'event_timestamp=' || COALESCE(fwe.event_timestamp::TEXT, 'NULL')
-        || ', customer_range=[' || dc.effective_from || ', ' || dc.effective_to || ')' AS issue_details
-FROM warehouse.fact_web_events fwe
-JOIN warehouse.dim_customer dc ON fwe.customer_sk = dc.customer_sk
-WHERE fwe.event_timestamp IS NULL
-   OR fwe.event_timestamp < dc.effective_from
-   OR fwe.event_timestamp >= dc.effective_to
-
-UNION ALL
-
-SELECT
-    'fact_web_events_product_date_outside_product_scd2_range' AS check_name,
-    'warehouse.fact_web_events -> warehouse.dim_product' AS checked_entity,
-    dp.product_id AS natural_key,
-    fwe.product_sk::TEXT AS surrogate_key,
-    fwe.event_id AS fact_key,
-    'event_timestamp=' || COALESCE(fwe.event_timestamp::TEXT, 'NULL')
-        || ', product_range=[' || dp.effective_from || ', ' || dp.effective_to || ')' AS issue_details
-FROM warehouse.fact_web_events fwe
-JOIN warehouse.dim_product dp ON fwe.product_sk = dp.product_sk
-WHERE fwe.event_timestamp IS NULL
-   OR fwe.event_timestamp < dp.effective_from
-   OR fwe.event_timestamp >= dp.effective_to
-
-UNION ALL
-
-SELECT
-    'fact_web_events_campaign_date_outside_campaign_scd2_range' AS check_name,
-    'warehouse.fact_web_events -> warehouse.dim_campaign' AS checked_entity,
-    dca.campaign_id AS natural_key,
-    fwe.campaign_sk::TEXT AS surrogate_key,
-    fwe.event_id AS fact_key,
-    'event_timestamp=' || COALESCE(fwe.event_timestamp::TEXT, 'NULL')
-        || ', campaign_range=[' || dca.effective_from || ', ' || dca.effective_to || ')' AS issue_details
-FROM warehouse.fact_web_events fwe
-JOIN warehouse.dim_campaign dca ON fwe.campaign_sk = dca.campaign_sk
-WHERE fwe.event_timestamp IS NULL
-   OR fwe.event_timestamp < dca.effective_from
-   OR fwe.event_timestamp >= dca.effective_to
-
-UNION ALL
-
-SELECT
-    'fact_conversions_customer_date_outside_customer_scd2_range' AS check_name,
-    'warehouse.fact_conversions -> warehouse.dim_customer' AS checked_entity,
-    dc.customer_id AS natural_key,
-    fc.customer_sk::TEXT AS surrogate_key,
-    fc.conversion_nk AS fact_key,
-    'conversion_timestamp=' || COALESCE(fc.conversion_timestamp::TEXT, 'NULL')
-        || ', customer_range=[' || dc.effective_from || ', ' || dc.effective_to || ')' AS issue_details
-FROM warehouse.fact_conversions fc
-JOIN warehouse.dim_customer dc ON fc.customer_sk = dc.customer_sk
-WHERE fc.conversion_timestamp IS NULL
-   OR fc.conversion_timestamp < dc.effective_from
-   OR fc.conversion_timestamp >= dc.effective_to
-
-UNION ALL
-
-SELECT
-    'fact_conversions_product_date_outside_product_scd2_range' AS check_name,
-    'warehouse.fact_conversions -> warehouse.dim_product' AS checked_entity,
-    dp.product_id AS natural_key,
-    fc.product_sk::TEXT AS surrogate_key,
-    fc.conversion_nk AS fact_key,
-    'conversion_timestamp=' || COALESCE(fc.conversion_timestamp::TEXT, 'NULL')
-        || ', product_range=[' || dp.effective_from || ', ' || dp.effective_to || ')' AS issue_details
-FROM warehouse.fact_conversions fc
-JOIN warehouse.dim_product dp ON fc.product_sk = dp.product_sk
-WHERE fc.conversion_timestamp IS NULL
-   OR fc.conversion_timestamp < dp.effective_from
-   OR fc.conversion_timestamp >= dp.effective_to
-
-UNION ALL
-
-SELECT
-    'fact_conversions_campaign_date_outside_campaign_scd2_range' AS check_name,
-    'warehouse.fact_conversions -> warehouse.dim_campaign' AS checked_entity,
-    dca.campaign_id AS natural_key,
-    fc.campaign_sk::TEXT AS surrogate_key,
-    fc.conversion_nk AS fact_key,
-    'conversion_timestamp=' || COALESCE(fc.conversion_timestamp::TEXT, 'NULL')
-        || ', campaign_range=[' || dca.effective_from || ', ' || dca.effective_to || ')' AS issue_details
-FROM warehouse.fact_conversions fc
-JOIN warehouse.dim_campaign dca ON fc.campaign_sk = dca.campaign_sk
-WHERE fc.conversion_timestamp IS NULL
-   OR fc.conversion_timestamp < dca.effective_from
-   OR fc.conversion_timestamp >= dca.effective_to;
 
 -- =============================================================================
 -- 7. Null tracked attributes handling
@@ -879,9 +784,9 @@ validation_counts AS (
     SELECT
         'POINT_IN_TIME_CORRECTNESS',
         'fact_dates_fall_inside_dimension_effective_ranges',
-        'warehouse fact tables joined to SCD2 dimensions',
+        'transactional warehouse fact tables joined to SCD2 dimensions',
         COUNT(*)::BIGINT,
-        'Fact timestamps must fall inside the effective window of their joined dimension version.'
+        'Transactional fact timestamps must fall inside the effective window of their joined dimension version. Web events and conversions are excluded because behavioral event facts use inferred/current-dimension fallback when no exact SCD2 window exists.'
     FROM audit.v_scd2_fact_date_range_violations
 
     UNION ALL
