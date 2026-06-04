@@ -1,0 +1,42 @@
+{
+  "generated_at": "2026-06-04T22:19:27+00:00",
+  "export_type": "power_bi_service_csv_demo",
+  "source_system": "postgresql_warehouse_marts",
+  "records": [
+    {
+      "table_name": "marts.mart_revenue_daily",
+      "csv_file_path": "exports/power_bi/revenue_daily.csv",
+      "row_count": 121,
+      "exported_at": "2026-06-04T22:19:27+00:00",
+      "status": "SUCCESS"
+    },
+    {
+      "table_name": "marts.mart_campaign_performance",
+      "csv_file_path": "exports/power_bi/campaign_performance.csv",
+      "row_count": 39,
+      "exported_at": "2026-06-04T22:19:27+00:00",
+      "status": "SUCCESS"
+    },
+    {
+      "table_name": "marts.mart_product_sales",
+      "csv_file_path": "exports/power_bi/product_sales.csv",
+      "row_count": 148,
+      "exported_at": "2026-06-04T22:19:27+00:00",
+      "status": "SUCCESS"
+    },
+    {
+      "table_name": "marts.mart_customer_360",
+      "csv_file_path": "exports/power_bi/customer_360.csv",
+      "row_count": 500,
+      "exported_at": "2026-06-04T22:19:27+00:00",
+      "status": "SUCCESS"
+    },
+    {
+      "table_name": "marts.mart_marketing_funnel",
+      "csv_file_path": "exports/power_bi/marketing_funnel.csv",
+      "row_count": 6910,
+      "exported_at": "2026-06-04T22:19:27+00:00",
+      "status": "SUCCESS"
+    }
+  ]
+}
