@@ -91,3 +91,4 @@ logs/warehouse/*.log
 dbt/profiles.yml
 logs/dbt/
 .airflow/
+scripts/airflow_local_env.sh
