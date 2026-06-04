@@ -92,3 +92,5 @@ dbt/profiles.yml
 logs/dbt/
 .airflow/
 scripts/airflow_local_env.sh
+venv-airflow/
+venv-dbt/
