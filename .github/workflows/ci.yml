@@ -1,4 +1,4 @@
-name: Lakehouse CI
+name: Analytics Platform CI
 
 on:
   push:
@@ -13,6 +13,18 @@ permissions:
   contents: read
 
 jobs:
+  repository-guardrails:
+    name: Repository guardrails
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Validate required files and repository guardrails
+        run: |
+          bash scripts/validate_required_files.sh
+
   python-static-validation:
     name: Python and shell validation
     runs-on: ubuntu-latest
@@ -30,16 +42,54 @@ jobs:
         run: |
           python --version
 
-      - name: Compile Python files
+      - name: Compile Python source files
         run: |
-          python -m compileall -q spark-batch sql airflow/dags
+          set -euo pipefail
+
+          python -m compileall -q \
+            data-generator \
+            spark-batch \
+            scripts \
+            sql \
+            airflow/dags
 
       - name: Validate shell scripts
         run: |
-          bash -n scripts/run_airflow_task.sh
-          if [ -f create_power_bi_assets.sh ]; then
-            bash -n create_power_bi_assets.sh
-          fi
+          set -euo pipefail
+
+          shopt -s nullglob
+          scripts_found=0
+
+          for script_path in scripts/*.sh; do
+            scripts_found=1
+            test -s "$script_path" || {
+              echo "Empty shell script: $script_path"
+              exit 1
+            }
+            bash -n "$script_path"
+          done
+
+          test "$scripts_found" -eq 1 || {
+            echo "No shell scripts found under scripts/"
+            exit 1
+          }
+
+  warehouse-sql-validation:
+    name: Warehouse SQL validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Validate warehouse SQL assets
+        run: |
+          python scripts/validate_sql_assets.py
 
   dbt-validation:
     name: dbt project validation
@@ -57,15 +107,145 @@ jobs:
 
       - name: Install dbt
         run: |
+          set -euo pipefail
+
           python -m pip install --upgrade "pip>=25,<26" setuptools wheel
           python -m pip install dbt-core==1.10.15 dbt-postgres==1.10.0 dbt-duckdb==1.9.6
 
-      - name: Validate dbt project parse
+      - name: Validate dbt project structure
         run: |
+          set -euo pipefail
+
+          test -s dbt/dbt_project.yml
+          test -s dbt/profiles.yml.example
+          test -s dbt/models/schema.yml
+          test -s dbt/models/exposures.yml
+          test -d dbt/models/staging
+          test -d dbt/models/warehouse
+          test -d dbt/models/marts
+          test -d dbt/models/audit
+
+          if git ls-files | grep -E '^dbt/profiles\.yml$|^dbt/(target|dbt_packages)/'; then
+            echo "dbt runtime file/folder is tracked. Remove it from Git."
+            exit 1
+          fi
+
+      - name: Validate dbt parse
+        run: |
+          set -euo pipefail
+
           mkdir -p data/dbt
           cd dbt
           cp profiles.yml.example profiles.yml
-          dbt parse --profiles-dir .
+          dbt parse --profiles-dir . --no-partial-parse
+
+      - name: Validate dbt compile when possible
+        run: |
+          set -euo pipefail
+
+          cd dbt
+
+          if dbt compile --profiles-dir . --no-partial-parse; then
+            echo "dbt compile passed."
+          else
+            echo "dbt compile could not run in lightweight CI without a live warehouse."
+            echo "dbt parse already passed, so project syntax and graph validity are checked."
+          fi
+
+      - name: Remove dbt runtime files from CI workspace
+        if: always()
+        run: |
+          rm -rf dbt/target dbt/dbt_packages dbt/profiles.yml
+
+  airflow-validation:
+    name: Airflow DAG validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Validate Airflow DAG file exists
+        run: |
+          set -euo pipefail
+
+          test -d airflow/dags
+          test -s airflow/dags/batch_lakehouse_pipeline.py
+
+      - name: Compile Airflow DAG source
+        run: |
+          set -euo pipefail
+
+          python -m py_compile airflow/dags/batch_lakehouse_pipeline.py
+
+      - name: Static-check Airflow DAG definition
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          from pathlib import Path
+          import ast
+          import sys
+
+          dag_path = Path("airflow/dags/batch_lakehouse_pipeline.py")
+          source = dag_path.read_text(encoding="utf-8")
+
+          errors = []
+
+          try:
+              tree = ast.parse(source, filename=str(dag_path))
+          except SyntaxError as exc:
+              print(exc)
+              sys.exit(1)
+
+          if "batch_lakehouse_marketing_analytics" not in source:
+              errors.append("Expected DAG id text not found: batch_lakehouse_marketing_analytics")
+
+          airflow_markers = ("DAG", "dag", "BashOperator", "PythonOperator", "EmptyOperator")
+          if not any(marker in source for marker in airflow_markers):
+              errors.append("No obvious Airflow DAG/operator marker found.")
+
+          assigned_names = [
+              node.targets[0].id
+              for node in ast.walk(tree)
+              if isinstance(node, ast.Assign)
+              and node.targets
+              and isinstance(node.targets[0], ast.Name)
+          ]
+
+          if not assigned_names:
+              errors.append("No assigned task-like objects found in DAG file.")
+
+          if errors:
+              print("Airflow static validation failed:")
+              for error in errors:
+                  print(f"- {error}")
+              sys.exit(1)
+
+          print("Airflow DAG source validation passed.")
+          PY
+
+  power-bi-artifact-validation:
+    name: Power BI artifact validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Validate Power BI exports, manifest, docs, and screenshots
+        run: |
+          python scripts/validate_powerbi_assets.py
 
   terraform-validation:
     name: Terraform validation
@@ -77,6 +257,25 @@ jobs:
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v4
+
+      - name: Validate Terraform project exists
+        run: |
+          set -euo pipefail
+
+          test -d terraform/aws-bi-exports
+          test -s terraform/aws-bi-exports/main.tf
+          test -s terraform/aws-bi-exports/variables.tf
+          test -s terraform/aws-bi-exports/outputs.tf
+          test -s terraform/aws-bi-exports/terraform.tfvars.example
+
+      - name: Ensure sensitive Terraform runtime files are not tracked
+        run: |
+          set -euo pipefail
+
+          if git ls-files | grep -E '(^|/)(terraform\.tfvars|.*\.tfstate|.*\.tfstate\.backup|tfplan)$'; then
+            echo "Sensitive Terraform runtime file is tracked. Remove it from Git."
+            exit 1
+          fi
 
       - name: Terraform format check
         run: |
@@ -91,38 +290,3 @@ jobs:
         working-directory: terraform/aws-bi-exports
         run: |
           terraform validate
-
-  repository-guardrails:
-    name: Repository guardrails
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v6
-
-      - name: Ensure sensitive Terraform files are not tracked
-        run: |
-          if git ls-files | grep -E '(^|/)(terraform\.tfvars|.*\.tfstate|.*\.tfstate\.backup|tfplan)$'; then
-            echo "Sensitive Terraform runtime file is tracked. Remove it from Git."
-            exit 1
-          fi
-
-      - name: Ensure AWS credentials are not tracked
-        run: |
-          if git ls-files | grep -E '(^|/)\.aws/(credentials|config)$'; then
-            echo "AWS credential/config file is tracked. Remove it from Git."
-            exit 1
-          fi
-
-      - name: Ensure required project assets exist
-        run: |
-          test -f airflow/dags/batch_lakehouse_pipeline.py
-          test -f scripts/run_airflow_task.sh
-          test -f dbt/dbt_project.yml
-          test -f terraform/aws-bi-exports/main.tf
-          test -f terraform/aws-bi-exports/variables.tf
-          test -f terraform/aws-bi-exports/outputs.tf
-          test -f sql/export_power_bi_dataset.py
-          test -f sql/power_bi_dashboard_queries.sql
-          test -f docs/airflow_orchestration.md
-          test -f docs/terraform_aws_bi_exports.md
