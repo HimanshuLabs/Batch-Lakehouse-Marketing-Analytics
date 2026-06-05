@@ -1,111 +1,171 @@
-# Batch Data Lakehouse for Marketing Analytics
+# Marketing Lakehouse & Customer Warehouse Reporting Platform
 
 ## 1. Overview
 
-This project is an end-to-end batch data engineering lakehouse pipeline that simulates marketing analytics data, processes it through Bronze, Silver, and Gold Medallion layers, applies data quality checks and reconciliation at every stage, publishes business-ready Gold marts to PostgreSQL, and provides reusable SQL analytics through DuckDB and PostgreSQL.
+End-to-end marketing analytics platform combining lakehouse processing, PostgreSQL warehouse modeling, dbt analytics engineering, Airflow orchestration, Power BI Online reporting, Terraform-backed BI exports, and GitHub Actions CI/CD validation.
+
+This repository started as a batch marketing lakehouse and has been extended into one merged production-style analytics platform. The lakehouse engine remains the foundation: it generates synthetic marketing/customer data, processes it through Raw, Bronze, Silver, and Gold layers, applies quality checks, handles quarantined records, and produces business-ready marts. The warehouse/reporting layer then promotes trusted Gold outputs into PostgreSQL schemas, models SCD Type 2 dimensions and fact tables, validates point-in-time correctness, builds BI-ready marts, exports dashboard datasets, and documents Power BI Online proof assets.
+
+The result is one coherent data product:
+
+```text
+Lakehouse engine → PostgreSQL warehouse → dbt validation → Airflow orchestration → Power BI Online reporting → GitHub Actions quality gate
+```
 
 ---
 
-## 2. Architecture
+## 2. What This Platform Proves
+
+This project demonstrates practical Data Engineering and Analytics Engineering capabilities across the full analytics lifecycle:
+
+| Capability | What this repo proves |
+|---|---|
+| Lakehouse processing | Raw, Bronze, Silver, and Gold Medallion layers using PySpark and Parquet |
+| Data quality | Row-count checks, metadata checks, null checks, metric checks, quarantine handling, and reconciliation |
+| Warehouse modeling | PostgreSQL staging, warehouse, marts, and audit schemas |
+| Historical correctness | SCD Type 2 customer/product/campaign dimensions and point-in-time fact joins |
+| BI readiness | Revenue, campaign, product, customer, and funnel marts built for reporting |
+| Analytics engineering | dbt models, tests, docs, lineage, and exposures |
+| Orchestration | Airflow DAGs coordinating lakehouse, warehouse, dbt, and reporting tasks |
+| Reporting | Power BI Online dashboard assets, screenshots, CSV exports, and refresh flow documentation |
+| Infrastructure | Terraform-backed BI export infrastructure where configured |
+| CI/CD | GitHub Actions validates SQL, dbt, Airflow, Power BI assets, Terraform assets, and repo hygiene |
+
+---
+
+## 3. End-to-End Architecture
 
 ```text
-Synthetic Marketing Data Generator
+Synthetic Marketing + Customer Data
         ↓
-Raw Layer
-data/raw/batch_date=YYYY-MM-DD
+Raw Lakehouse Layer
         ↓
-Bronze Ingestion Layer
-Raw CSV/JSON → Bronze Parquet + ingestion metadata
+Bronze Lakehouse Layer
         ↓
 Bronze Quality Checks
-Row count validation + metadata validation
         ↓
-Silver Transformation Layer
-Cleaning + type casting + deduplication + quarantine handling
+Silver Lakehouse Layer
         ↓
-Silver Quality Checks
-Bronze = Silver + Quarantine + Duplicates Dropped
+Silver Quality Checks + Quarantine
         ↓
-Gold Transformation Layer
-Dimensions + facts + analytical marts
+Gold Lakehouse Layer
         ↓
 Gold Quality Checks
-Dim/fact/mart reconciliation + metric validation
         ↓
-DuckDB Analytics Layer
-SQL directly over Gold Parquet
+SCD2 Historical Modeling Layer
         ↓
-PostgreSQL Serving Layer
-Gold marts published to PostgreSQL
+Point-in-Time Fact Join Layer
         ↓
-PostgreSQL Analytical Query Pack
-Business-ready SQL queries
+PostgreSQL Warehouse
+        ↓
+dbt Analytics Engineering Layer
+        ↓
+PostgreSQL BI Marts
+        ↓
+CSV Exports / S3 HTTPS Route
+        ↓
+Power BI Online Reports and Dashboard
+        ↓
+GitHub Actions CI/CD Validation
+```
+
+Project 2 remains the lakehouse engine. The former Project 3 scope now lives inside the same repository as the PostgreSQL warehouse, dbt, BI, reconciliation, and reporting layer.
+
+---
+
+## 4. Mermaid Architecture Diagram
+
+```mermaid
+flowchart TD
+    A["Synthetic Marketing + Customer Data<br/>customers, products, campaigns, orders,<br/>order_items, ad_spend, web_events"] --> B["Raw Layer<br/>data/raw"]
+    B --> C["Bronze Layer<br/>Parquet + ingestion metadata"]
+    C --> D["Bronze Quality Checks<br/>row counts + metadata validation"]
+
+    D --> E["Silver Layer<br/>cleaning, typing, dedupe, quarantine"]
+    E --> F["Silver Quality Checks<br/>Bronze = Silver + Quarantine + Dropped Duplicates"]
+
+    F --> G["Gold Lakehouse Layer<br/>dimensions, facts, analytical marts"]
+    G --> H["Gold Quality Checks<br/>dim/fact/mart reconciliation"]
+
+    H --> I["SCD2 Dimensions<br/>customer, product, campaign history"]
+    I --> J["Point-in-Time Fact Joins<br/>facts join to correct historical versions"]
+
+    J --> K["PostgreSQL Staging Schema<br/>loaded Gold/SCD2 extracts"]
+    K --> L["PostgreSQL Warehouse Schema<br/>star schema facts + dimensions"]
+    L --> M["PostgreSQL Marts Schema<br/>BI-ready reporting marts"]
+    L --> N["PostgreSQL Audit Schema<br/>reconciliation + validation"]
+
+    M --> O["dbt Layer<br/>models, tests, docs, lineage, exposures"]
+    O --> P["Power BI Export Datasets<br/>exports/power_bi/*.csv"]
+    P --> Q["S3 HTTPS Route<br/>when configured"]
+    Q --> R["Power BI Online<br/>semantic model, reports, dashboard"]
+
+    S["Airflow DAG"] --> C
+    S --> E
+    S --> G
+    S --> K
+    S --> L
+    S --> O
+    S --> P
+
+    T["GitHub Actions CI/CD"] --> C
+    T --> L
+    T --> O
+    T --> S
+    T --> P
+    T --> U["Terraform BI Export Infra"]
 ```
 
 ---
 
-## 3. Tech Stack
+## 5. What Each Layer Owns
 
-| Layer | Technology |
+| Layer | Path / System | Ownership |
+|---|---|---|
+| Synthetic source | `data-generator/generate_data.py` | Generates marketing, customer, campaign, order, product, ad spend, and web event data |
+| Raw | `data/raw/` | Stores original generated files without cleaning |
+| Bronze | `data/bronze/` | Preserves source fidelity and adds ingestion metadata |
+| Silver | `data/silver/` | Cleans, standardizes, deduplicates, validates, and prepares trusted records |
+| Quarantine | `data/quarantine/` | Stores invalid records instead of silently dropping them |
+| Gold | `data/gold/` | Produces business-ready facts, dimensions, and lakehouse marts |
+| SCD2 bridge | Gold/SCD2 outputs | Preserves customer/product/campaign history for warehouse joins |
+| PostgreSQL staging | `staging` schema | Loads trusted Gold/SCD2 extracts into relational staging |
+| PostgreSQL warehouse | `warehouse` schema | Stores star-schema facts and SCD2 dimensions |
+| PostgreSQL marts | `marts` schema | Provides BI-ready reporting objects |
+| PostgreSQL audit | `audit` schema | Stores reconciliation and validation outputs |
+| dbt | `dbt/` | Adds analytics engineering models, tests, docs, lineage, and exposures |
+| Airflow | `airflow/dags/` | Orchestrates lakehouse, warehouse, dbt, and export tasks |
+| Power BI exports | `exports/power_bi/` | Stores CSV datasets consumed by Power BI Online |
+| Power BI screenshots | `screenshots/power_bi/`, `docs/screenshots/power_bi/` | Provides dashboard proof assets |
+| Terraform | `terraform/aws-bi-exports/` | Defines BI export infrastructure where configured |
+| CI/CD | `.github/workflows/ci.yml` | Validates the merged analytics platform before merge |
+
+---
+
+## 6. Tech Stack
+
+| Area | Technology |
 |---|---|
-| Programming language | Python 3.14.4 |
-| Batch processing | PySpark 4.1.1 |
-| Local analytics engine | DuckDB 1.5.2 |
+| Language | Python |
+| Batch processing | PySpark |
 | Storage format | Parquet |
-| Lakehouse pattern | Bronze, Silver, Gold Medallion Architecture |
-| Serving database | PostgreSQL 16 |
-| Data generation | Faker, pandas |
-| PostgreSQL publishing | SQLAlchemy, psycopg |
+| Lakehouse pattern | Raw, Bronze, Silver, Gold Medallion Architecture |
+| Local analytics | DuckDB |
+| Warehouse database | PostgreSQL 16 |
+| Analytics engineering | dbt |
+| Orchestration | Apache Airflow |
+| BI/reporting | Power BI Online |
+| BI exports | CSV datasets, S3 HTTPS route where configured |
+| Infrastructure | Terraform |
+| CI/CD | GitHub Actions |
 | Container runtime | Docker |
-| Version control | Git |
-| Development environment | VS Code |
-| Operating system | Ubuntu |
+| Development environment | Ubuntu, VS Code |
 
 ---
 
-## 4. Project Structure
+## 7. Data Sources
 
-```text
-.
-├── airflow/
-│   └── dags/
-├── data/
-│   ├── raw/
-│   ├── bronze/
-│   ├── silver/
-│   ├── gold/
-│   └── quarantine/
-├── data-generator/
-│   └── generate_data.py
-├── dbt/
-│   ├── models/
-│   └── tests/
-├── docs/
-├── great_expectations/
-├── images/
-├── logs/
-├── spark-batch/
-│   ├── bronze_ingestion.py
-│   ├── bronze_quality_checks.py
-│   ├── silver_transformations.py
-│   ├── silver_quality_checks.py
-│   ├── gold_transformations.py
-│   └── gold_quality_checks.py
-├── sql/
-│   ├── duckdb_gold_analytics.py
-│   ├── publish_gold_to_postgres.py
-│   └── postgres_analytics_queries.sql
-├── terraform/
-├── requirements.txt
-├── README.md
-└── .gitignore
-```
-
----
-
-## 5. Data Sources
-
-`data-generator/generate_data.py` generates synthetic marketing analytics data.
+The synthetic generator creates marketing and customer behavior data.
 
 Generated raw files:
 
@@ -117,499 +177,388 @@ Generated raw files:
 | `orders.csv` | Order-level transaction data |
 | `order_items.csv` | Product-level order line items |
 | `ad_spend.csv` | Campaign spend, impressions, and clicks |
-| `web_events.json` | User behavioral event data |
+| `web_events.json` | User behavior and engagement events |
 
-The behavioral event source contains a 59-field schema including:
-
-- user details
-- product details
-- session details
-- recommendation features
-- campaign attribution
-- device and browser information
-- engagement metrics
-- fraud score
-- event timestamps
-- source metadata
+The behavioral event source includes customer, product, session, recommendation, campaign attribution, device/browser, engagement, fraud, schema version, and timestamp fields.
 
 ---
 
-## 6. Data Flow
+## 8. Lakehouse Engine
 
-### 6.1 Raw Layer
+The lakehouse engine processes generated source data through Medallion layers.
 
-Raw data is generated under:
+### Raw
 
 ```text
 data/raw/batch_date=YYYY-MM-DD/
 ```
 
-The Raw layer stores the original generated source files exactly as received.
+Raw stores the original generated source files exactly as received.
 
-No cleaning is performed in Raw.
-
-Generated files:
-
-```text
-customers.csv
-products.csv
-campaigns.csv
-orders.csv
-order_items.csv
-ad_spend.csv
-web_events.json
-```
-
----
-
-### 6.2 Bronze Layer
-
-`spark-batch/bronze_ingestion.py` reads the Raw files and writes Bronze Parquet tables.
-
-Output path:
+### Bronze
 
 ```text
 data/bronze/
 ```
 
-Bronze keeps source fidelity and adds ingestion metadata.
+Bronze converts raw files into Parquet and adds ingestion metadata such as ingestion timestamp, ingestion date, batch ID, source system, source file name, and record hash.
 
-Bronze metadata columns:
-
-| Column | Meaning |
-|---|---|
-| `ingestion_timestamp` | Timestamp when the record entered Bronze |
-| `ingestion_date` | Batch ingestion date |
-| `batch_id` | Unique batch identifier |
-| `source_system` | Source table name |
-| `source_file_name` | Original input file path |
-| `record_hash` | Hash of business columns |
-
-Bronze tables:
-
-| Bronze Table | Rows |
-|---|---:|
-| `bronze_customers` | 502 |
-| `bronze_products` | 152 |
-| `bronze_campaigns` | 41 |
-| `bronze_orders` | 2000 |
-| `bronze_order_items` | 5000 |
-| `bronze_ad_spend` | 1000 |
-| `bronze_web_events` | 8001 |
-
----
-
-### 6.3 Bronze Quality Checks
-
-`spark-batch/bronze_quality_checks.py` validates the Bronze layer.
-
-Checks performed:
-
-- Bronze table exists
-- Bronze table has rows
-- Raw row count equals Bronze row count
-- Required metadata columns exist
-- `web_events` has the expected column count
-
-For `web_events`:
-
-```text
-59 business fields + 6 Bronze metadata fields = 65 columns
-```
-
----
-
-### 6.4 Silver Layer
-
-`spark-batch/silver_transformations.py` reads Bronze data and creates clean Silver tables.
-
-Output paths:
+### Silver
 
 ```text
 data/silver/
 data/quarantine/
 ```
 
-Silver transformations include:
+Silver performs cleaning, type casting, timestamp parsing, validation, deduplication, and quarantine handling.
 
-- type casting
-- timestamp parsing
-- email validation
-- numeric range validation
-- invalid record quarantine
-- duplicate removal
-- ID standardization
-- Silver metadata generation
+Invalid records are written to quarantine instead of being silently removed.
 
-Silver output counts:
-
-| Table | Silver Rows | Quarantine Rows |
-|---|---:|---:|
-| `customers` | 497 | 3 |
-| `products` | 147 | 3 |
-| `campaigns` | 37 | 3 |
-| `orders` | 1997 | 2 |
-| `order_items` | 4999 | 1 |
-| `ad_spend` | 997 | 3 |
-| `web_events` | 7895 | 106 |
-
----
-
-### 6.5 Quarantine Layer
-
-Invalid records are written to:
-
-```text
-data/quarantine/
-```
-
-Invalid data is not silently deleted.
-
-Examples of quarantined records:
-
-- invalid email
-- negative age
-- invalid price
-- invalid discount percentage
-- invalid campaign source
-- broken timestamp
-- invalid fraud score
-- invalid device type
-- invalid IP address
-- invalid order amount
-
-This keeps bad data visible and traceable.
-
----
-
-### 6.6 Silver Quality Checks
-
-`spark-batch/silver_quality_checks.py` validates the Silver layer.
-
-Checks performed:
-
-- Silver tables exist
-- Quarantine tables exist
-- Required Silver columns exist
-- Key fields are not null
-- Bronze rows reconcile with Silver, Quarantine, and dropped duplicates
-
-Silver reconciliation:
-
-| Table | Bronze | Silver | Quarantine | Duplicates Dropped | Reconciled |
-|---|---:|---:|---:|---:|---:|
-| `customers` | 502 | 497 | 3 | 2 | 502 |
-| `products` | 152 | 147 | 3 | 2 | 152 |
-| `campaigns` | 41 | 37 | 3 | 1 | 41 |
-| `orders` | 2000 | 1997 | 2 | 1 | 2000 |
-| `order_items` | 5000 | 4999 | 1 | 0 | 5000 |
-| `ad_spend` | 1000 | 997 | 3 | 0 | 1000 |
-| `web_events` | 8001 | 7895 | 106 | 0 | 8001 |
-
----
-
-### 6.7 Gold Layer
-
-`spark-batch/gold_transformations.py` reads clean Silver data and creates business-ready Gold tables.
-
-Output path:
+### Gold
 
 ```text
 data/gold/
 ```
 
-Gold tables:
+Gold creates business-ready facts, dimensions, and analytical marts.
 
-| Gold Table | Rows | Type |
-|---|---:|---|
-| `dim_customers` | 497 | Dimension |
-| `dim_products` | 147 | Dimension |
-| `dim_campaigns` | 37 | Dimension |
-| `fact_orders` | 1997 | Fact |
-| `fact_order_items` | 4999 | Fact |
-| `fact_ad_spend` | 997 | Fact |
-| `fact_web_events` | 7895 | Fact |
-| `mart_campaign_performance` | 37 | Analytics mart |
-| `mart_product_performance` | 147 | Analytics mart |
-| `mart_customer_value` | 497 | Analytics mart |
-| `mart_marketing_funnel` | 54 | Analytics mart |
-
----
-
-### 6.8 Gold Quality Checks
-
-`spark-batch/gold_quality_checks.py` validates the Gold layer.
-
-Checks performed:
-
-- Gold tables exist
-- Gold tables have rows
-- Gold dimensions reconcile with Silver dimensions
-- Gold facts reconcile with Silver facts
-- Campaign mart matches campaign dimension count
-- Product mart matches product dimension count
-- Customer mart matches customer dimension count
-- Required columns exist
-- Key fields are not null
-- Metrics are non-negative
-
----
-
-## 7. Analytics Layers
-
-### 7.1 DuckDB Analytics
-
-`sql/duckdb_gold_analytics.py` queries Gold Parquet files directly using DuckDB.
-
-This proves that Gold Parquet marts are usable without loading them into a database first.
-
-Generated reports are written to:
+Gold outputs include:
 
 ```text
-logs/duckdb_gold_reports/
+dim_customers
+dim_products
+dim_campaigns
+fact_orders
+fact_order_items
+fact_ad_spend
+fact_web_events
+mart_campaign_performance
+mart_product_performance
+mart_customer_value
+mart_marketing_funnel
 ```
-
-DuckDB analytics include:
-
-- top campaigns by revenue
-- best ROAS campaigns
-- top products by revenue
-- customer lifetime value leaders
-- marketing funnel by channel
-- device performance
-- revenue by payment method
-- fraud-risk orders
-- category performance
-- A/B test performance
 
 ---
 
-### 7.2 PostgreSQL Serving Layer
+## 9. Warehouse Layer
 
-`sql/publish_gold_to_postgres.py` publishes Gold tables into PostgreSQL.
+The warehouse layer promotes trusted Gold/SCD2 outputs into PostgreSQL.
 
-PostgreSQL container:
+Main schemas:
 
-```text
-postgres:16
-```
-
-Database:
-
-```text
-marketing_analytics
-```
-
-Schema:
-
-```text
-gold
-```
-
-Published PostgreSQL tables:
-
-| PostgreSQL Table | Rows |
-|---|---:|
-| `gold.dim_customers` | 497 |
-| `gold.dim_products` | 147 |
-| `gold.dim_campaigns` | 37 |
-| `gold.fact_orders` | 1997 |
-| `gold.fact_order_items` | 4999 |
-| `gold.fact_ad_spend` | 997 |
-| `gold.fact_web_events` | 7895 |
-| `gold.mart_campaign_performance` | 37 |
-| `gold.mart_product_performance` | 147 |
-| `gold.mart_customer_value` | 497 |
-| `gold.mart_marketing_funnel` | 54 |
-| `gold.gold_publish_audit` | 11 |
-
-The publish audit table records:
-
-- table name
-- row count
-- publish timestamp
-- PostgreSQL schema
-- source path
-
----
-
-### 7.3 PostgreSQL Analytical Query Pack
-
-`sql/postgres_analytics_queries.sql` contains reusable SQL analytics.
-
-Queries included:
-
-- top campaigns by revenue
-- best ROAS campaigns
-- campaigns wasting spend
-- top products by revenue
-- category performance
-- customer lifetime value leaders
-- high-engagement low-value customers
-- funnel conversion by traffic source
-- device performance
-- A/B test performance
-- revenue by payment method
-- fraud-risk order review
-- daily revenue trend
-- daily event trend
-- prime vs non-prime customer value
-- membership tier value
-- publish audit
-
-Example PostgreSQL query:
-
-```sql
-SELECT
-    campaign_id,
-    campaign_name,
-    total_revenue,
-    total_ad_spend,
-    roas
-FROM gold.mart_campaign_performance
-ORDER BY total_revenue DESC
-LIMIT 5;
-```
-
-Example result:
-
-| campaign_id | campaign_name | total_revenue | total_ad_spend | roas |
-|---:|---|---:|---:|---:|
-| 38 | Instagram Campaign 38 | 10637314.85 | 1341804.62 | 7.9276 |
-| 8 | Organic Campaign 8 | 9396479.70 | 1111565.80 | 8.4534 |
-| 32 | Instagram Campaign 32 | 8174960.12 | 1851820.81 | 4.4146 |
-| 21 | Organic Campaign 21 | 8172440.42 | 1500054.76 | 5.4481 |
-| 12 | Organic Campaign 12 | 7884326.68 | 710277.05 | 11.1004 |
-
----
-
-## 8. Partitioning Strategy
-
-| Layer | Partition Column |
+| Schema | Purpose |
 |---|---|
-| Bronze | `ingestion_date` |
-| Silver | `processed_date` |
-| Gold | `gold_processed_date` |
+| `staging` | Loaded Gold/SCD2 extracts from the lakehouse |
+| `warehouse` | Star-schema dimensions and facts |
+| `marts` | BI-ready reporting marts |
+| `audit` | Reconciliation and validation checks |
 
-This provides batch-level traceability and efficient date-based reads.
+Warehouse capabilities:
+
+- SCD Type 2 customer, product, and campaign dimensions.
+- Surrogate keys for historical dimension versions.
+- Point-in-time fact joins.
+- Unknown-member handling where needed.
+- BI-ready marts for revenue, campaign, product, customer, and funnel reporting.
+- Reconciliation checks stored under the audit layer.
+- Query performance tuning through indexes and `EXPLAIN ANALYZE` documentation.
+
+Main SQL assets:
+
+```text
+sql/warehouse/create_schemas.sql
+sql/warehouse/load_gold_to_staging.sql
+sql/warehouse/create_warehouse_tables.sql
+sql/warehouse/create_marts.sql
+sql/warehouse/create_indexes.sql
+sql/warehouse/reconciliation_report.sql
+sql/warehouse/scd2_validation_queries.sql
+sql/warehouse/performance_explain_analyze.sql
+sql/warehouse/dashboard_query_pack.sql
+sql/warehouse/powerbi_export_queries.sql
+```
+
+Warehouse documentation:
+
+```text
+docs/warehouse/merged_architecture.md
+docs/warehouse/warehouse_data_model.md
+docs/warehouse/scd2_design.md
+docs/warehouse/reconciliation.md
+docs/warehouse/performance_tuning.md
+docs/warehouse/runbook.md
+```
 
 ---
 
-## 9. Data Quality Strategy
+## 10. dbt Analytics Engineering Layer
 
-This project uses quality gates at every major stage.
+The dbt layer organizes warehouse models, marts, tests, docs, lineage, and dashboard exposures.
 
-| Layer | Quality Strategy |
-|---|---|
-| Bronze | File existence, row count reconciliation, metadata validation |
-| Silver | Type casting, validation, deduplication, quarantine, reconciliation |
-| Gold | Dim/fact/mart validation, metric validation, not-null checks |
-| PostgreSQL | Publish audit and analytical SQL verification |
+Main dbt areas:
 
-The pipeline is designed to fail loudly when quality checks fail.
+```text
+dbt/models/staging/
+dbt/models/warehouse/
+dbt/models/marts/
+dbt/models/audit/
+dbt/models/exposures.yml
+dbt/models/schema.yml
+```
 
----
+dbt validates:
 
-## 10. How to Run
+- not-null constraints,
+- uniqueness constraints,
+- relationships,
+- accepted values,
+- mart-level business logic,
+- dashboard-facing exposures.
 
-### 10.1 Open Project in VS Code
+Common dbt commands:
 
 ```bash
 cd ~/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics
-code .
+
+source venv-dbt/bin/activate
+
+cd dbt
+
+cp profiles.yml.example profiles.yml
+
+dbt parse --profiles-dir . --no-partial-parse
+dbt run --profiles-dir .
+dbt test --profiles-dir .
+dbt docs generate --profiles-dir .
+```
+
+Clean runtime files after local dbt work:
+
+```bash
+cd ~/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics
+
+rm -rf dbt/target
+rm -rf dbt/dbt_packages
+rm -f dbt/profiles.yml
+
+git status -sb
 ```
 
 ---
 
-### 10.2 Create Virtual Environment
+## 11. Airflow Orchestration Layer
+
+Airflow coordinates the platform execution flow.
+
+DAG location:
+
+```text
+airflow/dags/
+```
+
+The orchestration layer covers:
+
+- lakehouse generation and transformations,
+- warehouse SQL execution,
+- reconciliation checks,
+- marts creation,
+- dbt validation,
+- reporting/export tasks where configured.
+
+Airflow working-state documentation:
+
+```text
+docs/warehouse/airflow_working_state.md
+```
+
+Local Airflow validation:
+
+```bash
+cd ~/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics
+
+source venv-airflow/bin/activate
+
+export AIRFLOW_HOME="$PWD/.airflow"
+export AIRFLOW__CORE__DAGS_FOLDER="$PWD/airflow/dags"
+export AIRFLOW__CORE__LOAD_EXAMPLES=False
+
+airflow db check
+python -m py_compile airflow/dags/batch_lakehouse_pipeline.py
+airflow dags list-import-errors
+airflow dags list
+airflow tasks list batch_lakehouse_marketing_analytics
+```
+
+---
+
+## 12. Power BI Online Reporting Layer
+
+The reporting layer turns PostgreSQL marts into browser-demo-ready Power BI Online assets.
+
+Flow:
+
+```text
+PostgreSQL marts
+        ↓
+Power BI export SQL
+        ↓
+CSV datasets
+        ↓
+S3 public HTTPS route where configured
+        ↓
+Power BI Online semantic model/report/dashboard
+        ↓
+Screenshot proof
+```
+
+Exported datasets:
+
+```text
+exports/power_bi/campaign_performance.csv
+exports/power_bi/customer_360.csv
+exports/power_bi/marketing_funnel.csv
+exports/power_bi/product_sales.csv
+exports/power_bi/revenue_daily.csv
+exports/power_bi/export_manifest.json
+```
+
+Power BI docs:
+
+```text
+docs/warehouse/bi_reporting_layer.md
+docs/warehouse/power_bi_dashboard.md
+docs/warehouse/power_bi_data_dictionary.md
+docs/warehouse/power_bi_refresh_flow.md
+```
+
+Dashboard pages:
+
+| Page | Purpose |
+|---|---|
+| Executive Overview | Top-level revenue, customer, campaign, and funnel health |
+| Revenue Trends | Daily revenue and sales movement |
+| Campaign Performance | Campaign revenue, ROAS, spend, impressions, and clicks |
+| Product Performance | Product/category sales and performance |
+| Customer 360 | Customer value, segmentation, and lifecycle reporting |
+| Marketing Funnel | Funnel conversion and behavior analytics |
+
+---
+
+## 13. CI/CD Quality Gate
+
+GitHub Actions validates the merged analytics platform before changes are accepted.
+
+Workflow:
+
+```text
+.github/workflows/ci.yml
+```
+
+CI/CD validates:
+
+- warehouse SQL assets,
+- Python and shell scripts,
+- dbt project structure,
+- Airflow DAG import/syntax,
+- Power BI Online export/demo assets,
+- Terraform BI export infrastructure where present,
+- repository hygiene and runtime-file leakage.
+
+Manual CI commands:
+
+```bash
+cd ~/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics
+
+gh run list --limit 10
+
+gh run view --log-failed
+
+gh pr checks --watch
+```
+
+CI/CD workflow:
+
+```text
+.github/workflows/ci.yml
+```
+
+---
+
+## 14. Proof and Demo Assets
+
+Proof assets are committed so the project can be reviewed without rerunning the full platform.
+
+Power BI screenshots:
+
+```text
+screenshots/power_bi/01_final_dashboard.png
+screenshots/power_bi/02_revenue_trends_report.png
+screenshots/power_bi/03_campaign_performance_report.png
+screenshots/power_bi/04_product_performance_report.png
+screenshots/power_bi/05_customer_360_report.png
+screenshots/power_bi/06_marketing_funnel_report.png
+```
+
+Additional dashboard screenshots:
+
+```text
+docs/screenshots/power_bi/01_executive_overview.png
+docs/screenshots/power_bi/02_campaign_performance.png
+docs/screenshots/power_bi/03_data_quality_reconciliation.png
+```
+
+Export proof:
+
+```text
+exports/power_bi/*.csv
+exports/power_bi/export_manifest.json
+```
+
+Operational proof docs:
+
+```text
+docs/warehouse/airflow_working_state.md
+docs/warehouse/reconciliation.md
+docs/warehouse/scd2_design.md
+docs/warehouse/bi_reporting_layer.md
+```
+
+---
+
+## 15. Local Runbook
+
+### Open repo
+
+```bash
+cd ~/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics
+```
+
+### Create and activate Python environment
 
 ```bash
 python3 -m venv venv
-```
-
----
-
-### 10.3 Activate Virtual Environment
-
-```bash
 source venv/bin/activate
-```
-
----
-
-### 10.4 Install Dependencies
-
-```bash
 pip install -r requirements.txt
 ```
 
----
-
-### 10.5 Generate Raw Data
+### Generate raw data
 
 ```bash
 python data-generator/generate_data.py
 ```
 
----
-
-### 10.6 Run Bronze Ingestion
+### Run lakehouse pipeline
 
 ```bash
 python spark-batch/bronze_ingestion.py
-```
-
----
-
-### 10.7 Run Bronze Quality Checks
-
-```bash
 python spark-batch/bronze_quality_checks.py
-```
-
----
-
-### 10.8 Run Silver Transformations
-
-```bash
 python spark-batch/silver_transformations.py
-```
-
----
-
-### 10.9 Run Silver Quality Checks
-
-```bash
 python spark-batch/silver_quality_checks.py
-```
-
----
-
-### 10.10 Run Gold Transformations
-
-```bash
 python spark-batch/gold_transformations.py
-```
-
----
-
-### 10.11 Run Gold Quality Checks
-
-```bash
 python spark-batch/gold_quality_checks.py
 ```
 
----
-
-### 10.12 Run DuckDB Analytics
-
-```bash
-python sql/duckdb_gold_analytics.py
-```
-
----
-
-### 10.13 Start PostgreSQL
+### Start PostgreSQL
 
 ```bash
 docker rm -f project2_postgres || true
@@ -622,66 +571,154 @@ docker run --name project2_postgres \
   -d postgres:16
 ```
 
----
-
-### 10.14 Publish Gold Tables to PostgreSQL
+### Run original PostgreSQL publishing flow
 
 ```bash
 python sql/publish_gold_to_postgres.py
-```
 
----
-
-### 10.15 Run PostgreSQL Analytical Queries
-
-```bash
 docker exec -i project2_postgres psql -U project2 -d marketing_analytics < sql/postgres_analytics_queries.sql
 ```
 
----
-
-## 11. Key Commands for Verification
-
-### Check Git History
+### Run warehouse SQL assets
 
 ```bash
-git log --oneline
+env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/create_schemas.sql
+env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/load_gold_to_staging.sql
+env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/create_warehouse_tables.sql
+env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/reconciliation_report.sql
+env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/create_marts.sql
+env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/dashboard_query_pack.sql
 ```
 
-### Check Project Status
+### Run dbt
 
 ```bash
-git status
+source venv-dbt/bin/activate
+
+cd dbt
+
+cp profiles.yml.example profiles.yml
+
+dbt parse --profiles-dir . --no-partial-parse
+dbt run --profiles-dir .
+dbt test --profiles-dir .
+dbt docs generate --profiles-dir .
 ```
 
-### Check PostgreSQL Container
+### Export Power BI datasets
 
 ```bash
-docker ps
-```
+cd ~/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics
 
-### Open PostgreSQL Shell
-
-```bash
-docker exec -it project2_postgres psql -U project2 -d marketing_analytics
-```
-
-### List Gold Tables in PostgreSQL
-
-```sql
-\dt gold.*
-```
-
-### Query Publish Audit
-
-```sql
-SELECT
-    table_name,
-    row_count,
-    published_at
-FROM gold.gold_publish_audit
-ORDER BY table_name;
+python scripts/export_powerbi_datasets.py
 ```
 
 ---
 
+## 16. Validation Commands
+
+### Git state
+
+```bash
+git branch --show-current
+git status -sb
+git log --oneline --decorate -10
+```
+
+### Required docs
+
+```bash
+test -f docs/warehouse/merged_architecture.md
+test -f docs/warehouse/warehouse_data_model.md
+test -f docs/warehouse/scd2_design.md
+test -f docs/warehouse/reconciliation.md
+test -f docs/warehouse/bi_reporting_layer.md
+test -f docs/warehouse/runbook.md
+test -f docs/warehouse/airflow_working_state.md
+```
+
+### Warehouse reconciliation
+
+```bash
+env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/reconciliation_report.sql
+
+docker exec project2_postgres psql -U project2 -d marketing_analytics -c "
+SELECT status, COUNT(*) AS check_count
+FROM audit.reconciliation_report
+GROUP BY status
+ORDER BY status;
+"
+```
+
+### Warehouse marts
+
+```bash
+docker exec project2_postgres psql -U project2 -d marketing_analytics -c "
+SELECT schemaname, viewname
+FROM pg_views
+WHERE schemaname = 'marts'
+ORDER BY viewname;
+"
+```
+
+### SCD2 validation
+
+```bash
+env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/scd2_validation_queries.sql
+```
+
+### Power BI exports
+
+```bash
+find exports/power_bi -maxdepth 1 -type f | sort
+cat exports/power_bi/export_manifest.json
+```
+
+### Documentation sanity checks
+
+```bash
+grep -n "Marketing Lakehouse & Customer Warehouse Reporting Platform" README.md
+grep -n "Power BI Online" README.md
+grep -n "SCD" README.md
+grep -n "reconciliation" README.md
+grep -n "Airflow" README.md
+grep -n "dbt" README.md
+grep -n "GitHub Actions" README.md
+```
+
+Keep this section free of temporary placeholders before commit.
+
+---
+
+## 17. Repository Hygiene
+
+Runtime files should not be committed.
+
+Keep these out of Git:
+
+```text
+dbt/target/
+dbt/dbt_packages/
+dbt/profiles.yml
+.airflow/
+__pycache__/
+*.pyc
+local environment files
+temporary logs
+```
+
+Before committing documentation or code changes:
+
+```bash
+cd ~/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics
+
+rm -rf dbt/target
+rm -rf dbt/dbt_packages
+rm -f dbt/profiles.yml
+rm -rf .airflow
+find . -type d -name "__pycache__" -prune -exec rm -rf {} +
+
+git status -sb
+```
+
+The repository should show only intentional source, documentation, configuration, SQL, screenshots, export manifests, and demo assets.
