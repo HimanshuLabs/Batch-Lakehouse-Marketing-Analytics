@@ -33,6 +33,21 @@ CREATE SCHEMA IF NOT EXISTS audit;
 -- Helper functions
 -- ---------------------------------------------------------------------------
 
+
+CREATE OR REPLACE FUNCTION warehouse.normalized_natural_key(value TEXT)
+RETURNS TEXT
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT CASE
+        WHEN value IS NULL THEN NULL
+        WHEN btrim(value) = '' THEN NULL
+        WHEN lower(btrim(value)) IN ('null', 'none', 'nan', 'unknown') THEN NULL
+        ELSE btrim(value)
+    END;
+$$;
+
+
 CREATE OR REPLACE FUNCTION warehouse.safe_bigint(value TEXT)
 RETURNS BIGINT
 LANGUAGE plpgsql
