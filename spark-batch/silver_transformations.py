@@ -129,8 +129,28 @@ def split_valid_invalid(df: DataFrame, invalid_condition, reason: str) -> tuple[
     return valid_df, invalid_df
 
 
+DEDUPE_TIEBREAKS = [
+    ("ingestion_date", "desc"),
+    ("ingestion_timestamp", "desc"),
+    ("record_hash", "asc"),
+]
+
+
 def deduplicate_latest(df: DataFrame, key_columns: list[str], order_column: str) -> DataFrame:
-    window_spec = Window.partitionBy(*key_columns).orderBy(col(order_column).desc_nulls_last())
+    # After the table's own order column, break ties deterministically:
+    # latest batch first, then the Bronze record hash. Only columns that
+    # exist in the table (and are not already the order column) are used.
+    order_spec = [col(order_column).desc_nulls_last()]
+    for column_name, direction in DEDUPE_TIEBREAKS:
+        if column_name == order_column or column_name not in df.columns:
+            continue
+        order_spec.append(
+            col(column_name).desc_nulls_last()
+            if direction == "desc"
+            else col(column_name).asc_nulls_last()
+        )
+
+    window_spec = Window.partitionBy(*key_columns).orderBy(*order_spec)
 
     return (
         df
