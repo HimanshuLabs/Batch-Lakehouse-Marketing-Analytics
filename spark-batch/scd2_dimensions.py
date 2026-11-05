@@ -41,6 +41,11 @@ DIMENSION_CONFIGS: Dict[str, Dict[str, object]] = {
             "customer_segment",
             "loyalty_tier",
         ],
+        "column_map": {
+            "customer_segment": "user_segment",
+            "loyalty_tier": "membership_tier",
+        },
+        "untracked_optional": [],
         "date_candidates": [
             "updated_at",
             "event_timestamp",
@@ -62,6 +67,13 @@ DIMENSION_CONFIGS: Dict[str, Dict[str, object]] = {
             "category",
             "brand",
             "price",
+            "status",
+        ],
+        "column_map": {
+            "price": "discounted_price",
+        },
+        "untracked_optional": [
+            "brand",
             "status",
         ],
         "date_candidates": [
@@ -88,6 +100,10 @@ DIMENSION_CONFIGS: Dict[str, Dict[str, object]] = {
             "start_date",
             "end_date",
         ],
+        "column_map": {
+            "channel": "traffic_source",
+        },
+        "untracked_optional": [],
         "date_candidates": [
             "updated_at",
             "start_date",
@@ -130,9 +146,33 @@ def first_existing_column(df: DataFrame, candidates: List[str]) -> str | None:
     return None
 
 
-def add_missing_tracked_columns(df: DataFrame, tracked_columns: List[str]) -> DataFrame:
+def add_missing_tracked_columns(
+    df: DataFrame,
+    dimension_name: str,
+    tracked_columns: List[str],
+    untracked_optional: List[str],
+) -> DataFrame:
+    """
+    Fail fast when a hashed tracked column is missing after column mapping.
+
+    Only columns listed in untracked_optional may be absent; they are kept in
+    the output contract as NULL and are excluded from the record hash.
+    """
+    missing_hashed = [
+        column
+        for column in tracked_columns
+        if column not in df.columns and column not in untracked_optional
+    ]
+
+    if missing_hashed:
+        raise ValueError(
+            f"SCD2 dimension '{dimension_name}' is missing tracked columns after "
+            f"column mapping: {', '.join(missing_hashed)}. "
+            f"Available columns: {', '.join(df.columns)}"
+        )
+
     result = df
-    for column in tracked_columns:
+    for column in untracked_optional:
         if column not in result.columns:
             result = result.withColumn(column, F.lit(None).cast(StringType()))
     return result
@@ -150,13 +190,20 @@ def build_record_hash(df: DataFrame, tracked_columns: List[str]) -> DataFrame:
     )
 
 
-def normalize_dimension_columns(df: DataFrame, natural_key: str) -> DataFrame:
+def normalize_dimension_columns(
+    df: DataFrame,
+    natural_key: str,
+    column_map: Dict[str, str],
+) -> DataFrame:
     """
     Normalize source-specific column names into the dimension contract.
 
     Project 1-style user behavior data uses user_id/home_city/home_state/event_time.
     Project 2-style lakehouse dimensions may use customer_id/city/state/updated_at.
     This function bridges that contract cleanly before SCD2 logic runs.
+
+    column_map holds per-dimension {target: source} copies (for example
+    customer_segment <- user_segment). Source columns are kept.
     """
     result = df
 
@@ -175,17 +222,24 @@ def normalize_dimension_columns(df: DataFrame, natural_key: str) -> DataFrame:
                     result = result.withColumn(target_column, F.col(source_column))
                     break
 
+    for target_column, source_column in column_map.items():
+        if target_column not in result.columns and source_column in result.columns:
+            result = result.withColumn(target_column, F.col(source_column))
+
     return result
 
 
 def build_scd2_dimension(
     df: DataFrame,
+    dimension_name: str,
     natural_key: str,
     surrogate_key: str,
     tracked_columns: List[str],
     date_candidates: List[str],
+    column_map: Dict[str, str],
+    untracked_optional: List[str],
 ) -> DataFrame:
-    df = normalize_dimension_columns(df, natural_key)
+    df = normalize_dimension_columns(df, natural_key, column_map)
 
     if natural_key not in df.columns:
         available_columns = ", ".join(df.columns)
@@ -198,7 +252,16 @@ def build_scd2_dimension(
 
     cleaned = df.filter(F.col(natural_key).isNotNull())
 
-    cleaned = add_missing_tracked_columns(cleaned, tracked_columns)
+    cleaned = add_missing_tracked_columns(
+        cleaned,
+        dimension_name,
+        tracked_columns,
+        untracked_optional,
+    )
+
+    hashed_columns = [
+        column for column in tracked_columns if column not in untracked_optional
+    ]
 
     if effective_column:
         cleaned = cleaned.withColumn(
@@ -213,7 +276,7 @@ def build_scd2_dimension(
         F.coalesce(F.col("effective_from"), F.current_timestamp()),
     )
 
-    hashed = build_record_hash(cleaned, tracked_columns)
+    hashed = build_record_hash(cleaned, hashed_columns)
 
     base_window = Window.partitionBy(natural_key).orderBy(
         F.col("effective_from").asc(),
@@ -360,15 +423,20 @@ def main() -> None:
             surrogate_key = config["surrogate_key"]  # type: ignore[assignment]
             tracked_columns = config["tracked_columns"]  # type: ignore[assignment]
             date_candidates = config["date_candidates"]  # type: ignore[assignment]
+            column_map = config["column_map"]  # type: ignore[assignment]
+            untracked_optional = config["untracked_optional"]  # type: ignore[assignment]
 
             source_df = read_table(spark, source_path)
 
             scd2_df = build_scd2_dimension(
                 df=source_df,
+                dimension_name=dimension_name,
                 natural_key=natural_key,
                 surrogate_key=surrogate_key,
                 tracked_columns=tracked_columns,
                 date_candidates=date_candidates,
+                column_map=column_map,
+                untracked_optional=untracked_optional,
             )
 
             write_dimension(scd2_df, output_path)
@@ -390,6 +458,8 @@ def main() -> None:
                 "natural_key": natural_key,
                 "surrogate_key": surrogate_key,
                 "tracked_columns": tracked_columns,
+                "column_map": column_map,
+                "untracked_optional": untracked_optional,
                 "validation": validation,
             }
 
