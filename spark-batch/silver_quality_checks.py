@@ -23,6 +23,8 @@ TABLES = {
         "bronze": BRONZE_BASE_DIR / "bronze_customers",
         "silver": SILVER_BASE_DIR / "silver_customers",
         "quarantine": QUARANTINE_BASE_DIR / "quarantine_customers",
+        "history": SILVER_BASE_DIR / "silver_customers_history",
+        "natural_key": "user_id",
         "required_columns": ["user_id", "email", "age", "processed_date", "silver_record_hash"],
         "not_null_columns": ["user_id", "email", "age"],
     },
@@ -30,6 +32,8 @@ TABLES = {
         "bronze": BRONZE_BASE_DIR / "bronze_products",
         "silver": SILVER_BASE_DIR / "silver_products",
         "quarantine": QUARANTINE_BASE_DIR / "quarantine_products",
+        "history": SILVER_BASE_DIR / "silver_products_history",
+        "natural_key": "product_id",
         "required_columns": ["product_id", "product_name", "category", "processed_date", "silver_record_hash"],
         "not_null_columns": ["product_id", "product_name", "category"],
     },
@@ -37,6 +41,8 @@ TABLES = {
         "bronze": BRONZE_BASE_DIR / "bronze_campaigns",
         "silver": SILVER_BASE_DIR / "silver_campaigns",
         "quarantine": QUARANTINE_BASE_DIR / "quarantine_campaigns",
+        "history": SILVER_BASE_DIR / "silver_campaigns_history",
+        "natural_key": "campaign_id",
         "required_columns": ["campaign_id", "campaign_name", "traffic_source", "processed_date", "silver_record_hash"],
         "not_null_columns": ["campaign_id", "campaign_name", "traffic_source"],
     },
@@ -119,6 +125,68 @@ def count_nulls(df: DataFrame, columns: list[str]) -> dict[str, int]:
     return result
 
 
+def validate_history(
+    spark: SparkSession,
+    config: dict,
+    silver_df: DataFrame | None,
+) -> dict:
+    """
+    Checks for a dimension history table (one row per natural key and
+    updated_at). Tables without a history config return empty results.
+    """
+    result = {
+        "history_row_count": None,
+        "history_duplicate_version_keys": None,
+        "current_keys_missing_in_history": None,
+        "failure_reasons": [],
+    }
+
+    history_path = config.get("history")
+    if history_path is None:
+        return result
+
+    natural_key = config["natural_key"]
+    history_df = read_parquet_if_exists(spark, history_path)
+
+    if history_df is None:
+        result["failure_reasons"].append(f"missing silver history path: {history_path}")
+        return result
+
+    result["history_row_count"] = history_df.count()
+
+    if result["history_row_count"] <= 0:
+        result["failure_reasons"].append("silver history row count is zero")
+
+    duplicate_version_keys = (
+        history_df.groupBy(natural_key, "updated_at")
+        .count()
+        .filter(col("count") > 1)
+        .count()
+    )
+    result["history_duplicate_version_keys"] = duplicate_version_keys
+
+    if duplicate_version_keys != 0:
+        result["failure_reasons"].append(
+            f"history ({natural_key}, updated_at) is not unique: "
+            f"{duplicate_version_keys} duplicated version key(s)"
+        )
+
+    if silver_df is not None:
+        missing_in_history = (
+            silver_df.select(natural_key).distinct()
+            .join(history_df.select(natural_key).distinct(), on=natural_key, how="left_anti")
+            .count()
+        )
+        result["current_keys_missing_in_history"] = missing_in_history
+
+        if missing_in_history != 0:
+            result["failure_reasons"].append(
+                f"{missing_in_history} current {natural_key} value(s) missing from history"
+            )
+
+    return result
+
+
 def validate_table(spark: SparkSession, table_name: str, config: dict) -> dict:
     bronze_df = read_parquet_if_exists(spark, config["bronze"])
     silver_df = read_parquet_if_exists(spark, config["silver"])
@@ -178,6 +246,9 @@ def validate_table(spark: SparkSession, table_name: str, config: dict) -> dict:
             f"silver row count below minimum threshold: actual={silver_count}, minimum={minimum_silver_rows}"
         )
 
+    history_result = validate_history(spark, config, silver_df)
+    failure_reasons.extend(history_result.pop("failure_reasons"))
+
     status = "PASSED" if not failure_reasons else "FAILED"
 
     return {
@@ -192,6 +263,7 @@ def validate_table(spark: SparkSession, table_name: str, config: dict) -> dict:
         "null_violations": str(null_violations),
         "failure_reason": "; ".join(failure_reasons),
         "batch_date": BATCH_DATE,
+        **history_result,
     }
 
 

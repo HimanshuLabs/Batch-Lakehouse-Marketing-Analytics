@@ -136,6 +136,21 @@ DEDUPE_TIEBREAKS = [
 ]
 
 
+def quarantine_missing_updated_at(
+    valid: DataFrame,
+    invalid: DataFrame,
+    entity: str,
+) -> tuple[DataFrame, DataFrame]:
+    # Dimension versions are keyed by updated_at, so a NULL (or unparseable,
+    # which safe_timestamp turns into NULL) updated_at cannot become a version.
+    valid, missing_updated_at = split_valid_invalid(
+        valid,
+        col("updated_at").isNull(),
+        f"Invalid {entity} record: null or unparseable updated_at",
+    )
+    return valid, invalid.unionByName(missing_updated_at)
+
+
 def deduplicate_latest(df: DataFrame, key_columns: list[str], order_column: str) -> DataFrame:
     # After the table's own order column, break ties deterministically:
     # latest batch first, then the Bronze record hash. Only columns that
@@ -160,7 +175,7 @@ def deduplicate_latest(df: DataFrame, key_columns: list[str], order_column: str)
     )
 
 
-def clean_customers(spark: SparkSession) -> tuple[DataFrame, DataFrame]:
+def clean_customers(spark: SparkSession) -> tuple[DataFrame, DataFrame, DataFrame]:
     df = read_bronze(spark, "customers")
 
     cleaned = (
@@ -197,14 +212,18 @@ def clean_customers(spark: SparkSession) -> tuple[DataFrame, DataFrame]:
         "Invalid customer record: bad id/email/age/city",
     )
 
+    valid, invalid = quarantine_missing_updated_at(valid, invalid, "customer")
+
+    history = deduplicate_latest(valid, ["user_id", "updated_at"], "updated_at")
     valid = deduplicate_latest(valid, ["user_id"], "updated_at")
     valid = add_silver_metadata(valid, "silver_customers")
+    history = add_silver_metadata(history, "silver_customers_history")
     invalid = add_silver_metadata(invalid, "quarantine_customers")
 
-    return valid, invalid
+    return valid, invalid, history
 
 
-def clean_products(spark: SparkSession) -> tuple[DataFrame, DataFrame]:
+def clean_products(spark: SparkSession) -> tuple[DataFrame, DataFrame, DataFrame]:
     df = read_bronze(spark, "products")
 
     cleaned = (
@@ -240,14 +259,18 @@ def clean_products(spark: SparkSession) -> tuple[DataFrame, DataFrame]:
         "Invalid product record: bad id/category/price/discount/inventory",
     )
 
+    valid, invalid = quarantine_missing_updated_at(valid, invalid, "product")
+
+    history = deduplicate_latest(valid, ["product_id", "updated_at"], "updated_at")
     valid = deduplicate_latest(valid, ["product_id"], "updated_at")
     valid = add_silver_metadata(valid, "silver_products")
+    history = add_silver_metadata(history, "silver_products_history")
     invalid = add_silver_metadata(invalid, "quarantine_products")
 
-    return valid, invalid
+    return valid, invalid, history
 
 
-def clean_campaigns(spark: SparkSession) -> tuple[DataFrame, DataFrame]:
+def clean_campaigns(spark: SparkSession) -> tuple[DataFrame, DataFrame, DataFrame]:
     df = read_bronze(spark, "campaigns")
 
     cleaned = (
@@ -285,11 +308,15 @@ def clean_campaigns(spark: SparkSession) -> tuple[DataFrame, DataFrame]:
         "Invalid campaign record: bad id/source/budget/status/date range",
     )
 
+    valid, invalid = quarantine_missing_updated_at(valid, invalid, "campaign")
+
+    history = deduplicate_latest(valid, ["campaign_id", "updated_at"], "updated_at")
     valid = deduplicate_latest(valid, ["campaign_id"], "updated_at")
     valid = add_silver_metadata(valid, "silver_campaigns")
+    history = add_silver_metadata(history, "silver_campaigns_history")
     invalid = add_silver_metadata(invalid, "quarantine_campaigns")
 
-    return valid, invalid
+    return valid, invalid, history
 
 
 def clean_orders(spark: SparkSession) -> tuple[DataFrame, DataFrame]:
@@ -521,9 +548,14 @@ def run_table(
     spark: SparkSession,
     report_rows: list[dict],
 ) -> None:
-    valid_df, invalid_df = clean_function(spark)
+    # Dimension cleaners also return a history frame (one row per key and
+    # updated_at); fact cleaners return only (valid, invalid).
+    result = clean_function(spark)
+    valid_df, invalid_df = result[0], result[1]
+    history_df = result[2] if len(result) > 2 else None
 
     silver_path = SILVER_BASE_DIR / f"silver_{table_name}"
+    history_path = SILVER_BASE_DIR / f"silver_{table_name}_history"
     quarantine_path = QUARANTINE_BASE_DIR / f"quarantine_{table_name}"
 
     valid_df = valid_df.cache()
@@ -533,6 +565,13 @@ def run_table(
     invalid_count = invalid_df.count()
 
     write_table(valid_df, silver_path)
+
+    history_count = None
+    if history_df is not None:
+        history_df = history_df.cache()
+        history_count = history_df.count()
+        write_table(history_df, history_path)
+        history_df.unpersist()
 
     if invalid_count > 0:
         write_table(invalid_df, quarantine_path)
@@ -545,15 +584,18 @@ def run_table(
             "table_name": table_name,
             "silver_row_count": valid_count,
             "quarantine_row_count": invalid_count,
+            "history_row_count": history_count,
             "silver_path": str(silver_path),
+            "history_path": str(history_path) if history_df is not None else None,
             "quarantine_path": str(quarantine_path),
             "batch_date": BATCH_DATE,
         }
     )
 
+    history_message = f", history={history_count}" if history_df is not None else ""
     print(
         f"{table_name}: silver={valid_count}, "
-        f"quarantine={invalid_count}"
+        f"quarantine={invalid_count}{history_message}"
     )
 
 
