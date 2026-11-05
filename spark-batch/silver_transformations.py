@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import date
 from pathlib import Path
 
@@ -34,7 +35,7 @@ SILVER_BASE_DIR = PROJECT_ROOT / "data" / "silver"
 QUARANTINE_BASE_DIR = PROJECT_ROOT / "data" / "quarantine"
 LOGS_DIR = PROJECT_ROOT / "logs"
 
-BATCH_DATE = date.today().isoformat()
+BATCH_DATE = date.fromisoformat(os.environ.get("BATCH_DATE") or date.today().isoformat()).isoformat()
 
 
 def safe_int(column_name: str):
