@@ -118,6 +118,7 @@ def write_bronze_table(df: DataFrame, output_path: Path) -> None:
         df
         .write
         .mode("overwrite")
+        .option("partitionOverwriteMode", "dynamic")
         .partitionBy("ingestion_date")
         .parquet(str(output_path))
     )
