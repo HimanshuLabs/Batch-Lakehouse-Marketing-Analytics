@@ -536,6 +536,11 @@ def main() -> None:
             },
         }
 
+    except Exception as exc:
+        overall_status = "FAIL"
+        report["error"] = str(exc)
+        raise
+
     finally:
         report["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
         report["overall_status"] = overall_status

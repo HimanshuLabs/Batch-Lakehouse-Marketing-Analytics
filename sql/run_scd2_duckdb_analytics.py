@@ -70,6 +70,11 @@ def main() -> None:
                 print(f"Query {index} failed: {exc}")
                 print()
 
+    except Exception as exc:
+        overall_status = "FAIL"
+        report["error"] = str(exc)
+        raise
+
     finally:
         con.close()
 
