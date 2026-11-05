@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import date
 from pathlib import Path
 
@@ -24,7 +25,7 @@ SILVER_BASE_DIR = PROJECT_ROOT / "data" / "silver"
 GOLD_BASE_DIR = PROJECT_ROOT / "data" / "gold"
 LOGS_DIR = PROJECT_ROOT / "logs"
 
-BATCH_DATE = date.today().isoformat()
+BATCH_DATE = date.fromisoformat(os.environ.get("BATCH_DATE") or date.today().isoformat()).isoformat()
 
 
 def create_spark_session() -> SparkSession:

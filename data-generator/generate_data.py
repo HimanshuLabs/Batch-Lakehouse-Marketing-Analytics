@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import uuid
 from datetime import date, datetime, timedelta
@@ -15,7 +16,7 @@ random.seed(42)
 Faker.seed(42)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-BATCH_DATE = date.today().isoformat()
+BATCH_DATE = date.fromisoformat(os.environ.get("BATCH_DATE") or date.today().isoformat()).isoformat()
 RAW_DIR = PROJECT_ROOT / "data" / "raw" / f"batch_date={BATCH_DATE}"
 
 SCHEMA_VERSION = "v1"

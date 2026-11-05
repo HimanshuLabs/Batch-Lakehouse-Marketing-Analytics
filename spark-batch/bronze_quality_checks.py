@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import date
 from pathlib import Path
 
@@ -11,7 +12,7 @@ RAW_BASE_DIR = PROJECT_ROOT / "data" / "raw"
 BRONZE_BASE_DIR = PROJECT_ROOT / "data" / "bronze"
 LOGS_DIR = PROJECT_ROOT / "logs"
 
-BATCH_DATE = date.today().isoformat()
+BATCH_DATE = date.fromisoformat(os.environ.get("BATCH_DATE") or date.today().isoformat()).isoformat()
 
 BRONZE_METADATA_COLUMNS = {
     "ingestion_timestamp",
