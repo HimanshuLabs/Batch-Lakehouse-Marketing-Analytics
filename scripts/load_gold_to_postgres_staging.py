@@ -590,7 +590,7 @@ def main() -> int:
     failed = [result for result in results if result["status"] == "FAILED"]
     missing_required = [
         result for result in results
-        if result["status"] == "MISSING" and result["required"] == "True"
+        if result["status"] == "MISSING" and result["required"]
     ]
 
     if failed:
