@@ -5,6 +5,7 @@ from datetime import date
 from pathlib import Path
 
 from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, lit
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -104,12 +105,24 @@ def validate_table(
 
     raw_row_count = count_raw_file_lines(raw_file, raw_has_header)
 
-    bronze_df = spark.read.parquet(str(bronze_path))
+    # Read the table root (keeps the ingestion_date partition column) and
+    # check only this run's partition; earlier batches stay in Bronze.
+    bronze_df = (
+        spark.read.parquet(str(bronze_path))
+        .filter(col("ingestion_date") == lit(BATCH_DATE).cast("date"))
+    )
     bronze_row_count = bronze_df.count()
     bronze_columns = set(bronze_df.columns)
     missing_metadata = sorted(BRONZE_METADATA_COLUMNS - bronze_columns)
 
     failure_reasons = []
+
+    if "batch_id" in bronze_columns:
+        batch_id_count = bronze_df.select("batch_id").distinct().count()
+        if batch_id_count != 1:
+            failure_reasons.append(
+                f"expected exactly one batch_id for ingestion_date={BATCH_DATE}, found {batch_id_count}"
+            )
 
     if raw_row_count <= 0:
         failure_reasons.append("raw row count is zero")
