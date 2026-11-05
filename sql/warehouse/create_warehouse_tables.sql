@@ -700,7 +700,7 @@ BEGIN
                         TIMESTAMP '9999-12-31'
                     ) AS effective_to,
                     coalesce(warehouse.safe_bool(r->>'is_current'), true) AS is_current,
-                    warehouse.safe_timestamp(coalesce(r->>'updated_at', r->>'source_updated_at', r->>'gold_processed_at')) AS source_updated_at,
+                    warehouse.safe_timestamp(coalesce(r->>'source_updated_at', r->>'effective_from', r->>'updated_at', r->>'gold_processed_at')) AS source_updated_at,
                     coalesce(nullif(r->>'scd_hash', ''), nullif(r->>'record_hash', '')) AS scd_hash
                 FROM src
             )
@@ -797,7 +797,7 @@ BEGIN
                         TIMESTAMP '9999-12-31'
                     ) AS effective_to,
                     coalesce(warehouse.safe_bool(r->>'is_current'), true) AS is_current,
-                    warehouse.safe_timestamp(coalesce(r->>'updated_at', r->>'source_updated_at', r->>'gold_processed_at')) AS source_updated_at,
+                    warehouse.safe_timestamp(coalesce(r->>'source_updated_at', r->>'effective_from', r->>'updated_at', r->>'gold_processed_at')) AS source_updated_at,
                     coalesce(nullif(r->>'scd_hash', ''), nullif(r->>'record_hash', '')) AS scd_hash
                 FROM src
             )
@@ -888,7 +888,7 @@ BEGIN
                         TIMESTAMP '9999-12-31'
                     ) AS effective_to,
                     coalesce(warehouse.safe_bool(r->>'is_current'), true) AS is_current,
-                    warehouse.safe_timestamp(coalesce(r->>'updated_at', r->>'source_updated_at', r->>'gold_processed_at')) AS source_updated_at,
+                    warehouse.safe_timestamp(coalesce(r->>'source_updated_at', r->>'effective_from', r->>'updated_at', r->>'gold_processed_at')) AS source_updated_at,
                     coalesce(nullif(r->>'scd_hash', ''), nullif(r->>'record_hash', '')) AS scd_hash
                 FROM src
             )
