@@ -89,6 +89,11 @@ def main() -> None:
                 }
                 print(f"{name}: FAILED - {exc}")
 
+    except Exception as exc:
+        overall_status = "FAIL"
+        report["error"] = str(exc)
+        raise
+
     finally:
         con.close()
 
