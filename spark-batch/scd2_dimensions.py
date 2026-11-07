@@ -21,6 +21,10 @@ GOLD_DIR.mkdir(parents=True, exist_ok=True)
 
 
 FAR_FUTURE_DATE = "9999-12-31"
+# The first version of every key is effective from the beginning of time so
+# facts dated before the key's first source change still match a version.
+# Interpreted in UTC (spark.sql.session.timeZone is UTC).
+BEGINNING_OF_TIME = "1900-01-01 00:00:00"
 
 
 DIMENSION_CONFIGS: Dict[str, Dict[str, object]] = {
@@ -279,6 +283,21 @@ def build_scd2_dimension(
         F.coalesce(F.col("effective_from"), F.current_timestamp()),
     )
 
+    # Capture the real times before effective_from is rewritten for the
+    # first version: source_updated_at is the record's real change time
+    # (output column); version_start_at is the version's real start, used
+    # internally for the surrogate key so existing key values stay stable.
+    cleaned = (
+        cleaned
+        .withColumn(
+            "source_updated_at",
+            F.to_timestamp(F.col(effective_column))
+            if effective_column
+            else F.lit(None).cast("timestamp"),
+        )
+        .withColumn("version_start_at", F.col("effective_from"))
+    )
+
     hashed = build_record_hash(cleaned, hashed_columns)
 
     base_window = Window.partitionBy(natural_key).orderBy(
@@ -315,6 +334,16 @@ def build_scd2_dimension(
             "is_current",
             F.col("next_effective_from").isNull(),
         )
+        # effective_to and is_current above use the real times. Only now is
+        # the first version per key opened back to the beginning of time.
+        .withColumn("version_number", F.row_number().over(version_window))
+        .withColumn(
+            "effective_from",
+            F.when(
+                F.col("version_number") == 1,
+                F.to_timestamp(F.lit(BEGINNING_OF_TIME)),
+            ).otherwise(F.col("effective_from")),
+        )
     )
 
     selected_columns = [
@@ -322,7 +351,7 @@ def build_scd2_dimension(
             F.concat_ws(
                 "||",
                 F.col(natural_key).cast("string"),
-                F.col("effective_from").cast("string"),
+                F.col("version_start_at").cast("string"),
                 F.col("record_hash").cast("string"),
             ),
             256,
@@ -341,6 +370,7 @@ def build_scd2_dimension(
             F.col("record_hash"),
             F.current_timestamp().alias("created_at"),
             F.current_timestamp().alias("updated_at"),
+            F.col("source_updated_at"),
         ]
     )
 
