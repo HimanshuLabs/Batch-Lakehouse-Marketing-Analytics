@@ -76,7 +76,7 @@ WHERE effective_to <= effective_from;
 SELECT
     customer_id,
     COUNT(*) AS version_count,
-    MIN(effective_from) AS first_seen_at,
+    COALESCE(MIN(source_updated_at), MIN(effective_from)) AS first_seen_at,
     MAX(effective_from) AS latest_seen_at
 FROM dim_customers_scd2
 GROUP BY customer_id
@@ -91,7 +91,7 @@ ORDER BY version_count DESC, customer_id;
 SELECT
     product_id,
     COUNT(*) AS version_count,
-    MIN(effective_from) AS first_seen_at,
+    COALESCE(MIN(source_updated_at), MIN(effective_from)) AS first_seen_at,
     MAX(effective_from) AS latest_seen_at
 FROM dim_products_scd2
 GROUP BY product_id
@@ -106,7 +106,7 @@ ORDER BY version_count DESC, product_id;
 SELECT
     campaign_id,
     COUNT(*) AS version_count,
-    MIN(effective_from) AS first_seen_at,
+    COALESCE(MIN(source_updated_at), MIN(effective_from)) AS first_seen_at,
     MAX(effective_from) AS latest_seen_at
 FROM dim_campaigns_scd2
 GROUP BY campaign_id
