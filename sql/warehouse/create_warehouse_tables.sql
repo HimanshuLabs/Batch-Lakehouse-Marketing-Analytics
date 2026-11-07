@@ -675,7 +675,7 @@ BEGIN
                             'customer',
                             coalesce(nullif(r->>'customer_id', ''), nullif(r->>'user_id', ''), 'UNKNOWN')
                             || '|'
-                            || coalesce(nullif(r->>'effective_from', ''), nullif(r->>'valid_from', ''), '1900-01-01')
+                            || coalesce(nullif(r->>'source_updated_at', ''), nullif(r->>'effective_from', ''), nullif(r->>'valid_from', ''), '1900-01-01')
                         )
                     ) AS customer_sk,
                     coalesce(nullif(r->>'customer_id', ''), nullif(r->>'user_id', ''), 'UNKNOWN') AS customer_id,
@@ -778,7 +778,7 @@ BEGIN
                             'product',
                             coalesce(nullif(r->>'product_id', ''), 'UNKNOWN')
                             || '|'
-                            || coalesce(nullif(r->>'effective_from', ''), nullif(r->>'valid_from', ''), '1900-01-01')
+                            || coalesce(nullif(r->>'source_updated_at', ''), nullif(r->>'effective_from', ''), nullif(r->>'valid_from', ''), '1900-01-01')
                         )
                     ) AS product_sk,
                     coalesce(nullif(r->>'product_id', ''), 'UNKNOWN') AS product_id,
@@ -867,7 +867,7 @@ BEGIN
                             'campaign',
                             coalesce(nullif(r->>'campaign_id', ''), 'UNKNOWN')
                             || '|'
-                            || coalesce(nullif(r->>'effective_from', ''), nullif(r->>'valid_from', ''), '1900-01-01')
+                            || coalesce(nullif(r->>'source_updated_at', ''), nullif(r->>'effective_from', ''), nullif(r->>'valid_from', ''), '1900-01-01')
                         )
                     ) AS campaign_sk,
                     coalesce(nullif((warehouse.safe_numeric(r->>'campaign_id')::BIGINT)::TEXT, ''), nullif(r->>'campaign_id', ''), 'UNKNOWN') AS campaign_id,
