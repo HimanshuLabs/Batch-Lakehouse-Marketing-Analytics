@@ -2,41 +2,90 @@
 Repair fact_web_events surrogate keys after inferred dimensions are loaded.
 
 Purpose:
-- create_warehouse_tables.sql loads fact_web_events before the separate inferred
-  customer/product/campaign dimension rows are inserted.
-- This file re-resolves customer_sk, product_sk, and campaign_sk from the source
-  natural keys in staging.stg_gold_fact_web_events.
-- It fixes web-event fact rows that fell back to UNKNOWN surrogate keys even
-  though source natural keys are available.
+- Re-resolves customer_sk, product_sk, and campaign_sk from the source natural
+  keys in staging.stg_gold_fact_web_events, point-in-time, with the same rule as
+  the fact_web_events load in create_warehouse_tables.sql: the version valid at
+  the event time, else the current version, else any version; a row keeps its
+  existing key when the natural key has no dimension row.
+- On a warehouse built by create_warehouse_tables.sql this changes nothing; it
+  only fixes rows if dimension members were added after the facts were loaded.
+- Idempotent: only rows whose keys differ are updated, and fact_conversions is
+  kept in step with fact_web_events.
 ============================================================================= */
 
 BEGIN;
 
-WITH resolved AS (
+WITH src AS (
     SELECT
         fwe.event_id,
-        COALESCE(dc.customer_sk, fwe.customer_sk) AS resolved_customer_sk,
-        COALESCE(dp.product_sk, fwe.product_sk) AS resolved_product_sk,
-        COALESCE(dcamp.campaign_sk, fwe.campaign_sk) AS resolved_campaign_sk
+        fwe.event_timestamp,
+        fwe.customer_sk,
+        fwe.product_sk,
+        fwe.campaign_sk,
+        s.customer_id::TEXT AS customer_id,
+        s.product_id::TEXT AS product_id,
+        CASE
+            WHEN s.campaign_id IS NULL THEN NULL
+            WHEN s.campaign_id = FLOOR(s.campaign_id)
+                THEN s.campaign_id::BIGINT::TEXT
+            ELSE s.campaign_id::TEXT
+        END AS campaign_id
     FROM warehouse.fact_web_events fwe
-    JOIN staging.stg_gold_fact_web_events src
-        ON src.event_id::TEXT = fwe.event_id::TEXT
-    LEFT JOIN warehouse.dim_customer dc
-        ON src.customer_id::TEXT = dc.customer_id
-       AND dc.is_current = TRUE
-    LEFT JOIN warehouse.dim_product dp
-        ON src.product_id::TEXT = dp.product_id
-       AND dp.is_current = TRUE
-    LEFT JOIN warehouse.dim_campaign dcamp
-        ON (
+    JOIN staging.stg_gold_fact_web_events s
+        ON s.event_id::TEXT = fwe.event_id::TEXT
+),
+resolved AS (
+    SELECT
+        src.event_id,
+        COALESCE(dc.customer_sk, src.customer_sk) AS resolved_customer_sk,
+        COALESCE(dp.product_sk, src.product_sk) AS resolved_product_sk,
+        COALESCE(dcamp.campaign_sk, src.campaign_sk) AS resolved_campaign_sk
+    FROM src
+    LEFT JOIN LATERAL (
+        SELECT d.customer_sk
+        FROM warehouse.dim_customer d
+        WHERE d.customer_id = src.customer_id
+        ORDER BY
             CASE
-                WHEN src.campaign_id IS NULL THEN NULL
-                WHEN src.campaign_id = FLOOR(src.campaign_id)
-                    THEN src.campaign_id::BIGINT::TEXT
-                ELSE src.campaign_id::TEXT
-            END
-        ) = dcamp.campaign_id
-       AND dcamp.is_current = TRUE
+                WHEN src.event_timestamp IS NOT NULL
+                 AND src.event_timestamp >= d.effective_from
+                 AND src.event_timestamp < d.effective_to THEN 1
+                WHEN d.is_current THEN 2
+                ELSE 3
+            END,
+            d.effective_from DESC
+        LIMIT 1
+    ) dc ON TRUE
+    LEFT JOIN LATERAL (
+        SELECT d.product_sk
+        FROM warehouse.dim_product d
+        WHERE d.product_id = src.product_id
+        ORDER BY
+            CASE
+                WHEN src.event_timestamp IS NOT NULL
+                 AND src.event_timestamp >= d.effective_from
+                 AND src.event_timestamp < d.effective_to THEN 1
+                WHEN d.is_current THEN 2
+                ELSE 3
+            END,
+            d.effective_from DESC
+        LIMIT 1
+    ) dp ON TRUE
+    LEFT JOIN LATERAL (
+        SELECT d.campaign_sk
+        FROM warehouse.dim_campaign d
+        WHERE d.campaign_id = src.campaign_id
+        ORDER BY
+            CASE
+                WHEN src.event_timestamp IS NOT NULL
+                 AND src.event_timestamp >= d.effective_from
+                 AND src.event_timestamp < d.effective_to THEN 1
+                WHEN d.is_current THEN 2
+                ELSE 3
+            END,
+            d.effective_from DESC
+        LIMIT 1
+    ) dcamp ON TRUE
 )
 UPDATE warehouse.fact_web_events fwe
 SET
@@ -50,6 +99,21 @@ WHERE fwe.event_id = resolved.event_id
         fwe.customer_sk IS DISTINCT FROM resolved.resolved_customer_sk
      OR fwe.product_sk IS DISTINCT FROM resolved.resolved_product_sk
      OR fwe.campaign_sk IS DISTINCT FROM resolved.resolved_campaign_sk
+  );
+
+-- Keep conversions (copied from fact_web_events at build time) in step.
+UPDATE warehouse.fact_conversions fc
+SET
+    customer_sk = fwe.customer_sk,
+    product_sk = fwe.product_sk,
+    campaign_sk = fwe.campaign_sk,
+    warehouse_loaded_at = CURRENT_TIMESTAMP
+FROM warehouse.fact_web_events fwe
+WHERE fc.event_id = fwe.event_id
+  AND (
+        fc.customer_sk IS DISTINCT FROM fwe.customer_sk
+     OR fc.product_sk IS DISTINCT FROM fwe.product_sk
+     OR fc.campaign_sk IS DISTINCT FROM fwe.campaign_sk
   );
 
 COMMIT;
