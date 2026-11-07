@@ -17,9 +17,6 @@ REQUIRED_FILES = {
 
 OPTIONAL_FILES = {
     "sql/warehouse/powerbi_export_queries.sql": [],
-    "sql/warehouse/load_inferred_web_campaigns.sql": [],
-    "sql/warehouse/load_inferred_web_customers.sql": [],
-    "sql/warehouse/load_inferred_web_products.sql": [],
     "sql/warehouse/repair_web_event_surrogate_keys.sql": [],
 }
 
