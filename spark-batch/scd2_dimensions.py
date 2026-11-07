@@ -26,6 +26,7 @@ FAR_FUTURE_DATE = "9999-12-31"
 DIMENSION_CONFIGS: Dict[str, Dict[str, object]] = {
     "customers": {
         "source_candidates": [
+            SILVER_DIR / "silver_customers_history",
             SILVER_DIR / "silver_customers",
             SILVER_DIR / "customers",
         ],
@@ -56,6 +57,7 @@ DIMENSION_CONFIGS: Dict[str, Dict[str, object]] = {
     },
     "products": {
         "source_candidates": [
+            SILVER_DIR / "silver_products_history",
             SILVER_DIR / "silver_products",
             SILVER_DIR / "products",
         ],
@@ -85,6 +87,7 @@ DIMENSION_CONFIGS: Dict[str, Dict[str, object]] = {
     },
     "campaigns": {
         "source_candidates": [
+            SILVER_DIR / "silver_campaigns_history",
             SILVER_DIR / "silver_campaigns",
             SILVER_DIR / "campaigns",
         ],
