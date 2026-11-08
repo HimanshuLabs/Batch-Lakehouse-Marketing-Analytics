@@ -69,6 +69,7 @@ def create_spark_session() -> SparkSession:
         SparkSession.builder
         .appName("Project2_Bronze_Quality_Checks")
         .master("local[*]")
+        .config("spark.sql.session.timeZone", "UTC")
         .config("spark.sql.shuffle.partitions", "4")
         .getOrCreate()
     )
@@ -160,6 +161,7 @@ def main() -> None:
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
     spark = create_spark_session()
+    print(f"spark.sql.session.timeZone={spark.conf.get('spark.sql.session.timeZone')}")
     results = []
 
     for table_name, config in TABLES.items():

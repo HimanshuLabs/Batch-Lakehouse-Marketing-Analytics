@@ -126,6 +126,7 @@ CREATE OR REPLACE FUNCTION warehouse.safe_timestamp(value TEXT)
 RETURNS TIMESTAMP
 LANGUAGE plpgsql
 IMMUTABLE
+SET timezone = 'UTC'
 AS $$
 BEGIN
     IF value IS NULL OR btrim(value) = '' THEN
