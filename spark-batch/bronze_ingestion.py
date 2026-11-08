@@ -70,6 +70,7 @@ def create_spark_session() -> SparkSession:
         SparkSession.builder
         .appName("Project2_Bronze_Ingestion")
         .master("local[*]")
+        .config("spark.sql.session.timeZone", "UTC")
         .config("spark.sql.shuffle.partitions", "4")
         .config("spark.sql.files.ignoreCorruptFiles", "true")
         .getOrCreate()
@@ -129,6 +130,7 @@ def main() -> None:
     BRONZE_BASE_DIR.mkdir(parents=True, exist_ok=True)
 
     spark = create_spark_session()
+    print(f"spark.sql.session.timeZone={spark.conf.get('spark.sql.session.timeZone')}")
     row_count_report = []
 
     print("Starting Bronze ingestion")

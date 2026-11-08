@@ -437,6 +437,7 @@ def write_dimension(df: DataFrame, output_path: Path) -> None:
 
 def main() -> None:
     spark = create_spark_session()
+    print(f"spark.sql.session.timeZone={spark.conf.get('spark.sql.session.timeZone')}")
 
     report: Dict[str, object] = {
         "job_name": "scd2_dimensions",

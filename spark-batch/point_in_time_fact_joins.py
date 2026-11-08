@@ -319,6 +319,7 @@ def validate_fact_table(
 
 def main() -> None:
     spark = create_spark_session()
+    print(f"spark.sql.session.timeZone={spark.conf.get('spark.sql.session.timeZone')}")
 
     report: Dict[str, object] = {
         "job_name": "point_in_time_fact_joins",

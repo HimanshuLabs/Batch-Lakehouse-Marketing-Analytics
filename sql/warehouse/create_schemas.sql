@@ -24,6 +24,9 @@ Schema ownership:
 
 BEGIN;
 
+-- Every new session reads and writes timestamps in UTC, whatever the client zone.
+ALTER DATABASE marketing_analytics SET timezone TO 'UTC';
+
 CREATE SCHEMA IF NOT EXISTS staging;
 COMMENT ON SCHEMA staging IS
 'Relational landing schema for trusted Project 2 Gold and SCD2 lakehouse outputs. Does not own raw, bronze, or silver processing.';

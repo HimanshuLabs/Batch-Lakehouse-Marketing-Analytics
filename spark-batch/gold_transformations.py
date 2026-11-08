@@ -33,6 +33,7 @@ def create_spark_session() -> SparkSession:
         SparkSession.builder
         .appName("Project2_Gold_Transformations")
         .master("local[2]")
+        .config("spark.sql.session.timeZone", os.environ.get("SOURCE_TIMEZONE", "Asia/Kolkata"))
         .config("spark.driver.memory", "4g")
         .config("spark.executor.memory", "4g")
         .config("spark.sql.shuffle.partitions", "2")
@@ -500,6 +501,7 @@ def main() -> None:
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
     spark = create_spark_session()
+    print(f"spark.sql.session.timeZone={spark.conf.get('spark.sql.session.timeZone')}")
 
     print("Starting Gold transformations")
     print(f"Batch date: {BATCH_DATE}")

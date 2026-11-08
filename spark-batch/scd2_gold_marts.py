@@ -396,6 +396,7 @@ def validate_marts(
 
 def main() -> None:
     spark = create_spark_session()
+    print(f"spark.sql.session.timeZone={spark.conf.get('spark.sql.session.timeZone')}")
 
     report: Dict[str, object] = {
         "job_name": "scd2_gold_marts",
