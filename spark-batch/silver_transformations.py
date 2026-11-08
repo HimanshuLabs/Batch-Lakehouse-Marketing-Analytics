@@ -6,6 +6,7 @@ from pathlib import Path
 
 from pyspark.sql import DataFrame, SparkSession, Window
 from pyspark.sql.functions import (
+    coalesce,
     col,
     current_timestamp,
     lit,
@@ -98,6 +99,28 @@ def write_table(df: DataFrame, output_path: Path) -> None:
     )
 
 
+def write_empty_table(df: DataFrame, output_path: Path) -> None:
+    # A partitioned write of zero rows leaves only _SUCCESS, which nothing can
+    # read back. Clear the old table with that write, then put one empty file
+    # carrying the schema into this batch's partition.
+    (
+        df.limit(0)
+        .write
+        .mode("overwrite")
+        .option("partitionOverwriteMode", "static")
+        .partitionBy("processed_date")
+        .parquet(str(output_path))
+    )
+    (
+        df.limit(0)
+        .drop("processed_date")
+        .coalesce(1)
+        .write
+        .mode("overwrite")
+        .parquet(str(output_path / f"processed_date={BATCH_DATE}"))
+    )
+
+
 def add_silver_metadata(df: DataFrame, table_name: str) -> DataFrame:
     business_columns = [
         column
@@ -125,8 +148,12 @@ def add_silver_metadata(df: DataFrame, table_name: str) -> DataFrame:
 
 
 def split_valid_invalid(df: DataFrame, invalid_condition, reason: str) -> tuple[DataFrame, DataFrame]:
-    valid_df = df.filter(~invalid_condition)
-    invalid_df = df.filter(invalid_condition).withColumn("quarantine_reason", lit(reason))
+    # Every rule below tests NULL explicitly. As a safety net, a rule that
+    # still evaluates to NULL counts as invalid, so every row lands in
+    # exactly one of the two outputs and none can vanish.
+    is_invalid = coalesce(invalid_condition, lit(True))
+    valid_df = df.filter(~is_invalid)
+    invalid_df = df.filter(is_invalid).withColumn("quarantine_reason", lit(reason))
     return valid_df, invalid_df
 
 
@@ -197,6 +224,8 @@ def clean_customers(spark: SparkSession) -> tuple[DataFrame, DataFrame, DataFram
         .withColumn("updated_at", safe_timestamp("updated_at"))
     )
 
+    # NULL allowed: user_name, gender, membership_tier, loyalty_points,
+    # preferred_language, home_state, country, user_segment, is_prime_user.
     invalid_condition = (
         col("user_id").isNull()
         | col("email").isNull()
@@ -239,6 +268,7 @@ def clean_products(spark: SparkSession) -> tuple[DataFrame, DataFrame, DataFrame
         .withColumn("updated_at", safe_timestamp("updated_at"))
     )
 
+    # NULL allowed: none of the business columns (updated_at is checked below).
     invalid_condition = (
         col("product_id").isNull()
         | col("product_name").isNull()
@@ -291,12 +321,15 @@ def clean_campaigns(spark: SparkSession) -> tuple[DataFrame, DataFrame, DataFram
     valid_sources = ["google", "facebook", "instagram", "email", "organic", "affiliate"]
     valid_statuses = ["planned", "active", "paused", "completed"]
 
+    # NULL allowed: ab_test_group, target_segment.
     invalid_condition = (
         col("campaign_id").isNull()
         | col("campaign_name").isNull()
+        | col("traffic_source").isNull()
         | (~col("traffic_source").isin(valid_sources))
         | col("budget").isNull()
         | (col("budget") <= 0)
+        | col("campaign_status").isNull()
         | (~col("campaign_status").isin(valid_statuses))
         | col("start_date").isNull()
         | col("end_date").isNull()
@@ -336,6 +369,7 @@ def clean_orders(spark: SparkSession) -> tuple[DataFrame, DataFrame]:
         .withColumn("city", trim(col("city")))
     )
 
+    # NULL allowed: campaign_id (no attributed campaign), country, city.
     invalid_condition = (
         col("order_id").isNull()
         | col("user_id").isNull()
@@ -382,6 +416,7 @@ def clean_order_items(spark: SparkSession) -> tuple[DataFrame, DataFrame]:
         )
     )
 
+    # NULL allowed: product_name, category, original_price, discount_percent.
     invalid_condition = (
         col("order_item_id").isNull()
         | col("order_id").isNull()
@@ -421,6 +456,7 @@ def clean_ad_spend(spark: SparkSession) -> tuple[DataFrame, DataFrame]:
         .withColumn("spend_amount", safe_double("spend_amount"))
     )
 
+    # NULL allowed: traffic_source.
     invalid_condition = (
         col("spend_id").isNull()
         | col("campaign_id").isNull()
@@ -504,11 +540,14 @@ def clean_web_events(spark: SparkSession) -> tuple[DataFrame, DataFrame]:
     # The first version checked too many fields in one giant OR expression,
     # which created a huge Spark logical plan and caused Java heap pressure locally.
     # This still catches the intentionally dirty web event using critical business rules.
+    # NULL allowed: every column not tested here, e.g. campaign_id,
+    # payment_method, search_query, city.
     invalid_condition = (
         col("event_id").isNull()
         | col("session_id").isNull()
         | col("user_id").isNull()
         | col("event_timestamp").isNull()
+        | col("event_type").isNull()
         | (~col("event_type").isin(valid_event_types))
         | col("product_id").isNull()
         | col("original_price").isNull()
@@ -518,6 +557,7 @@ def clean_web_events(spark: SparkSession) -> tuple[DataFrame, DataFrame]:
         | (col("discount_percent") > 100)
         | col("discounted_price").isNull()
         | (col("discounted_price") < 0)
+        | col("device_type").isNull()
         | (~col("device_type").isin(valid_device_types))
         | col("fraud_score").isNull()
         | (col("fraud_score") < 0)
@@ -574,8 +614,11 @@ def run_table(
         write_table(history_df, history_path)
         history_df.unpersist()
 
+    # Always rewrite quarantine so last run's rows can never survive into this run.
     if invalid_count > 0:
         write_table(invalid_df, quarantine_path)
+    else:
+        write_empty_table(invalid_df, quarantine_path)
 
     valid_df.unpersist()
     invalid_df.unpersist()
