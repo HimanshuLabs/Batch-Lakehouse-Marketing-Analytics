@@ -88,17 +88,21 @@ def validate_sql_file(
             errors.append(f"Expected keyword {keyword!r} not found in {path_text}")
 
 
-# A function call is "warehouse.<name>(". The same text also appears after
+# Schemas whose functions the project defines itself.
+FUNCTION_SCHEMAS = ("warehouse", "audit")
+_SCHEMA = "(" + "|".join(FUNCTION_SCHEMAS) + ")"
+
+# A function call is "<schema>.<name>(". The same text also appears after
 # keywords that take a relation followed by a column list, such as
 # "INSERT INTO warehouse.dim_customer (" or "REFERENCES warehouse.dim_date(".
-FUNCTION_CALL = re.compile(r"\bwarehouse\.([a-z_][a-z0-9_]*)\s*\(", re.IGNORECASE)
+FUNCTION_CALL = re.compile(r"\b" + _SCHEMA + r"\.([a-z_][a-z0-9_]*)\s*\(", re.IGNORECASE)
 FUNCTION_DEFINITION = re.compile(
-    r"\bcreate\s+(?:or\s+replace\s+)?function\s+warehouse\.([a-z_][a-z0-9_]*)\s*\(",
+    r"\bcreate\s+(?:or\s+replace\s+)?function\s+" + _SCHEMA + r"\.([a-z_][a-z0-9_]*)\s*\(",
     re.IGNORECASE,
 )
 RELATION_DEFINITION = re.compile(
     r"\bcreate\s+(?:or\s+replace\s+)?(?:materialized\s+)?(?:table|view)\s+"
-    r"(?:if\s+not\s+exists\s+)?warehouse\.([a-z_][a-z0-9_]*)",
+    r"(?:if\s+not\s+exists\s+)?" + _SCHEMA + r"\.([a-z_][a-z0-9_]*)",
     re.IGNORECASE,
 )
 RELATION_KEYWORDS = {"into", "table", "references", "on", "join", "from", "update", "exists", "view"}
@@ -116,24 +120,24 @@ def strip_comments(text: str) -> str:
 
 
 def validate_function_references(sql_files: list[Path], errors: list[str]) -> None:
-    """Every warehouse.<fn>( call must have a CREATE FUNCTION warehouse.<fn> in sql/warehouse."""
+    """Every <schema>.<fn>( call (warehouse, audit) must have a CREATE FUNCTION <schema>.<fn> in sql/warehouse."""
     code = {path: strip_comments(path.read_text(encoding="utf-8")) for path in sql_files}
 
     defined = {
-        name.lower()
+        (schema.lower(), name.lower())
         for text in code.values()
-        for name in FUNCTION_DEFINITION.findall(text)
+        for schema, name in FUNCTION_DEFINITION.findall(text)
     }
     relations = {
-        name.lower()
+        (schema.lower(), name.lower())
         for text in code.values()
-        for name in RELATION_DEFINITION.findall(text)
+        for schema, name in RELATION_DEFINITION.findall(text)
     }
 
     for path, text in code.items():
         for match in FUNCTION_CALL.finditer(text):
-            name = match.group(1).lower()
-            if name in defined or name in relations:
+            schema, name = match.group(1).lower(), match.group(2).lower()
+            if (schema, name) in defined or (schema, name) in relations:
                 continue
 
             preceding = re.findall(r"[a-z_]+", text[max(0, match.start() - 40):match.start()].lower())
@@ -142,8 +146,8 @@ def validate_function_references(sql_files: list[Path], errors: list[str]) -> No
 
             line = text.count("\n", 0, match.start()) + 1
             errors.append(
-                f"{path}:{line}: warehouse.{name}() is called but no "
-                f"CREATE FUNCTION warehouse.{name} exists in sql/warehouse/*.sql"
+                f"{path}:{line}: {schema}.{name}() is called but no "
+                f"CREATE FUNCTION {schema}.{name} exists in sql/warehouse/*.sql"
             )
 
 
