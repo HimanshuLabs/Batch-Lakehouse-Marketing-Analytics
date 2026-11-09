@@ -4,9 +4,9 @@ Repair fact_web_events surrogate keys after inferred dimensions are loaded.
 Purpose:
 - Re-resolves customer_sk, product_sk, and campaign_sk from the source natural
   keys in staging.stg_gold_fact_web_events, point-in-time, with the same rule as
-  the fact_web_events load in create_warehouse_tables.sql: the version valid at
-  the event time, else the current version, else any version; a row keeps its
-  existing key when the natural key has no dimension row.
+  the fact_web_events load in create_warehouse_tables.sql: only the version
+  whose effective range covers the event time; with no covering version the key
+  is the unknown member (0), counted by audit.scd2_fact_key_without_covering_version.
 - On a warehouse built by create_warehouse_tables.sql this changes nothing; it
   only fixes rows if dimension members were added after the facts were loaded.
 - Idempotent: only rows whose keys differ are updated, and fact_conversions is
@@ -37,53 +37,35 @@ WITH src AS (
 resolved AS (
     SELECT
         src.event_id,
-        COALESCE(dc.customer_sk, src.customer_sk) AS resolved_customer_sk,
-        COALESCE(dp.product_sk, src.product_sk) AS resolved_product_sk,
-        COALESCE(dcamp.campaign_sk, src.campaign_sk) AS resolved_campaign_sk
+        COALESCE(dc.customer_sk, 0) AS resolved_customer_sk,
+        COALESCE(dp.product_sk, 0) AS resolved_product_sk,
+        COALESCE(dcamp.campaign_sk, 0) AS resolved_campaign_sk
     FROM src
     LEFT JOIN LATERAL (
         SELECT d.customer_sk
         FROM warehouse.dim_customer d
         WHERE d.customer_id = src.customer_id
-        ORDER BY
-            CASE
-                WHEN src.event_timestamp IS NOT NULL
-                 AND src.event_timestamp >= d.effective_from
-                 AND src.event_timestamp < d.effective_to THEN 1
-                WHEN d.is_current THEN 2
-                ELSE 3
-            END,
-            d.effective_from DESC
+          AND src.event_timestamp >= d.effective_from
+          AND src.event_timestamp < d.effective_to
+        ORDER BY d.effective_from DESC, d.customer_sk
         LIMIT 1
     ) dc ON TRUE
     LEFT JOIN LATERAL (
         SELECT d.product_sk
         FROM warehouse.dim_product d
         WHERE d.product_id = src.product_id
-        ORDER BY
-            CASE
-                WHEN src.event_timestamp IS NOT NULL
-                 AND src.event_timestamp >= d.effective_from
-                 AND src.event_timestamp < d.effective_to THEN 1
-                WHEN d.is_current THEN 2
-                ELSE 3
-            END,
-            d.effective_from DESC
+          AND src.event_timestamp >= d.effective_from
+          AND src.event_timestamp < d.effective_to
+        ORDER BY d.effective_from DESC, d.product_sk
         LIMIT 1
     ) dp ON TRUE
     LEFT JOIN LATERAL (
         SELECT d.campaign_sk
         FROM warehouse.dim_campaign d
         WHERE d.campaign_id = src.campaign_id
-        ORDER BY
-            CASE
-                WHEN src.event_timestamp IS NOT NULL
-                 AND src.event_timestamp >= d.effective_from
-                 AND src.event_timestamp < d.effective_to THEN 1
-                WHEN d.is_current THEN 2
-                ELSE 3
-            END,
-            d.effective_from DESC
+          AND src.event_timestamp >= d.effective_from
+          AND src.event_timestamp < d.effective_to
+        ORDER BY d.effective_from DESC, d.campaign_sk
         LIMIT 1
     ) dcamp ON TRUE
 )
