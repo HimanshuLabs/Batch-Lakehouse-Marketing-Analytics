@@ -1,4 +1,6 @@
 from pathlib import Path
+import argparse
+import os
 import re
 import sys
 
@@ -86,7 +88,75 @@ def validate_sql_file(
             errors.append(f"Expected keyword {keyword!r} not found in {path_text}")
 
 
+# A function call is "warehouse.<name>(". The same text also appears after
+# keywords that take a relation followed by a column list, such as
+# "INSERT INTO warehouse.dim_customer (" or "REFERENCES warehouse.dim_date(".
+FUNCTION_CALL = re.compile(r"\bwarehouse\.([a-z_][a-z0-9_]*)\s*\(", re.IGNORECASE)
+FUNCTION_DEFINITION = re.compile(
+    r"\bcreate\s+(?:or\s+replace\s+)?function\s+warehouse\.([a-z_][a-z0-9_]*)\s*\(",
+    re.IGNORECASE,
+)
+RELATION_DEFINITION = re.compile(
+    r"\bcreate\s+(?:or\s+replace\s+)?(?:materialized\s+)?(?:table|view)\s+"
+    r"(?:if\s+not\s+exists\s+)?warehouse\.([a-z_][a-z0-9_]*)",
+    re.IGNORECASE,
+)
+RELATION_KEYWORDS = {"into", "table", "references", "on", "join", "from", "update", "exists", "view"}
+
+
+def strip_comments(text: str) -> str:
+    """Blank out -- and /* */ comments, keeping every newline so line numbers stay right."""
+    without_blocks = re.sub(
+        r"/\*.*?\*/",
+        lambda match: re.sub(r"[^\n]", " ", match.group(0)),
+        text,
+        flags=re.DOTALL,
+    )
+    return re.sub(r"--[^\n]*", lambda match: " " * len(match.group(0)), without_blocks)
+
+
+def validate_function_references(sql_files: list[Path], errors: list[str]) -> None:
+    """Every warehouse.<fn>( call must have a CREATE FUNCTION warehouse.<fn> in sql/warehouse."""
+    code = {path: strip_comments(path.read_text(encoding="utf-8")) for path in sql_files}
+
+    defined = {
+        name.lower()
+        for text in code.values()
+        for name in FUNCTION_DEFINITION.findall(text)
+    }
+    relations = {
+        name.lower()
+        for text in code.values()
+        for name in RELATION_DEFINITION.findall(text)
+    }
+
+    for path, text in code.items():
+        for match in FUNCTION_CALL.finditer(text):
+            name = match.group(1).lower()
+            if name in defined or name in relations:
+                continue
+
+            preceding = re.findall(r"[a-z_]+", text[max(0, match.start() - 40):match.start()].lower())
+            if preceding and preceding[-1] in RELATION_KEYWORDS:
+                continue
+
+            line = text.count("\n", 0, match.start()) + 1
+            errors.append(
+                f"{path}:{line}: warehouse.{name}() is called but no "
+                f"CREATE FUNCTION warehouse.{name} exists in sql/warehouse/*.sql"
+            )
+
+
 def main() -> int:
+    parser = argparse.ArgumentParser(description="Validate the warehouse SQL assets.")
+    parser.add_argument(
+        "--root",
+        default=".",
+        help="Repository root to validate (default: the current directory).",
+    )
+    args = parser.parse_args()
+    os.chdir(args.root)
+
     errors: list[str] = []
 
     for path_text, keywords in REQUIRED_FILES.items():
@@ -104,6 +174,8 @@ def main() -> int:
         text = path.read_text(encoding="utf-8")
         if not text.strip():
             errors.append(f"Warehouse SQL file is empty: {path}")
+
+    validate_function_references(warehouse_sql_files, errors)
 
     if errors:
         print("Warehouse SQL validation failed:")
