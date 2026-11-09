@@ -3,7 +3,8 @@ testpaths = ["tests"]
 markers = [
     "integration: needs a running PostgreSQL warehouse and the full pipeline (tests/integration)",
 ]
-addopts = "-ra"
+# Integration tests need a finished pipeline run; select them with -m integration.
+addopts = "-ra -m 'not integration'"
 
 [tool.ruff]
 target-version = "py314"
