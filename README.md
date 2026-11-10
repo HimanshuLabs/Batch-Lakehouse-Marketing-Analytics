@@ -196,7 +196,7 @@ The lakehouse engine processes generated source data through Medallion layers.
 
 ### Batches and BATCH_DATE
 
-Every run processes one batch, named by `BATCH_DATE` (`YYYY-MM-DD`). Each job reads `BATCH_DATE` from the environment and falls back to today's date when it is unset, so always set it explicitly. The Airflow DAG sets it from the run's `run_after` date.
+Every run processes one batch, named by `BATCH_DATE` (`YYYY-MM-DD`). Each job reads `BATCH_DATE` from the environment and falls back to today's date when it is unset, so always set it explicitly. The Airflow DAG sets it from the run's logical date, or from its `run_after` time when the run has no logical date (UTC in both cases).
 
 The generator is incremental and deterministic:
 
@@ -369,9 +369,9 @@ build_warehouse_tables → run_scd2_validation → build_reporting_marts →
 run_warehouse_reconciliation → dbt_run → dbt_test → dbt_docs → power_bi_export
 ```
 
-The DAG has no schedule and allows one active run. Its tasks use `venv/bin/python` and `venv-dbt/bin/dbt`, and each task gets `BATCH_DATE = {{ dag_run.run_after | ds }}`.
+The DAG has no schedule and allows one active run. Its tasks use `venv/bin/python` and `venv-dbt/bin/dbt`, and each task gets `BATCH_DATE = {{ (dag_run.logical_date or dag_run.run_after) | ds }}`.
 
-**Trigger runs through the REST API with an explicit `run_after`.** In Airflow 3.2.0, `airflow dags trigger --logical-date ...` and `airflow dags test` both set `run_after` to the current time. The run would therefore process today's date: `generate_data` would create a new batch instead of rerunning the intended one. Section 15 has the trigger and the render gate that proves the date before any task runs.
+**Trigger from the UI.** Set the logical date to the day to process or rerun, at 12:00 on that day, or leave it at now to process today. The CLI's `-l` works the same way. Section 15 also has a scripted REST trigger with a render gate that shows the date before any task runs.
 
 The full setup, verified with a 23-of-23 successful run, is in:
 
@@ -622,7 +622,9 @@ ps -eo pid,args | awk '$2 ~ /venv-airflow\/bin\/python$/ && $3 ~ /venv-airflow\/
 ss -ltnp | grep ':8080 ' | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2 > "$AIRFLOW_HOME/run/api-server.pid"
 ```
 
-**Trigger through the REST API with `run_after`.** The DAG is paused at this point. For the first run of a date, set `logical_date`. For a rerun of a date that already has a run, send `"logical_date": null`: Airflow allows one run per logical date, and `BATCH_DATE` comes from `run_after` anyway.
+**Trigger from the UI.** Open the DAG, choose Trigger, and set **Logical Date** to the day you want to process or rerun, at 12:00 on that day. Noon keeps the day the same in UTC, which `BATCH_DATE` uses, whichever timezone the UI shows. To process today, leave the field at its default, now. The CLI works the same way: `airflow dags trigger batch_lakehouse_marketing_analytics -l 2026-06-18T12:00:00+00:00`, or no `-l` for today. Each logical date can have one run. To rerun a day that already has one, clear that run in the UI or use another time on the same day.
+
+**Scripted option: REST trigger and render gate.** With the DAG paused, trigger through the REST API. For the first run of a date, set `logical_date`. For a rerun of a date that already has a run, send `"logical_date": null` with `run_after` set: without a logical date, `BATCH_DATE` comes from `run_after`.
 
 ```bash
 TOKEN=$(curl -s http://127.0.0.1:8080/auth/token | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
@@ -699,7 +701,7 @@ export BATCH_DATE=2026-06-18
 
 ### Option 1: Airflow
 
-Trigger the DAG as in section 15, using the REST trigger and then the render gate.
+Trigger the DAG from the UI with the logical date set to the batch date, or use the scripted REST trigger and render gate in section 15.
 
 ### Option 2: the DAG's tasks without Airflow
 
