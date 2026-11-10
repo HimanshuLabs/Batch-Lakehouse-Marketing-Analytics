@@ -4,8 +4,9 @@
 #   - a copy of this working tree under /tmp (tracked and untracked, non-ignored
 #     files), sharing the project venv through a symlink (nothing installed)
 #   - a throwaway Postgres container on its own port
-#   - the dbt tasks are skipped: venv-dbt does not work on Python 3.14 locally;
-#     CI runs them in a Python 3.13 venv
+#   - the dbt tasks are skipped by design; venv-dbt works on Python 3.13
+#     and runs them against the real warehouse, and CI runs them in the
+#     integration job
 # Everything is removed afterwards unless --keep is given.
 #
 # Usage: bash tests/integration/run_local.sh [--keep] [--write-expected]

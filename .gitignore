@@ -21,12 +21,13 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Logs and runtime reports
+# Logs and runtime reports: nothing under logs/ is tracked except .gitkeep placeholders
 logs/*
-*.log
-
-# Keep folder placeholder
 !logs/.gitkeep
+!logs/warehouse/
+logs/warehouse/*
+!logs/warehouse/.gitkeep
+*.log
 
 # Large generated lakehouse data
 data/raw/*

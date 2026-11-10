@@ -41,17 +41,8 @@ jobs:
           set -euo pipefail
           status=0
 
-          # Files written by local runs before this guard existed; Step 12
-          # removes their local paths, then this exclusion list goes away.
-          known_local_path_files=(
-            ':(exclude)logs/point_in_time_fact_join_report.json'
-            ':(exclude)logs/scd2_gold_mart_report.json'
-            ':(exclude)logs/scd2_quality_report.json'
-            ':(exclude)docs/warehouse/airflow_working_state.md'
-          )
-
           if git grep -nIE '/home/[A-Za-z0-9_.-]+/|/Users/[A-Za-z0-9_.-]+/|Desktop/p2-notes' \
-              -- . ':(exclude).github/workflows/ci.yml' "${known_local_path_files[@]}"; then
+              -- . ':(exclude).github/workflows/ci.yml'; then
             echo "::error::Local machine path committed (see lines above)."
             status=1
           fi
@@ -307,6 +298,8 @@ jobs:
 
           "${{ steps.py314.outputs.python-path }}" -m venv venv
           venv/bin/python -m pip install -r requirements.txt
+          # run_integration.sh asserts with venv/bin/python -m pytest
+          venv/bin/python -m pip install "$(grep -E '^pytest==' requirements-dev.txt)"
 
           "${{ steps.py313.outputs.python-path }}" -m venv venv-dbt
           venv-dbt/bin/python -m pip install -r requirements-dev.txt
@@ -322,9 +315,8 @@ jobs:
           PGCONTAINER: project2_postgres
           # Tasks get only DEFAULT_ENV, like Airflow's BashOperator; Spark also
           # needs the JDK that setup-java installed.
-          P2_IT_TASK_ENV: JAVA_HOME=${{ env.JAVA_HOME }}
         run: |
-          bash tests/integration/run_integration.sh "$RUNNER_TEMP/p2-integration"
+          P2_IT_TASK_ENV="JAVA_HOME=$JAVA_HOME" bash tests/integration/run_integration.sh "$RUNNER_TEMP/p2-integration"
 
   powerbi-assets:
     name: Power BI artifact validation

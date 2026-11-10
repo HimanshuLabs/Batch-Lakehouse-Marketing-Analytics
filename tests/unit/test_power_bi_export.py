@@ -59,3 +59,23 @@ def test_data_quality_summary_is_built_from_verified_checks(load_job):
     stale_report = {"facts": {"fact_orders_scd2": {"rejected_rows": 147}}}
     with pytest.raises(ValueError, match="rerun point_in_time_fact_joins"):
         export.build_data_quality_summary(reconciliation, scd2_validation, silver_report, stale_report)
+
+
+def test_data_quality_summary_file_uses_unix_line_endings(load_job, tmp_path):
+    # Like the other exports: "\n" only. csv's default "\r\n" would differ.
+    export = load_job(EXPORT_JOB, BATCH_DATE="2026-06-18")
+    rows = [
+        {"metric_group": "SCD2 Validation", "metric_name": "check_a", "metric_value": 0, "status": "PASS"},
+        {"metric_group": "SCD2 Validation", "metric_name": "check_b", "metric_value": 3, "status": "FAIL"},
+    ]
+    path = tmp_path / "data_quality_summary.csv"
+
+    export.write_summary(rows, path)
+
+    data = path.read_bytes()
+    assert b"\r" not in data
+    assert data.decode("utf-8").splitlines() == [
+        ",".join(export.SUMMARY_COLUMNS),
+        "SCD2 Validation,check_a,0,PASS",
+        "SCD2 Validation,check_b,3,FAIL",
+    ]

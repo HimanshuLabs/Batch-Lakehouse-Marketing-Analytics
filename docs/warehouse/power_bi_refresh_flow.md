@@ -128,19 +128,15 @@ row_count > 0
 
 ## Standard refresh sequence
 
-Run the full warehouse pipeline first so the PostgreSQL marts are current.
+Run these from the repository root. Run the full warehouse pipeline first so the PostgreSQL marts are current.
 
 ```bash
-cd ~/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics
-
 ./scripts/run_warehouse_bi_pipeline.sh
 ```
 
 Then export fresh Power BI CSV datasets:
 
 ```bash
-cd ~/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics
-
 source venv/bin/activate
 
 export PGHOST=localhost
