@@ -214,23 +214,24 @@ def main() -> None:
     }
 
     overall_status = "PASS"
-    con = duckdb.connect(database=":memory:")
+    con = None
 
     try:
+        # Inside try, so a failed connect still writes a FAIL report.
+        con = duckdb.connect(database=":memory:")
         for name, query in EXPORTS.items():
             output_path = export_dir / f"{name}.csv"
             print(f"Exporting {name} -> {output_path}")
 
             try:
-                con.execute(
+                # COPY returns the number of rows it wrote, so each query runs once.
+                row_count = con.execute(
                     f"""
                     COPY ({query})
                     TO '{output_path}'
                     WITH (HEADER, DELIMITER ',')
                     """
-                )
-
-                row_count = con.execute(query).fetchdf().shape[0]
+                ).fetchone()[0]
 
                 report["exports"][name] = {
                     "status": "PASS",
@@ -273,7 +274,8 @@ def main() -> None:
         raise
 
     finally:
-        con.close()
+        if con is not None:
+            con.close()
 
         report["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
         report["overall_status"] = overall_status
