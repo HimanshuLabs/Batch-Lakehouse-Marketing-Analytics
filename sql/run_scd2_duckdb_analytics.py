@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -15,12 +14,9 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def split_sql_queries(sql_text: str) -> list[str]:
-    cleaned = re.sub(r"--.*", "", sql_text)
-    return [
-        query.strip()
-        for query in cleaned.split(";")
-        if query.strip()
-    ]
+    # DuckDB's own parser, so ';' or '--' inside a string literal or comment
+    # never splits or truncates a statement.
+    return [statement.query.strip() for statement in duckdb.extract_statements(sql_text)]
 
 
 def main() -> None:
@@ -33,9 +29,11 @@ def main() -> None:
 
     overall_status = "PASS"
 
-    con = duckdb.connect(database=":memory:")
+    con = None
 
     try:
+        # Inside try, so a failed connect still writes a FAIL report.
+        con = duckdb.connect(database=":memory:")
         sql_text = QUERY_FILE.read_text(encoding="utf-8")
         queries = split_sql_queries(sql_text)
 
@@ -76,7 +74,8 @@ def main() -> None:
         raise
 
     finally:
-        con.close()
+        if con is not None:
+            con.close()
 
         report["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
         report["overall_status"] = overall_status
