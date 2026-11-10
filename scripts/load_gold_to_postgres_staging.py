@@ -158,7 +158,7 @@ def read_parquet_dataset(source_path: Path, load_id: str) -> pd.DataFrame:
 def build_engine() -> Engine:
     database_url = os.getenv("DATABASE_URL")
     if database_url:
-        return create_engine(database_url, future=True, pool_pre_ping=True)
+        return create_engine(database_url, future=True, pool_pre_ping=True, connect_args={"options": "-c timezone=UTC"})
 
     required_env = ["PGHOST", "PGPORT", "PGDATABASE", "PGUSER"]
     missing = [name for name in required_env if not os.getenv(name)]
@@ -178,7 +178,7 @@ def build_engine() -> Engine:
         database=os.getenv("PGDATABASE"),
     )
 
-    return create_engine(url, future=True, pool_pre_ping=True)
+    return create_engine(url, future=True, pool_pre_ping=True, connect_args={"options": "-c timezone=UTC"})
 
 
 def create_support_objects(engine: Engine, target_schema: str) -> None:
@@ -590,7 +590,7 @@ def main() -> int:
     failed = [result for result in results if result["status"] == "FAILED"]
     missing_required = [
         result for result in results
-        if result["status"] == "MISSING" and result["required"] == "True"
+        if result["status"] == "MISSING" and result["required"]
     ]
 
     if failed:

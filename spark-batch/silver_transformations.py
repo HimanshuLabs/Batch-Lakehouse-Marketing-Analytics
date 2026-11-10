@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import os
 from datetime import date
 from pathlib import Path
 
 from pyspark.sql import DataFrame, SparkSession, Window
 from pyspark.sql.functions import (
+    coalesce,
     col,
     current_timestamp,
     lit,
@@ -18,12 +20,14 @@ from pyspark.sql.functions import (
     when,
     regexp_extract,
     expr,
+    isnan,
 )
 from pyspark.sql.types import (
     BooleanType,
     DoubleType,
     IntegerType,
     LongType,
+    StringType,
 )
 
 
@@ -34,7 +38,41 @@ SILVER_BASE_DIR = PROJECT_ROOT / "data" / "silver"
 QUARANTINE_BASE_DIR = PROJECT_ROOT / "data" / "quarantine"
 LOGS_DIR = PROJECT_ROOT / "logs"
 
-BATCH_DATE = date.today().isoformat()
+BATCH_DATE = date.fromisoformat(os.environ.get("BATCH_DATE") or date.today().isoformat()).isoformat()
+
+BRONZE_METADATA_COLUMNS = {
+    "ingestion_timestamp",
+    "ingestion_date",
+    "batch_id",
+    "source_system",
+    "source_file_name",
+    "record_hash",
+}
+
+# Text that means "missing": how Python and pandas print a missing value
+# (json.dumps writes a float NaN as NaN), plus blank strings. Matched exactly
+# after trim, so real values such as the name "Nan" are kept.
+MISSING_TEXT_TOKENS = ["NaN", "nan", "None", "null", "NULL", "NaT", "<NA>", ""]
+
+# Free text typed by users, where these words can be genuine.
+FREE_TEXT_COLUMNS = {"search_query"}
+
+# Double columns that no validity rule checks. A NaN or +/-Infinity there
+# becomes NULL, so averages can never become NaN. Rule columns are not listed:
+# a non-finite value there is quarantined by not_finite instead.
+#   customers, products, campaigns, orders, ad_spend: none
+#   order_items: original_price, discount_percent
+#   web_events:  cart_value, engagement_score, purchase_probability,
+#                cart_abandonment_probability
+NON_RULE_DOUBLE_COLUMNS = {
+    "order_items": {"original_price", "discount_percent"},
+    "web_events": {
+        "cart_value",
+        "engagement_score",
+        "purchase_probability",
+        "cart_abandonment_probability",
+    },
+}
 
 
 def safe_int(column_name: str):
@@ -61,6 +99,47 @@ def safe_date(column_name: str):
     return expr(f"try_cast(`{column_name}` as date)")
 
 
+def not_finite(column_name: str):
+    # NULL, NaN or +/-Infinity. NaN compares greater than every number in
+    # Spark, so a NaN would pass every "<= 0" or "< 0" rule.
+    value = col(column_name)
+    return value.isNull() | isnan(value) | value.isin(float("inf"), float("-inf"))
+
+
+def null_missing_values(df: DataFrame, table_name: str) -> DataFrame:
+    # One select over the Bronze columns: missing-value text becomes NULL in
+    # string columns, and non-finite values become NULL in the table's
+    # non-rule double columns (typed doubles in JSON, text in CSV).
+    non_rule_doubles = NON_RULE_DOUBLE_COLUMNS.get(table_name, set())
+
+    def cleaned(field):
+        name = field.name
+        missing = None
+
+        if (
+            isinstance(field.dataType, StringType)
+            and name not in BRONZE_METADATA_COLUMNS
+            and name not in FREE_TEXT_COLUMNS
+        ):
+            missing = trim(col(name)).isin(MISSING_TEXT_TOKENS)
+
+        if name in non_rule_doubles:
+            as_double = expr(f"try_cast(`{name}` as double)")
+            non_finite = isnan(as_double) | as_double.isin(float("inf"), float("-inf"))
+            missing = non_finite if missing is None else (missing | non_finite)
+
+        if missing is None:
+            return col(name)
+
+        return (
+            when(missing, lit(None).cast(field.dataType))
+            .otherwise(col(name))
+            .alias(name)
+        )
+
+    return df.select(*[cleaned(field) for field in df.schema.fields])
+
+
 def create_spark_session() -> SparkSession:
     checkpoint_dir = PROJECT_ROOT / "checkpoints" / "silver"
 
@@ -68,6 +147,7 @@ def create_spark_session() -> SparkSession:
         SparkSession.builder
         .appName("Project2_Silver_Transformations")
         .master("local[2]")
+        .config("spark.sql.session.timeZone", os.environ.get("SOURCE_TIMEZONE", "Asia/Kolkata"))
         .config("spark.driver.memory", "4g")
         .config("spark.executor.memory", "4g")
         .config("spark.sql.shuffle.partitions", "2")
@@ -83,7 +163,7 @@ def read_bronze(spark: SparkSession, table_name: str) -> DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"Missing Bronze table: {path}")
 
-    return spark.read.parquet(str(path))
+    return null_missing_values(spark.read.parquet(str(path)), table_name)
 
 
 def write_table(df: DataFrame, output_path: Path) -> None:
@@ -93,6 +173,28 @@ def write_table(df: DataFrame, output_path: Path) -> None:
         .mode("overwrite")
         .partitionBy("processed_date")
         .parquet(str(output_path))
+    )
+
+
+def write_empty_table(df: DataFrame, output_path: Path) -> None:
+    # A partitioned write of zero rows leaves only _SUCCESS, which nothing can
+    # read back. Clear the old table with that write, then put one empty file
+    # carrying the schema into this batch's partition.
+    (
+        df.limit(0)
+        .write
+        .mode("overwrite")
+        .option("partitionOverwriteMode", "static")
+        .partitionBy("processed_date")
+        .parquet(str(output_path))
+    )
+    (
+        df.limit(0)
+        .drop("processed_date")
+        .coalesce(1)
+        .write
+        .mode("overwrite")
+        .parquet(str(output_path / f"processed_date={BATCH_DATE}"))
     )
 
 
@@ -123,13 +225,52 @@ def add_silver_metadata(df: DataFrame, table_name: str) -> DataFrame:
 
 
 def split_valid_invalid(df: DataFrame, invalid_condition, reason: str) -> tuple[DataFrame, DataFrame]:
-    valid_df = df.filter(~invalid_condition)
-    invalid_df = df.filter(invalid_condition).withColumn("quarantine_reason", lit(reason))
+    # Every rule below tests NULL explicitly. As a safety net, a rule that
+    # still evaluates to NULL counts as invalid, so every row lands in
+    # exactly one of the two outputs and none can vanish.
+    is_invalid = coalesce(invalid_condition, lit(True))
+    valid_df = df.filter(~is_invalid)
+    invalid_df = df.filter(is_invalid).withColumn("quarantine_reason", lit(reason))
     return valid_df, invalid_df
 
 
+DEDUPE_TIEBREAKS = [
+    ("ingestion_date", "desc"),
+    ("ingestion_timestamp", "desc"),
+    ("record_hash", "asc"),
+]
+
+
+def quarantine_missing_updated_at(
+    valid: DataFrame,
+    invalid: DataFrame,
+    entity: str,
+) -> tuple[DataFrame, DataFrame]:
+    # Dimension versions are keyed by updated_at, so a NULL (or unparseable,
+    # which safe_timestamp turns into NULL) updated_at cannot become a version.
+    valid, missing_updated_at = split_valid_invalid(
+        valid,
+        col("updated_at").isNull(),
+        f"Invalid {entity} record: null or unparseable updated_at",
+    )
+    return valid, invalid.unionByName(missing_updated_at)
+
+
 def deduplicate_latest(df: DataFrame, key_columns: list[str], order_column: str) -> DataFrame:
-    window_spec = Window.partitionBy(*key_columns).orderBy(col(order_column).desc_nulls_last())
+    # After the table's own order column, break ties deterministically:
+    # latest batch first, then the Bronze record hash. Only columns that
+    # exist in the table (and are not already the order column) are used.
+    order_spec = [col(order_column).desc_nulls_last()]
+    for column_name, direction in DEDUPE_TIEBREAKS:
+        if column_name == order_column or column_name not in df.columns:
+            continue
+        order_spec.append(
+            col(column_name).desc_nulls_last()
+            if direction == "desc"
+            else col(column_name).asc_nulls_last()
+        )
+
+    window_spec = Window.partitionBy(*key_columns).orderBy(*order_spec)
 
     return (
         df
@@ -139,7 +280,7 @@ def deduplicate_latest(df: DataFrame, key_columns: list[str], order_column: str)
     )
 
 
-def clean_customers(spark: SparkSession) -> tuple[DataFrame, DataFrame]:
+def clean_customers(spark: SparkSession) -> tuple[DataFrame, DataFrame, DataFrame]:
     df = read_bronze(spark, "customers")
 
     cleaned = (
@@ -160,6 +301,8 @@ def clean_customers(spark: SparkSession) -> tuple[DataFrame, DataFrame]:
         .withColumn("updated_at", safe_timestamp("updated_at"))
     )
 
+    # NULL allowed: user_name, gender, membership_tier, loyalty_points,
+    # preferred_language, home_state, country, user_segment, is_prime_user.
     invalid_condition = (
         col("user_id").isNull()
         | col("email").isNull()
@@ -176,14 +319,18 @@ def clean_customers(spark: SparkSession) -> tuple[DataFrame, DataFrame]:
         "Invalid customer record: bad id/email/age/city",
     )
 
+    valid, invalid = quarantine_missing_updated_at(valid, invalid, "customer")
+
+    history = deduplicate_latest(valid, ["user_id", "updated_at"], "updated_at")
     valid = deduplicate_latest(valid, ["user_id"], "updated_at")
     valid = add_silver_metadata(valid, "silver_customers")
+    history = add_silver_metadata(history, "silver_customers_history")
     invalid = add_silver_metadata(invalid, "quarantine_customers")
 
-    return valid, invalid
+    return valid, invalid, history
 
 
-def clean_products(spark: SparkSession) -> tuple[DataFrame, DataFrame]:
+def clean_products(spark: SparkSession) -> tuple[DataFrame, DataFrame, DataFrame]:
     df = read_bronze(spark, "products")
 
     cleaned = (
@@ -198,16 +345,17 @@ def clean_products(spark: SparkSession) -> tuple[DataFrame, DataFrame]:
         .withColumn("updated_at", safe_timestamp("updated_at"))
     )
 
+    # NULL allowed: none of the business columns (updated_at is checked below).
     invalid_condition = (
         col("product_id").isNull()
         | col("product_name").isNull()
         | col("category").isNull()
-        | col("original_price").isNull()
+        | not_finite("original_price")
         | (col("original_price") <= 0)
-        | col("discount_percent").isNull()
+        | not_finite("discount_percent")
         | (col("discount_percent") < 0)
         | (col("discount_percent") > 100)
-        | col("discounted_price").isNull()
+        | not_finite("discounted_price")
         | (col("discounted_price") < 0)
         | col("inventory_remaining").isNull()
         | (col("inventory_remaining") < 0)
@@ -219,14 +367,18 @@ def clean_products(spark: SparkSession) -> tuple[DataFrame, DataFrame]:
         "Invalid product record: bad id/category/price/discount/inventory",
     )
 
+    valid, invalid = quarantine_missing_updated_at(valid, invalid, "product")
+
+    history = deduplicate_latest(valid, ["product_id", "updated_at"], "updated_at")
     valid = deduplicate_latest(valid, ["product_id"], "updated_at")
     valid = add_silver_metadata(valid, "silver_products")
+    history = add_silver_metadata(history, "silver_products_history")
     invalid = add_silver_metadata(invalid, "quarantine_products")
 
-    return valid, invalid
+    return valid, invalid, history
 
 
-def clean_campaigns(spark: SparkSession) -> tuple[DataFrame, DataFrame]:
+def clean_campaigns(spark: SparkSession) -> tuple[DataFrame, DataFrame, DataFrame]:
     df = read_bronze(spark, "campaigns")
 
     cleaned = (
@@ -246,12 +398,15 @@ def clean_campaigns(spark: SparkSession) -> tuple[DataFrame, DataFrame]:
     valid_sources = ["google", "facebook", "instagram", "email", "organic", "affiliate"]
     valid_statuses = ["planned", "active", "paused", "completed"]
 
+    # NULL allowed: ab_test_group, target_segment.
     invalid_condition = (
         col("campaign_id").isNull()
         | col("campaign_name").isNull()
+        | col("traffic_source").isNull()
         | (~col("traffic_source").isin(valid_sources))
-        | col("budget").isNull()
+        | not_finite("budget")
         | (col("budget") <= 0)
+        | col("campaign_status").isNull()
         | (~col("campaign_status").isin(valid_statuses))
         | col("start_date").isNull()
         | col("end_date").isNull()
@@ -264,11 +419,15 @@ def clean_campaigns(spark: SparkSession) -> tuple[DataFrame, DataFrame]:
         "Invalid campaign record: bad id/source/budget/status/date range",
     )
 
+    valid, invalid = quarantine_missing_updated_at(valid, invalid, "campaign")
+
+    history = deduplicate_latest(valid, ["campaign_id", "updated_at"], "updated_at")
     valid = deduplicate_latest(valid, ["campaign_id"], "updated_at")
     valid = add_silver_metadata(valid, "silver_campaigns")
+    history = add_silver_metadata(history, "silver_campaigns_history")
     invalid = add_silver_metadata(invalid, "quarantine_campaigns")
 
-    return valid, invalid
+    return valid, invalid, history
 
 
 def clean_orders(spark: SparkSession) -> tuple[DataFrame, DataFrame]:
@@ -287,14 +446,15 @@ def clean_orders(spark: SparkSession) -> tuple[DataFrame, DataFrame]:
         .withColumn("city", trim(col("city")))
     )
 
+    # NULL allowed: campaign_id (no attributed campaign), country, city.
     invalid_condition = (
         col("order_id").isNull()
         | col("user_id").isNull()
         | col("order_timestamp").isNull()
         | col("payment_method").isNull()
-        | col("cart_value").isNull()
+        | not_finite("cart_value")
         | (col("cart_value") <= 0)
-        | col("fraud_score").isNull()
+        | not_finite("fraud_score")
         | (col("fraud_score") < 0)
         | (col("fraud_score") > 1)
     )
@@ -333,15 +493,16 @@ def clean_order_items(spark: SparkSession) -> tuple[DataFrame, DataFrame]:
         )
     )
 
+    # NULL allowed: product_name, category, original_price, discount_percent.
     invalid_condition = (
         col("order_item_id").isNull()
         | col("order_id").isNull()
         | col("product_id").isNull()
         | col("quantity").isNull()
         | (col("quantity") <= 0)
-        | col("discounted_price").isNull()
+        | not_finite("discounted_price")
         | (col("discounted_price") < 0)
-        | col("line_amount").isNull()
+        | not_finite("line_amount")
         | (col("line_amount") <= 0)
     )
 
@@ -372,6 +533,7 @@ def clean_ad_spend(spark: SparkSession) -> tuple[DataFrame, DataFrame]:
         .withColumn("spend_amount", safe_double("spend_amount"))
     )
 
+    # NULL allowed: traffic_source.
     invalid_condition = (
         col("spend_id").isNull()
         | col("campaign_id").isNull()
@@ -381,7 +543,7 @@ def clean_ad_spend(spark: SparkSession) -> tuple[DataFrame, DataFrame]:
         | col("clicks").isNull()
         | (col("clicks") < 0)
         | (col("clicks") > col("impressions"))
-        | col("spend_amount").isNull()
+        | not_finite("spend_amount")
         | (col("spend_amount") <= 0)
     )
 
@@ -455,22 +617,26 @@ def clean_web_events(spark: SparkSession) -> tuple[DataFrame, DataFrame]:
     # The first version checked too many fields in one giant OR expression,
     # which created a huge Spark logical plan and caused Java heap pressure locally.
     # This still catches the intentionally dirty web event using critical business rules.
+    # NULL allowed: every column not tested here, e.g. campaign_id,
+    # payment_method, search_query, city.
     invalid_condition = (
         col("event_id").isNull()
         | col("session_id").isNull()
         | col("user_id").isNull()
         | col("event_timestamp").isNull()
+        | col("event_type").isNull()
         | (~col("event_type").isin(valid_event_types))
         | col("product_id").isNull()
-        | col("original_price").isNull()
+        | not_finite("original_price")
         | (col("original_price") <= 0)
-        | col("discount_percent").isNull()
+        | not_finite("discount_percent")
         | (col("discount_percent") < 0)
         | (col("discount_percent") > 100)
-        | col("discounted_price").isNull()
+        | not_finite("discounted_price")
         | (col("discounted_price") < 0)
+        | col("device_type").isNull()
         | (~col("device_type").isin(valid_device_types))
-        | col("fraud_score").isNull()
+        | not_finite("fraud_score")
         | (col("fraud_score") < 0)
         | (col("fraud_score") > 1)
         | col("ip_octet_check").isNull()
@@ -500,9 +666,14 @@ def run_table(
     spark: SparkSession,
     report_rows: list[dict],
 ) -> None:
-    valid_df, invalid_df = clean_function(spark)
+    # Dimension cleaners also return a history frame (one row per key and
+    # updated_at); fact cleaners return only (valid, invalid).
+    result = clean_function(spark)
+    valid_df, invalid_df = result[0], result[1]
+    history_df = result[2] if len(result) > 2 else None
 
     silver_path = SILVER_BASE_DIR / f"silver_{table_name}"
+    history_path = SILVER_BASE_DIR / f"silver_{table_name}_history"
     quarantine_path = QUARANTINE_BASE_DIR / f"quarantine_{table_name}"
 
     valid_df = valid_df.cache()
@@ -513,8 +684,18 @@ def run_table(
 
     write_table(valid_df, silver_path)
 
+    history_count = None
+    if history_df is not None:
+        history_df = history_df.cache()
+        history_count = history_df.count()
+        write_table(history_df, history_path)
+        history_df.unpersist()
+
+    # Always rewrite quarantine so last run's rows can never survive into this run.
     if invalid_count > 0:
         write_table(invalid_df, quarantine_path)
+    else:
+        write_empty_table(invalid_df, quarantine_path)
 
     valid_df.unpersist()
     invalid_df.unpersist()
@@ -524,15 +705,18 @@ def run_table(
             "table_name": table_name,
             "silver_row_count": valid_count,
             "quarantine_row_count": invalid_count,
+            "history_row_count": history_count,
             "silver_path": str(silver_path),
+            "history_path": str(history_path) if history_df is not None else None,
             "quarantine_path": str(quarantine_path),
             "batch_date": BATCH_DATE,
         }
     )
 
+    history_message = f", history={history_count}" if history_df is not None else ""
     print(
         f"{table_name}: silver={valid_count}, "
-        f"quarantine={invalid_count}"
+        f"quarantine={invalid_count}{history_message}"
     )
 
 
@@ -542,6 +726,7 @@ def main() -> None:
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
     spark = create_spark_session()
+    print(f"spark.sql.session.timeZone={spark.conf.get('spark.sql.session.timeZone')}")
 
     report_rows: list[dict] = []
 

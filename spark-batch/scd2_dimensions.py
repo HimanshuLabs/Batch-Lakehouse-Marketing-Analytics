@@ -21,11 +21,16 @@ GOLD_DIR.mkdir(parents=True, exist_ok=True)
 
 
 FAR_FUTURE_DATE = "9999-12-31"
+# The first version of every key is effective from the beginning of time so
+# facts dated before the key's first source change still match a version.
+# Interpreted in UTC (spark.sql.session.timeZone is UTC).
+BEGINNING_OF_TIME = "1900-01-01 00:00:00"
 
 
 DIMENSION_CONFIGS: Dict[str, Dict[str, object]] = {
     "customers": {
         "source_candidates": [
+            SILVER_DIR / "silver_customers_history",
             SILVER_DIR / "silver_customers",
             SILVER_DIR / "customers",
         ],
@@ -41,6 +46,11 @@ DIMENSION_CONFIGS: Dict[str, Dict[str, object]] = {
             "customer_segment",
             "loyalty_tier",
         ],
+        "column_map": {
+            "customer_segment": "user_segment",
+            "loyalty_tier": "membership_tier",
+        },
+        "untracked_optional": [],
         "date_candidates": [
             "updated_at",
             "event_timestamp",
@@ -51,6 +61,7 @@ DIMENSION_CONFIGS: Dict[str, Dict[str, object]] = {
     },
     "products": {
         "source_candidates": [
+            SILVER_DIR / "silver_products_history",
             SILVER_DIR / "silver_products",
             SILVER_DIR / "products",
         ],
@@ -64,6 +75,13 @@ DIMENSION_CONFIGS: Dict[str, Dict[str, object]] = {
             "price",
             "status",
         ],
+        "column_map": {
+            "price": "discounted_price",
+        },
+        "untracked_optional": [
+            "brand",
+            "status",
+        ],
         "date_candidates": [
             "updated_at",
             "event_timestamp",
@@ -73,6 +91,7 @@ DIMENSION_CONFIGS: Dict[str, Dict[str, object]] = {
     },
     "campaigns": {
         "source_candidates": [
+            SILVER_DIR / "silver_campaigns_history",
             SILVER_DIR / "silver_campaigns",
             SILVER_DIR / "campaigns",
         ],
@@ -88,6 +107,10 @@ DIMENSION_CONFIGS: Dict[str, Dict[str, object]] = {
             "start_date",
             "end_date",
         ],
+        "column_map": {
+            "channel": "traffic_source",
+        },
+        "untracked_optional": [],
         "date_candidates": [
             "updated_at",
             "start_date",
@@ -130,9 +153,33 @@ def first_existing_column(df: DataFrame, candidates: List[str]) -> str | None:
     return None
 
 
-def add_missing_tracked_columns(df: DataFrame, tracked_columns: List[str]) -> DataFrame:
+def add_missing_tracked_columns(
+    df: DataFrame,
+    dimension_name: str,
+    tracked_columns: List[str],
+    untracked_optional: List[str],
+) -> DataFrame:
+    """
+    Fail fast when a hashed tracked column is missing after column mapping.
+
+    Only columns listed in untracked_optional may be absent; they are kept in
+    the output contract as NULL and are excluded from the record hash.
+    """
+    missing_hashed = [
+        column
+        for column in tracked_columns
+        if column not in df.columns and column not in untracked_optional
+    ]
+
+    if missing_hashed:
+        raise ValueError(
+            f"SCD2 dimension '{dimension_name}' is missing tracked columns after "
+            f"column mapping: {', '.join(missing_hashed)}. "
+            f"Available columns: {', '.join(df.columns)}"
+        )
+
     result = df
-    for column in tracked_columns:
+    for column in untracked_optional:
         if column not in result.columns:
             result = result.withColumn(column, F.lit(None).cast(StringType()))
     return result
@@ -150,13 +197,20 @@ def build_record_hash(df: DataFrame, tracked_columns: List[str]) -> DataFrame:
     )
 
 
-def normalize_dimension_columns(df: DataFrame, natural_key: str) -> DataFrame:
+def normalize_dimension_columns(
+    df: DataFrame,
+    natural_key: str,
+    column_map: Dict[str, str],
+) -> DataFrame:
     """
     Normalize source-specific column names into the dimension contract.
 
     Project 1-style user behavior data uses user_id/home_city/home_state/event_time.
     Project 2-style lakehouse dimensions may use customer_id/city/state/updated_at.
     This function bridges that contract cleanly before SCD2 logic runs.
+
+    column_map holds per-dimension {target: source} copies (for example
+    customer_segment <- user_segment). Source columns are kept.
     """
     result = df
 
@@ -175,17 +229,24 @@ def normalize_dimension_columns(df: DataFrame, natural_key: str) -> DataFrame:
                     result = result.withColumn(target_column, F.col(source_column))
                     break
 
+    for target_column, source_column in column_map.items():
+        if target_column not in result.columns and source_column in result.columns:
+            result = result.withColumn(target_column, F.col(source_column))
+
     return result
 
 
 def build_scd2_dimension(
     df: DataFrame,
+    dimension_name: str,
     natural_key: str,
     surrogate_key: str,
     tracked_columns: List[str],
     date_candidates: List[str],
+    column_map: Dict[str, str],
+    untracked_optional: List[str],
 ) -> DataFrame:
-    df = normalize_dimension_columns(df, natural_key)
+    df = normalize_dimension_columns(df, natural_key, column_map)
 
     if natural_key not in df.columns:
         available_columns = ", ".join(df.columns)
@@ -198,7 +259,16 @@ def build_scd2_dimension(
 
     cleaned = df.filter(F.col(natural_key).isNotNull())
 
-    cleaned = add_missing_tracked_columns(cleaned, tracked_columns)
+    cleaned = add_missing_tracked_columns(
+        cleaned,
+        dimension_name,
+        tracked_columns,
+        untracked_optional,
+    )
+
+    hashed_columns = [
+        column for column in tracked_columns if column not in untracked_optional
+    ]
 
     if effective_column:
         cleaned = cleaned.withColumn(
@@ -213,7 +283,22 @@ def build_scd2_dimension(
         F.coalesce(F.col("effective_from"), F.current_timestamp()),
     )
 
-    hashed = build_record_hash(cleaned, tracked_columns)
+    # Capture the real times before effective_from is rewritten for the
+    # first version: source_updated_at is the record's real change time
+    # (output column); version_start_at is the version's real start, used
+    # internally for the surrogate key so existing key values stay stable.
+    cleaned = (
+        cleaned
+        .withColumn(
+            "source_updated_at",
+            F.to_timestamp(F.col(effective_column))
+            if effective_column
+            else F.lit(None).cast("timestamp"),
+        )
+        .withColumn("version_start_at", F.col("effective_from"))
+    )
+
+    hashed = build_record_hash(cleaned, hashed_columns)
 
     base_window = Window.partitionBy(natural_key).orderBy(
         F.col("effective_from").asc(),
@@ -249,6 +334,16 @@ def build_scd2_dimension(
             "is_current",
             F.col("next_effective_from").isNull(),
         )
+        # effective_to and is_current above use the real times. Only now is
+        # the first version per key opened back to the beginning of time.
+        .withColumn("version_number", F.row_number().over(version_window))
+        .withColumn(
+            "effective_from",
+            F.when(
+                F.col("version_number") == 1,
+                F.to_timestamp(F.lit(BEGINNING_OF_TIME)),
+            ).otherwise(F.col("effective_from")),
+        )
     )
 
     selected_columns = [
@@ -256,7 +351,7 @@ def build_scd2_dimension(
             F.concat_ws(
                 "||",
                 F.col(natural_key).cast("string"),
-                F.col("effective_from").cast("string"),
+                F.col("version_start_at").cast("string"),
                 F.col("record_hash").cast("string"),
             ),
             256,
@@ -275,6 +370,7 @@ def build_scd2_dimension(
             F.col("record_hash"),
             F.current_timestamp().alias("created_at"),
             F.current_timestamp().alias("updated_at"),
+            F.col("source_updated_at"),
         ]
     )
 
@@ -341,6 +437,7 @@ def write_dimension(df: DataFrame, output_path: Path) -> None:
 
 def main() -> None:
     spark = create_spark_session()
+    print(f"spark.sql.session.timeZone={spark.conf.get('spark.sql.session.timeZone')}")
 
     report: Dict[str, object] = {
         "job_name": "scd2_dimensions",
@@ -360,15 +457,20 @@ def main() -> None:
             surrogate_key = config["surrogate_key"]  # type: ignore[assignment]
             tracked_columns = config["tracked_columns"]  # type: ignore[assignment]
             date_candidates = config["date_candidates"]  # type: ignore[assignment]
+            column_map = config["column_map"]  # type: ignore[assignment]
+            untracked_optional = config["untracked_optional"]  # type: ignore[assignment]
 
             source_df = read_table(spark, source_path)
 
             scd2_df = build_scd2_dimension(
                 df=source_df,
+                dimension_name=dimension_name,
                 natural_key=natural_key,
                 surrogate_key=surrogate_key,
                 tracked_columns=tracked_columns,
                 date_candidates=date_candidates,
+                column_map=column_map,
+                untracked_optional=untracked_optional,
             )
 
             write_dimension(scd2_df, output_path)
@@ -390,6 +492,8 @@ def main() -> None:
                 "natural_key": natural_key,
                 "surrogate_key": surrogate_key,
                 "tracked_columns": tracked_columns,
+                "column_map": column_map,
+                "untracked_optional": untracked_optional,
                 "validation": validation,
             }
 
@@ -399,6 +503,11 @@ def main() -> None:
                 f"rows={validation['total_rows']}, "
                 f"current_rows={validation['current_rows']}"
             )
+
+    except Exception as exc:
+        overall_status = "FAIL"
+        report["error"] = str(exc)
+        raise
 
     finally:
         report["finished_at_utc"] = datetime.now(timezone.utc).isoformat()

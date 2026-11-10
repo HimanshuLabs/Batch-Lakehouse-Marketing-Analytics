@@ -6,6 +6,19 @@ This document explains how the Power BI Online dashboard receives updated report
 
 The refresh design is Ubuntu-friendly. It does not require Power BI Desktop and does not require a mandatory `.pbix` file.
 
+## Two export routes
+
+The project produces Power BI CSVs in two ways:
+
+| Route | Script | Source | Output | How Power BI Online gets it |
+|---|---|---|---|---|
+| A. Warehouse marts | `scripts/export_power_bi_marts.py` (run by hand) | PostgreSQL `marts.*` | `exports/power_bi/*.csv` (committed) | upload the files in Power BI Online |
+| B. Gold SCD2 marts | `sql/export_power_bi_dataset.py` (the DAG's `power_bi_export` task) | Gold SCD2 marts and facts, plus verified pipeline checks | `data/bi_exports/*.csv` (git-ignored) | five files are uploaded to S3 by `terraform/aws-bi-exports`; Power BI reads them through public HTTPS URLs |
+
+Route B serves the dashboard through S3 because the available Microsoft account had no OneDrive for Business upload. Its five public files are `campaign_performance.csv`, `customer_lifetime_value.csv`, `product_performance.csv`, `marketing_funnel.csv` and `data_quality_summary.csv`: read-only, exactly those objects, synthetic data only. `data_quality_summary.csv` is built from verified checks (warehouse reconciliation, SCD2 validation, Silver quarantine, point-in-time conservation), never by hand.
+
+The rest of this document describes route A; the route B refresh steps are under "Recurring refresh".
+
 ## Refresh architecture
 
 ```text
@@ -115,19 +128,15 @@ row_count > 0
 
 ## Standard refresh sequence
 
-Run the full warehouse pipeline first so the PostgreSQL marts are current.
+Run these from the repository root. Run the full warehouse pipeline first so the PostgreSQL marts are current.
 
 ```bash
-cd ~/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics
-
 ./scripts/run_warehouse_bi_pipeline.sh
 ```
 
 Then export fresh Power BI CSV datasets:
 
 ```bash
-cd ~/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics
-
 source venv/bin/activate
 
 export PGHOST=localhost
@@ -155,7 +164,7 @@ python -m json.tool exports/power_bi/export_manifest.json
 
 1. Open Power BI Service in the browser.
 2. Open the target workspace.
-3. Upload the CSV files from `exports/power_bi/`.
+3. Route A: upload the CSV files from `exports/power_bi/`. Route B: create Text/CSV (web) sources from the URLs in `terraform output power_bi_csv_urls`.
 4. Create a semantic model or report from the uploaded CSV datasets, depending on the workspace features available.
 5. Confirm data types:
    - Date columns as Date
@@ -172,15 +181,22 @@ python -m json.tool exports/power_bi/export_manifest.json
    - Marketing Funnel
 7. Pin key visuals to a dashboard.
 
-### Recurring manual refresh
+### Recurring refresh
 
-For the local demo flow:
+Route A (warehouse marts, uploaded files):
 
 1. Run or confirm the Airflow/warehouse pipeline.
 2. Run `scripts/export_power_bi_marts.py`.
 3. Upload or replace the CSV files in Power BI Online.
 4. Refresh the report/dataset if required by the workspace flow.
 5. Confirm dashboard visuals reflect the latest exported data.
+
+Route B (Gold SCD2 marts, S3 URLs):
+
+1. Run the Airflow DAG; its `power_bi_export` task writes the five files to `data/bi_exports/`.
+2. In `terraform/aws-bi-exports`, run `terraform plan` and `terraform apply` to upload them (all five files must exist in `data/bi_exports/`).
+3. Refresh the semantic models in Power BI Online; the URLs do not change.
+4. Confirm the Data Quality page shows every check as PASS.
 
 ## Validation commands
 
