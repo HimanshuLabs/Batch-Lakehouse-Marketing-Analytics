@@ -8,6 +8,8 @@ facts are valid, the rest are rejected with a reason, and no_version_for_time
 P2-05 (fixed in fa6f11a): order items whose order was rejected were filtered
 out silently; they are rejected with a reason, and the job checks that every
 Silver row is a valid fact or a reject.
+Order totals (p2-data-v2): every complete order's total must equal the sum of
+its lines; orders that lost an item are excluded and counted, not failed.
 """
 from __future__ import annotations
 
@@ -119,16 +121,24 @@ def test_rejects_name_every_failing_key(spark, pit):
 
 # --- the job end to end, in a temporary project ----------------------------
 
-def write_project(spark, root, orders: list[tuple], items: list[tuple]):
+def write_project(spark, root, orders: list[tuple], items: list[tuple],
+                  totals: dict | None = None, bronze_items: list[tuple] | None = None):
+    """orders: (order_id, customer_id, campaign_id, time); items: (order_item_id, order_id, product_id).
+
+    Each item's line_amount is 100.0 and, unless totals overrides it, an order's
+    cart_value is the sum of its items. bronze_items (order_item_id, order_id)
+    defaults to the Silver items.
+    """
     silver = root / "data" / "silver"
     gold = root / "data" / "gold"
+    totals = {**{o: 100.0 * sum(1 for _, io, _ in items if io == o) for o, *_ in orders}, **(totals or {})}
 
     def silver_table(name, frame):
         frame.withColumn("processed_date", F.to_date(F.lit("2026-06-18"))) \
             .write.mode("overwrite").partitionBy("processed_date").parquet(str(silver / name))
 
     silver_table("silver_orders", spark.createDataFrame(
-        [(o, c, k, t, "UPI", 1000.0, 0.1, "India", "Pune") for o, c, k, t in orders],
+        [(o, c, k, t, "UPI", totals[o], 0.1, "India", "Pune") for o, c, k, t in orders],
         "order_id int, user_id int, campaign_id int, order_timestamp string, payment_method string, "
         "cart_value double, fraud_score double, country string, city string",
     ).withColumn("order_timestamp", F.to_timestamp("order_timestamp")))
@@ -146,6 +156,12 @@ def write_project(spark, root, orders: list[tuple], items: list[tuple]):
     for name, frame in (("dim_customers_scd2", customers(spark)), ("dim_campaigns_scd2", campaigns(spark)),
                         ("dim_products_scd2", products(spark))):
         frame.write.mode("overwrite").parquet(str(gold / name))
+
+    # Bronze keeps the raw CSV strings.
+    bronze_rows = bronze_items if bronze_items is not None else [(i, o) for i, o, _ in items]
+    spark.createDataFrame(
+        [(str(i), str(o)) for i, o in bronze_rows], "order_item_id string, order_id string",
+    ).write.mode("overwrite").parquet(str(root / "data" / "bronze" / "bronze_order_items"))
 
 
 def read_rejects(spark, root, name):
@@ -168,6 +184,38 @@ def test_the_job_rejects_items_of_rejected_orders_and_conserves_rows(spark, pit,
         conservation = report["facts"][fact]["conservation"]
         assert conservation["status"] == "PASS" and conservation["unaccounted_rows"] == 0, (fact, conservation)
     assert report["facts"]["fact_orders_scd2"]["resolutions"]["customer_sk"]["key_not_in_dimension"] == 1
+
+
+def test_the_job_checks_order_totals_and_excludes_incomplete_orders(spark, pit, project_root, no_stop):
+    # Order 1 is complete and matches; order 3 lost item 31 before Silver
+    # (it is only in Bronze), so its total of 200.0 is not compared with 100.0.
+    write_project(spark, project_root,
+                  orders=[(1, 5, 4, "2026-06-01 10:00:00"), (3, 5, 4, "2026-06-01 10:00:00")],
+                  items=[(10, 1, 4), (11, 1, 4), (30, 3, 4)],
+                  totals={3: 200.0},
+                  bronze_items=[(10, 1), (11, 1), (30, 3), (31, 3)])
+    pit.main()
+
+    report = json.loads((project_root / "logs" / "point_in_time_fact_join_report.json").read_text())
+    totals = report["order_totals"]
+    assert totals["status"] == "PASS", totals
+    assert (totals["checked_orders"], totals["mismatched_orders"], totals["excluded_incomplete_orders"],
+            totals["orders_without_bronze_items"]) == (1, 0, 1, 0)
+
+
+def test_the_job_fails_on_an_order_total_that_differs_from_its_lines(spark, pit, project_root, no_stop):
+    write_project(spark, project_root,
+                  orders=[(1, 5, 4, "2026-06-01 10:00:00"), (2, 5, 4, "2026-06-01 10:00:00")],
+                  items=[(10, 1, 4), (20, 2, 4)],
+                  totals={2: 100.02})
+    with pytest.raises(SystemExit):
+        pit.main()
+
+    report = json.loads((project_root / "logs" / "point_in_time_fact_join_report.json").read_text())
+    totals = report["order_totals"]
+    assert totals["status"] == "FAIL"
+    assert (totals["checked_orders"], totals["mismatched_orders"]) == (2, 1)
+    assert totals["mismatched_order_examples"] == [2]
 
 
 def test_the_job_fails_on_a_corrupt_dimension(spark, pit, project_root, no_stop):

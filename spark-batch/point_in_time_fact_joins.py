@@ -11,6 +11,7 @@ from pyspark.sql import functions as F
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
+BRONZE_DIR = PROJECT_ROOT / "data" / "bronze"
 SILVER_DIR = PROJECT_ROOT / "data" / "silver"
 GOLD_DIR = PROJECT_ROOT / "data" / "gold"
 QUARANTINE_DIR = PROJECT_ROOT / "data" / "quarantine"
@@ -59,6 +60,11 @@ OUTPUT_PATHS = {
 RESOLUTIONS = ["in_range", "no_key", "key_not_in_dimension", "no_version_for_time"]
 
 ORDER_NOT_IN_FACT_REASON = "order not in fact_orders_scd2"
+
+BRONZE_ORDER_ITEMS_PATH = BRONZE_DIR / "bronze_order_items"
+
+# An order's total must equal the sum of its lines (both rounded to cents).
+ORDER_TOTAL_TOLERANCE = 0.01
 
 QUARANTINE_PATHS = {
     "fact_orders": QUARANTINE_DIR / "fact_orders_scd2_rejects",
@@ -306,6 +312,80 @@ def split_valid_and_rejected_facts(
     )
 
     return valid, rejected
+
+
+def order_total_check(
+    orders: DataFrame,
+    items: DataFrame,
+    bronze_items: DataFrame,
+    order_amount_column: str,
+) -> Dict[str, object]:
+    """Each complete order's total equals the sum of its lines' line_amount.
+
+    The same check as gold_quality_checks.order_total_check, here on the
+    point-in-time facts (each job file runs on its own, so it is not shared).
+    An order is complete when every distinct order_item_id that Bronze holds
+    for it is a valid fact item. Orders that lost an item (Silver quarantine,
+    a reject here) are excluded and counted, never failed. FAIL means a
+    complete order whose total differs by more than ORDER_TOTAL_TOLERANCE, or
+    an order with no item in Bronze at all.
+    """
+    bronze = (
+        bronze_items
+        .select(
+            F.expr("try_cast(try_cast(order_id as double) as int)").alias("order_id"),
+            F.expr("try_cast(try_cast(order_item_id as double) as int)").alias("order_item_id"),
+        )
+        .filter(F.col("order_id").isNotNull())
+        .groupBy("order_id")
+        .agg(
+            F.countDistinct("order_item_id").alias("bronze_items"),
+            # A Bronze item without a usable ID can never reach the facts.
+            F.sum(F.col("order_item_id").isNull().cast("int")).alias("bronze_items_without_id"),
+        )
+    )
+    lines = items.groupBy("order_id").agg(
+        F.countDistinct("order_item_id").alias("items"),
+        F.sum("line_amount").alias("line_total"),
+    )
+    per_order = (
+        orders.select("order_id", F.col(order_amount_column).alias("order_total"))
+        .join(bronze, "order_id", "left")
+        .join(lines, "order_id", "left")
+        .withColumn(
+            "outcome",
+            F.when(F.col("bronze_items").isNull(), F.lit("no_bronze_items"))
+            .when(
+                (F.col("bronze_items_without_id") > 0)
+                | (F.coalesce(F.col("items"), F.lit(0)) != F.col("bronze_items")),
+                F.lit("incomplete"),
+            )
+            .when(
+                F.col("order_total").isNull()
+                | (F.abs(F.col("order_total") - F.col("line_total")) > ORDER_TOTAL_TOLERANCE),
+                F.lit("mismatched"),
+            )
+            .otherwise(F.lit("matched")),
+        )
+    )
+
+    counts = {row["outcome"]: row["count"] for row in per_order.groupBy("outcome").count().collect()}
+    mismatched_examples = [
+        row["order_id"]
+        for row in per_order.filter(F.col("outcome") == "mismatched").orderBy("order_id").limit(5).collect()
+    ]
+    mismatched = counts.get("mismatched", 0)
+    no_bronze_items = counts.get("no_bronze_items", 0)
+
+    return {
+        "checked_orders": counts.get("matched", 0) + mismatched,
+        "mismatched_orders": mismatched,
+        "excluded_incomplete_orders": counts.get("incomplete", 0),
+        "orders_without_bronze_items": no_bronze_items,
+        "tolerance": ORDER_TOTAL_TOLERANCE,
+        "mismatched_order_examples": mismatched_examples,
+        "status": "PASS" if mismatched == 0 and no_bronze_items == 0 else "FAIL",
+    }
 
 
 def conservation(silver_rows: int, valid_rows: int, rejected_rows: int) -> Dict[str, object]:
@@ -657,6 +737,23 @@ def main() -> None:
                     f"  FAIL: {fact_name}: {corrupt_dimension_rows} fact key(s) exist in "
                     "their dimension but no version covers the fact time (corrupt dimension)"
                 )
+
+        print("Checking order totals against the sum of their lines")
+        if BRONZE_ORDER_ITEMS_PATH.exists():
+            order_totals = order_total_check(
+                read_written(spark, OUTPUT_PATHS["fact_orders"], valid_fact_orders),
+                read_written(spark, OUTPUT_PATHS["fact_order_items"], valid_fact_order_items),
+                read_parquet(spark, BRONZE_ORDER_ITEMS_PATH),
+                "total_amount",
+            )
+        else:
+            order_totals = {"status": "FAIL", "error": f"missing input: {BRONZE_ORDER_ITEMS_PATH}"}
+        report["order_totals"] = order_totals
+        print(f"order_totals: {order_totals}")
+        if order_totals["status"] != "PASS":
+            overall_status = "FAIL"
+            print("  FAIL: order totals: a complete order differs from the sum of its lines, "
+                  "or an order has no item in Bronze")
 
     except Exception as exc:
         overall_status = "FAIL"
