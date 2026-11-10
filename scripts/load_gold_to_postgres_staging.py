@@ -25,7 +25,7 @@ from typing import Any
 
 import pandas as pd
 from sqlalchemy import create_engine, text
-from sqlalchemy.engine import Engine, URL
+from sqlalchemy.engine import Connection, Engine, URL
 
 
 @dataclass(frozen=True)
@@ -279,7 +279,7 @@ def create_support_objects(engine: Engine, target_schema: str) -> None:
 
 
 def insert_audit_record(
-    engine: Engine,
+    conn: Connection,
     *,
     load_id: str,
     source_name: str,
@@ -294,55 +294,55 @@ def insert_audit_record(
     finished_at: datetime,
     error_message: str | None = None,
 ) -> None:
-    with engine.begin() as conn:
-        conn.execute(
-            text(
-                """
-                INSERT INTO audit.gold_to_staging_load_audit (
-                    load_id,
-                    source_name,
-                    source_path,
-                    target_schema,
-                    target_table,
-                    source_required,
-                    status,
-                    row_count,
-                    column_count,
-                    started_at,
-                    finished_at,
-                    error_message
-                )
-                VALUES (
-                    :load_id,
-                    :source_name,
-                    :source_path,
-                    :target_schema,
-                    :target_table,
-                    :source_required,
-                    :status,
-                    :row_count,
-                    :column_count,
-                    :started_at,
-                    :finished_at,
-                    :error_message
-                )
-                """
-            ),
-            {
-                "load_id": load_id,
-                "source_name": source_name,
-                "source_path": str(source_path),
-                "target_schema": target_schema,
-                "target_table": target_table,
-                "source_required": source_required,
-                "status": status,
-                "row_count": row_count,
-                "column_count": column_count,
-                "started_at": started_at,
-                "finished_at": finished_at,
-                "error_message": error_message,
-            },
-        )
+    """Insert one audit row on conn, inside the caller's transaction."""
+    conn.execute(
+        text(
+            """
+            INSERT INTO audit.gold_to_staging_load_audit (
+                load_id,
+                source_name,
+                source_path,
+                target_schema,
+                target_table,
+                source_required,
+                status,
+                row_count,
+                column_count,
+                started_at,
+                finished_at,
+                error_message
+            )
+            VALUES (
+                :load_id,
+                :source_name,
+                :source_path,
+                :target_schema,
+                :target_table,
+                :source_required,
+                :status,
+                :row_count,
+                :column_count,
+                :started_at,
+                :finished_at,
+                :error_message
+            )
+            """
+        ),
+        {
+            "load_id": load_id,
+            "source_name": source_name,
+            "source_path": str(source_path),
+            "target_schema": target_schema,
+            "target_table": target_table,
+            "source_required": source_required,
+            "status": status,
+            "row_count": row_count,
+            "column_count": column_count,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "error_message": error_message,
+        },
+    )
 
 
 def print_summary(results: list[dict[str, Any]]) -> None:
@@ -474,21 +474,22 @@ def main() -> int:
             results.append(result)
 
             if engine is not None:
-                insert_audit_record(
-                    engine,
-                    load_id=load_id,
-                    source_name=spec.source_name,
-                    source_path=source_path,
-                    target_schema=target_schema,
-                    target_table=spec.target_table,
-                    source_required=spec.required,
-                    status=status,
-                    row_count=None,
-                    column_count=None,
-                    started_at=started_at,
-                    finished_at=finished_at,
-                    error_message="No Parquet files found.",
-                )
+                with engine.begin() as conn:
+                    insert_audit_record(
+                        conn,
+                        load_id=load_id,
+                        source_name=spec.source_name,
+                        source_path=source_path,
+                        target_schema=target_schema,
+                        target_table=spec.target_table,
+                        source_required=spec.required,
+                        status=status,
+                        row_count=None,
+                        column_count=None,
+                        started_at=started_at,
+                        finished_at=finished_at,
+                        error_message="No Parquet files found.",
+                    )
 
             continue
 
@@ -511,33 +512,36 @@ def main() -> int:
             row_count = int(len(df))
             column_count = int(len(df.columns))
 
-            df.to_sql(
-                name=spec.target_table,
-                con=engine,
-                schema=target_schema,
-                if_exists=args.if_exists,
-                index=False,
-                chunksize=1_000,
-                method=None,
-            )
+            # The table and its LOADED audit row commit together or not at all,
+            # so a failure never leaves a half-written staging table.
+            with engine.begin() as conn:
+                df.to_sql(
+                    name=spec.target_table,
+                    con=conn,
+                    schema=target_schema,
+                    if_exists=args.if_exists,
+                    index=False,
+                    chunksize=1_000,
+                    method=None,
+                )
 
-            finished_at = utc_now()
+                finished_at = utc_now()
 
-            insert_audit_record(
-                engine,
-                load_id=load_id,
-                source_name=spec.source_name,
-                source_path=source_path,
-                target_schema=target_schema,
-                target_table=spec.target_table,
-                source_required=spec.required,
-                status="LOADED",
-                row_count=row_count,
-                column_count=column_count,
-                started_at=started_at,
-                finished_at=finished_at,
-                error_message=None,
-            )
+                insert_audit_record(
+                    conn,
+                    load_id=load_id,
+                    source_name=spec.source_name,
+                    source_path=source_path,
+                    target_schema=target_schema,
+                    target_table=spec.target_table,
+                    source_required=spec.required,
+                    status="LOADED",
+                    row_count=row_count,
+                    column_count=column_count,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    error_message=None,
+                )
 
             results.append(
                 {
@@ -555,22 +559,33 @@ def main() -> int:
             finished_at = utc_now()
             error_message = str(exc)[:4000]
 
+            # Best effort, in its own transaction: if PostgreSQL is down this
+            # write fails too, and that must not hide the original error or
+            # stop the remaining sources.
             if engine is not None:
-                insert_audit_record(
-                    engine,
-                    load_id=load_id,
-                    source_name=spec.source_name,
-                    source_path=source_path,
-                    target_schema=target_schema,
-                    target_table=spec.target_table,
-                    source_required=spec.required,
-                    status="FAILED",
-                    row_count=None,
-                    column_count=None,
-                    started_at=started_at,
-                    finished_at=finished_at,
-                    error_message=error_message,
-                )
+                try:
+                    with engine.begin() as conn:
+                        insert_audit_record(
+                            conn,
+                            load_id=load_id,
+                            source_name=spec.source_name,
+                            source_path=source_path,
+                            target_schema=target_schema,
+                            target_table=spec.target_table,
+                            source_required=spec.required,
+                            status="FAILED",
+                            row_count=None,
+                            column_count=None,
+                            started_at=started_at,
+                            finished_at=finished_at,
+                            error_message=error_message,
+                        )
+                except Exception as audit_exc:
+                    print(
+                        f"WARNING: could not write the FAILED audit row for {spec.source_name}: "
+                        f"{str(audit_exc)[:500]}",
+                        file=sys.stderr,
+                    )
 
             results.append(
                 {

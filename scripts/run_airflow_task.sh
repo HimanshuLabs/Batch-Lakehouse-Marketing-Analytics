@@ -25,7 +25,7 @@ run_optional_python_file() {
   local file_path="$1"
 
   if [[ ! -f "${file_path}" ]]; then
-    echo "Optional file not found, skipping: ${file_path}"
+    echo "SKIPPED: ${file_path} not found"
     return 0
   fi
 
