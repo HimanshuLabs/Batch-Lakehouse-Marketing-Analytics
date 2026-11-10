@@ -369,8 +369,13 @@ BEGIN
 
     source_value := NULL;
 
+    -- Distinct natural keys on both sides, so SCD2 history (several
+    -- versions per key) does not inflate the warehouse count.
     IF source_table IS NOT NULL THEN
-        EXECUTE format('SELECT COUNT(*)::NUMERIC FROM %s', source_table)
+        EXECUTE format(
+            'SELECT COUNT(DISTINCT customer_id::TEXT)::NUMERIC FROM %s WHERE customer_id IS NOT NULL',
+            source_table
+        )
         INTO source_value;
     END IF;
 
@@ -390,10 +395,11 @@ BEGIN
     ) expected_customers;
     END IF;
 
-    SELECT COUNT(*)::NUMERIC
+    SELECT COUNT(DISTINCT customer_id)::NUMERIC
     INTO target_value
     FROM warehouse.dim_customer
-    WHERE customer_sk <> 0;
+    WHERE customer_sk <> 0
+      AND customer_id <> 'UNKNOWN';
 
     PERFORM audit.record_reconciliation_check(
         run_id,
@@ -417,8 +423,13 @@ BEGIN
 
     source_value := NULL;
 
+    -- Distinct natural keys on both sides, so SCD2 history (several
+    -- versions per key) does not inflate the warehouse count.
     IF source_table IS NOT NULL THEN
-        EXECUTE format('SELECT COUNT(*)::NUMERIC FROM %s', source_table)
+        EXECUTE format(
+            'SELECT COUNT(DISTINCT product_id::TEXT)::NUMERIC FROM %s WHERE product_id IS NOT NULL',
+            source_table
+        )
         INTO source_value;
     END IF;
 
@@ -438,10 +449,11 @@ BEGIN
     ) expected_products;
     END IF;
 
-    SELECT COUNT(*)::NUMERIC
+    SELECT COUNT(DISTINCT product_id)::NUMERIC
     INTO target_value
     FROM warehouse.dim_product
-    WHERE product_sk <> 0;
+    WHERE product_sk <> 0
+      AND product_id <> 'UNKNOWN';
 
     PERFORM audit.record_reconciliation_check(
         run_id,
@@ -465,8 +477,13 @@ BEGIN
 
     source_value := NULL;
 
+    -- Distinct natural keys on both sides, so SCD2 history (several
+    -- versions per key) does not inflate the warehouse count.
     IF source_table IS NOT NULL THEN
-        EXECUTE format('SELECT COUNT(*)::NUMERIC FROM %s', source_table)
+        EXECUTE format(
+            'SELECT COUNT(DISTINCT campaign_id::TEXT)::NUMERIC FROM %s WHERE campaign_id IS NOT NULL',
+            source_table
+        )
         INTO source_value;
     END IF;
 
@@ -491,10 +508,11 @@ BEGIN
     ) expected_campaigns;
     END IF;
 
-    SELECT COUNT(*)::NUMERIC
+    SELECT COUNT(DISTINCT campaign_id)::NUMERIC
     INTO target_value
     FROM warehouse.dim_campaign
-    WHERE campaign_sk <> 0;
+    WHERE campaign_sk <> 0
+      AND campaign_id <> 'UNKNOWN';
 
     PERFORM audit.record_reconciliation_check(
         run_id,

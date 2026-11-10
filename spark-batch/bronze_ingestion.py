@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import uuid
 from datetime import date
 from pathlib import Path
@@ -21,7 +22,7 @@ RAW_BASE_DIR = PROJECT_ROOT / "data" / "raw"
 BRONZE_BASE_DIR = PROJECT_ROOT / "data" / "bronze"
 LOGS_DIR = PROJECT_ROOT / "logs"
 
-BATCH_DATE = date.today().isoformat()
+BATCH_DATE = date.fromisoformat(os.environ.get("BATCH_DATE") or date.today().isoformat()).isoformat()
 BATCH_ID = f"batch_{BATCH_DATE}_{uuid.uuid4().hex[:8]}"
 
 
@@ -69,6 +70,7 @@ def create_spark_session() -> SparkSession:
         SparkSession.builder
         .appName("Project2_Bronze_Ingestion")
         .master("local[*]")
+        .config("spark.sql.session.timeZone", "UTC")
         .config("spark.sql.shuffle.partitions", "4")
         .config("spark.sql.files.ignoreCorruptFiles", "true")
         .getOrCreate()
@@ -117,6 +119,7 @@ def write_bronze_table(df: DataFrame, output_path: Path) -> None:
         df
         .write
         .mode("overwrite")
+        .option("partitionOverwriteMode", "dynamic")
         .partitionBy("ingestion_date")
         .parquet(str(output_path))
     )
@@ -127,6 +130,7 @@ def main() -> None:
     BRONZE_BASE_DIR.mkdir(parents=True, exist_ok=True)
 
     spark = create_spark_session()
+    print(f"spark.sql.session.timeZone={spark.conf.get('spark.sql.session.timeZone')}")
     row_count_report = []
 
     print("Starting Bronze ingestion")

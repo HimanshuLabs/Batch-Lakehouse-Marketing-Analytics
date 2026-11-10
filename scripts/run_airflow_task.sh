@@ -36,19 +36,18 @@ run_optional_python_file() {
 case "${TASK_NAME}" in
 
   generate_data)
-    echo "Checking synthetic data generation step"
-
-    if [[ -f "spark-batch/generate_synthetic_data.py" ]]; then
-      run_python_file "spark-batch/generate_synthetic_data.py"
-    elif [[ -f "data-generator/generate_synthetic_data.py" ]]; then
-      run_python_file "data-generator/generate_synthetic_data.py"
-    elif [[ -f "scripts/generate_synthetic_data.py" ]]; then
-      run_python_file "scripts/generate_synthetic_data.py"
-    elif find data/raw -type f 2>/dev/null | grep -q .; then
-      echo "Raw data already exists. Skipping generation."
+    batch_date="${BATCH_DATE:-$(date +%F)}"
+    [[ "${batch_date}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || { echo "Invalid BATCH_DATE: ${batch_date} (expected YYYY-MM-DD)"; exit 1; }
+    export BATCH_DATE="${batch_date}"
+    raw_dir="data/raw/batch_date=${batch_date}"
+    missing=0
+    for f in customers.csv products.csv campaigns.csv orders.csv order_items.csv ad_spend.csv web_events.json; do
+      [[ -s "${raw_dir}/${f}" ]] || missing=1
+    done
+    if [[ "${missing}" -eq 0 ]]; then
+      echo "Raw data for batch_date=${batch_date} already complete. Skipping generation."
     else
-      echo "No generator script found and data/raw is empty."
-      exit 1
+      run_python_file "data-generator/generate_data.py"
     fi
     ;;
 

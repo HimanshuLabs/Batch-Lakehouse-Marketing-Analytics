@@ -196,7 +196,7 @@ models:
   - name: dim_date
     description: "Calendar dimension used by daily revenue and time-series reporting."
     columns:
-      - name: date_key
+      - name: date_sk
         tests:
           - not_null
           - unique
@@ -219,7 +219,7 @@ models:
   - name: fact_order_items
     description: "Order item fact table for product-level sales analytics."
     columns:
-      - name: order_item_id
+      - name: order_item_nk
         tests:
           - not_null
           - unique
@@ -241,7 +241,7 @@ models:
   - name: fact_campaign_spend
     description: "Campaign spend fact table for ROAS and marketing efficiency analytics."
     columns:
-      - name: spend_id
+      - name: campaign_spend_nk
         tests:
           - not_null
           - unique
@@ -263,18 +263,44 @@ models:
 
   - name: mart_customer_360
     description: "Customer-level BI mart for customer value, orders, engagement, and segmentation."
+    columns:
+      - name: customer_id
+        tests:
+          - not_null
 
   - name: mart_campaign_performance
     description: "Campaign-level BI mart for spend, revenue, ROAS, and conversion performance."
+    columns:
+      - name: campaign_id
+        tests:
+          - not_null
 
   - name: mart_product_sales
     description: "Product-level BI mart for units, revenue, and category performance."
+    columns:
+      - name: product_id
+        tests:
+          - not_null
 
   - name: mart_revenue_daily
     description: "Daily revenue BI mart for trend reporting."
+    columns:
+      - name: revenue_date
+        tests:
+          - not_null
 
   - name: mart_marketing_funnel
     description: "Marketing funnel BI mart for impressions, engagement, conversion, and purchase behavior."
+    columns:
+      - name: event_date
+        tests:
+          - not_null
+      - name: channel_name
+        tests:
+          - not_null
+      - name: campaign_id
+        tests:
+          - not_null
 
   - name: reconciliation_report
     description: "dbt audit view exposing source-to-warehouse reconciliation status."
@@ -285,6 +311,7 @@ models:
       - name: status
         tests:
           - not_null
+          # Every reconciliation check must pass; a FAIL or WARN fails dbt test.
           - accepted_values:
               arguments:
-                values: ['PASS', 'FAIL', 'WARN']
+                values: ['PASS']

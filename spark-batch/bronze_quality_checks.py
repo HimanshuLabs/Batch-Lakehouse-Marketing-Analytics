@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import os
 from datetime import date
 from pathlib import Path
 
 from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, lit
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -11,7 +13,7 @@ RAW_BASE_DIR = PROJECT_ROOT / "data" / "raw"
 BRONZE_BASE_DIR = PROJECT_ROOT / "data" / "bronze"
 LOGS_DIR = PROJECT_ROOT / "logs"
 
-BATCH_DATE = date.today().isoformat()
+BATCH_DATE = date.fromisoformat(os.environ.get("BATCH_DATE") or date.today().isoformat()).isoformat()
 
 BRONZE_METADATA_COLUMNS = {
     "ingestion_timestamp",
@@ -67,6 +69,7 @@ def create_spark_session() -> SparkSession:
         SparkSession.builder
         .appName("Project2_Bronze_Quality_Checks")
         .master("local[*]")
+        .config("spark.sql.session.timeZone", "UTC")
         .config("spark.sql.shuffle.partitions", "4")
         .getOrCreate()
     )
@@ -103,12 +106,24 @@ def validate_table(
 
     raw_row_count = count_raw_file_lines(raw_file, raw_has_header)
 
-    bronze_df = spark.read.parquet(str(bronze_path))
+    # Read the table root (keeps the ingestion_date partition column) and
+    # check only this run's partition; earlier batches stay in Bronze.
+    bronze_df = (
+        spark.read.parquet(str(bronze_path))
+        .filter(col("ingestion_date") == lit(BATCH_DATE).cast("date"))
+    )
     bronze_row_count = bronze_df.count()
     bronze_columns = set(bronze_df.columns)
     missing_metadata = sorted(BRONZE_METADATA_COLUMNS - bronze_columns)
 
     failure_reasons = []
+
+    if "batch_id" in bronze_columns:
+        batch_id_count = bronze_df.select("batch_id").distinct().count()
+        if batch_id_count != 1:
+            failure_reasons.append(
+                f"expected exactly one batch_id for ingestion_date={BATCH_DATE}, found {batch_id_count}"
+            )
 
     if raw_row_count <= 0:
         failure_reasons.append("raw row count is zero")
@@ -146,6 +161,7 @@ def main() -> None:
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
     spark = create_spark_session()
+    print(f"spark.sql.session.timeZone={spark.conf.get('spark.sql.session.timeZone')}")
     results = []
 
     for table_name, config in TABLES.items():

@@ -48,6 +48,18 @@ OUTPUT_PATHS = {
     "fact_campaign_spend": GOLD_DIR / "fact_campaign_spend_scd2",
 }
 
+# Every fact key is resolved into exactly one of these. Only in_range facts
+# are valid; the others are rejected with an exact per-key reason.
+#   in_range              a dimension version covers the fact time
+#   no_key                the fact key is NULL
+#   key_not_in_dimension  the key is in no dimension version
+#   no_version_for_time   the key exists but no version covers the fact time.
+#                         Versions run from 1900-01-01 to 9999-12-31 without
+#                         gaps, so this means a corrupt dimension: the job fails.
+RESOLUTIONS = ["in_range", "no_key", "key_not_in_dimension", "no_version_for_time"]
+
+ORDER_NOT_IN_FACT_REASON = "order not in fact_orders_scd2"
+
 QUARANTINE_PATHS = {
     "fact_orders": QUARANTINE_DIR / "fact_orders_scd2_rejects",
     "fact_order_items": QUARANTINE_DIR / "fact_order_items_scd2_rejects",
@@ -179,6 +191,10 @@ def normalize_ad_spend(df: DataFrame) -> DataFrame:
     return result.filter(F.col("spend_id").isNotNull() & F.col("spend_date").isNotNull())
 
 
+def resolution_column(surrogate_key: str) -> str:
+    return f"{surrogate_key}_resolution"
+
+
 def point_in_time_join(
     fact_df: DataFrame,
     dim_df: DataFrame,
@@ -187,6 +203,9 @@ def point_in_time_join(
     fact_timestamp: str,
     surrogate_key: str,
 ) -> DataFrame:
+    # Only a version whose range covers the fact time is used; there is no
+    # fallback to the current version. <surrogate_key>_resolution records
+    # how the key resolved (see RESOLUTIONS).
     prepared_fact = fact_df.drop(surrogate_key)
 
     prepared_dim = dim_df.select(
@@ -194,8 +213,9 @@ def point_in_time_join(
         F.col(surrogate_key),
         F.col("effective_from"),
         F.col("effective_to"),
-        F.col("is_current"),
     )
+
+    known_keys = dim_df.select(F.col(dim_key).alias(f"known_{dim_key}")).distinct()
 
     historical_join = (
         prepared_fact.alias("f")
@@ -211,29 +231,38 @@ def point_in_time_join(
         .select("f.*", F.col(f"d.{surrogate_key}").alias(surrogate_key))
     )
 
-    current_dim = prepared_dim.filter(F.col("is_current") == True).select(
-        F.col(f"dim_{dim_key}").alias(f"fallback_{dim_key}"),
-        F.col(surrogate_key).alias(f"fallback_{surrogate_key}"),
-    )
-
-    with_fallback = (
+    return (
         historical_join.alias("f")
         .join(
-            current_dim.alias("cd"),
-            F.col(f"f.{fact_key}") == F.col(f"cd.fallback_{dim_key}"),
+            known_keys.alias("k"),
+            F.col(f"f.{fact_key}") == F.col(f"k.known_{dim_key}"),
             "left",
         )
         .withColumn(
-            surrogate_key,
-            F.coalesce(
-                F.col(f"f.{surrogate_key}"),
-                F.col(f"cd.fallback_{surrogate_key}"),
-            ),
+            resolution_column(surrogate_key),
+            F.when(F.col(f"f.{fact_key}").isNull(), F.lit("no_key"))
+            .when(F.col(surrogate_key).isNotNull(), F.lit("in_range"))
+            .when(F.col(f"k.known_{dim_key}").isNotNull(), F.lit("no_version_for_time"))
+            .otherwise(F.lit("key_not_in_dimension")),
         )
-        .drop(f"fallback_{dim_key}", f"fallback_{surrogate_key}")
+        .drop(f"known_{dim_key}")
     )
 
-    return with_fallback
+
+def resolution_reason(surrogate_key: str, fact_key: str, fact_timestamp: str, dim_name: str):
+    resolution = F.col(resolution_column(surrogate_key))
+    return (
+        F.when(resolution == "no_key", F.lit(f"{fact_key} is NULL"))
+        .when(resolution == "key_not_in_dimension", F.lit(f"{fact_key} not in {dim_name}"))
+        .when(resolution == "no_version_for_time", F.lit(f"no {dim_name} version covers {fact_timestamp}"))
+    )
+
+
+def resolution_counts(df: DataFrame, surrogate_key: str) -> Dict[str, int]:
+    counts = {resolution: 0 for resolution in RESOLUTIONS}
+    for row in df.groupBy(resolution_column(surrogate_key)).count().collect():
+        counts[row[0]] = row["count"]
+    return counts
 
 
 def write_table(df: DataFrame, output_path: Path, partition_column: str | None = None) -> None:
@@ -247,26 +276,36 @@ def write_table(df: DataFrame, output_path: Path, partition_column: str | None =
 
 def split_valid_and_rejected_facts(
     df: DataFrame,
-    required_surrogate_keys: List[str],
-    reject_reason: str,
+    resolved_keys: List[tuple[str, str, str, str]],
 ) -> tuple[DataFrame, DataFrame]:
-    reject_condition = None
+    # resolved_keys: (surrogate_key, fact_key, fact_timestamp, dim_name).
+    # Valid facts have every key in_range and keep their original schema;
+    # rejects keep the resolution columns and name every failing key.
+    resolution_columns = [resolution_column(key[0]) for key in resolved_keys]
 
-    for key in required_surrogate_keys:
-        condition = F.col(key).isNull()
-        reject_condition = condition if reject_condition is None else reject_condition | condition
+    all_in_range = F.lit(True)
+    for column in resolution_columns:
+        all_in_range = all_in_range & (F.col(column) == "in_range")
 
-    if reject_condition is None:
-        return df, df.limit(0)
+    valid = df.filter(all_in_range).drop(*resolution_columns)
 
-    rejected = df.filter(reject_condition).withColumn(
+    rejected = df.filter(~all_in_range).withColumn(
         "reject_reason",
-        F.lit(reject_reason),
+        F.concat_ws("; ", *[resolution_reason(*key) for key in resolved_keys]),
     )
 
-    valid = df.filter(~reject_condition)
-
     return valid, rejected
+
+
+def conservation(silver_rows: int, valid_rows: int, rejected_rows: int) -> Dict[str, object]:
+    unaccounted = silver_rows - valid_rows - rejected_rows
+    return {
+        "silver_rows": silver_rows,
+        "valid_rows": valid_rows,
+        "rejected_rows": rejected_rows,
+        "unaccounted_rows": unaccounted,
+        "status": "PASS" if unaccounted == 0 else "FAIL",
+    }
 
 
 def validate_fact_table(
@@ -319,6 +358,7 @@ def validate_fact_table(
 
 def main() -> None:
     spark = create_spark_session()
+    print(f"spark.sql.session.timeZone={spark.conf.get('spark.sql.session.timeZone')}")
 
     report: Dict[str, object] = {
         "job_name": "point_in_time_fact_joins",
@@ -337,9 +377,19 @@ def main() -> None:
         print(f"Reading order_items from: {order_items_source_path}")
         print(f"Reading ad_spend from: {ad_spend_source_path}")
 
-        orders = normalize_orders(read_parquet(spark, orders_source_path))
-        order_items = normalize_order_items(read_parquet(spark, order_items_source_path))
-        ad_spend = normalize_ad_spend(read_parquet(spark, ad_spend_source_path))
+        orders_silver = read_parquet(spark, orders_source_path)
+        order_items_silver = read_parquet(spark, order_items_source_path)
+        ad_spend_silver = read_parquet(spark, ad_spend_source_path)
+
+        silver_rows = {
+            "fact_orders_scd2": orders_silver.count(),
+            "fact_order_items_scd2": order_items_silver.count(),
+            "fact_campaign_spend_scd2": ad_spend_silver.count(),
+        }
+
+        orders = normalize_orders(orders_silver)
+        order_items = normalize_order_items(order_items_silver)
+        ad_spend = normalize_ad_spend(ad_spend_silver)
 
         customers_dim = read_parquet(spark, DIMENSION_PATHS["customers"])
         products_dim = read_parquet(spark, DIMENSION_PATHS["products"])
@@ -365,12 +415,19 @@ def main() -> None:
             surrogate_key="campaign_sk",
         )
 
-        fact_orders = fact_orders.withColumn("order_year", F.year(F.col("order_date")))
+        fact_orders = fact_orders.withColumn("order_year", F.year(F.col("order_date"))).cache()
+
+        orders_resolutions = {
+            "customer_sk": resolution_counts(fact_orders, "customer_sk"),
+            "campaign_sk": resolution_counts(fact_orders, "campaign_sk"),
+        }
 
         valid_fact_orders, rejected_fact_orders = split_valid_and_rejected_facts(
             fact_orders,
-            required_surrogate_keys=["customer_sk", "campaign_sk"],
-            reject_reason="Missing customer_sk or campaign_sk after SCD2 point-in-time join",
+            resolved_keys=[
+                ("customer_sk", "customer_id", "order_date", "dim_customers_scd2"),
+                ("campaign_sk", "campaign_id", "order_date", "dim_campaigns_scd2"),
+            ],
         )
 
         orders_validation = validate_fact_table(
@@ -405,11 +462,20 @@ def main() -> None:
             "order_date",
         ).dropDuplicates(["order_id"])
 
-        order_items_with_dates = order_items.join(
+        order_items_joined = order_items.join(
             orders_for_item_dates,
             on="order_id",
             how="left",
-        ).filter(F.col("order_date").isNotNull())
+        ).cache()
+
+        # Items whose order is not a valid fact are rejected, not dropped.
+        order_items_with_dates = order_items_joined.filter(F.col("order_date").isNotNull())
+        order_items_without_order = (
+            order_items_joined
+            .filter(F.col("order_date").isNull())
+            .withColumn("order_year", F.year(F.col("order_date")))
+            .withColumn("reject_reason", F.lit(ORDER_NOT_IN_FACT_REASON))
+        )
 
         fact_order_items = point_in_time_join(
             fact_df=order_items_with_dates,
@@ -423,12 +489,23 @@ def main() -> None:
         fact_order_items = fact_order_items.withColumn(
             "order_year",
             F.year(F.col("order_date")),
-        )
+        ).cache()
+
+        order_items_resolutions = {
+            "order": {
+                "valid_order": order_items_with_dates.count(),
+                "order_not_in_fact_orders_scd2": order_items_without_order.count(),
+            },
+            "product_sk": resolution_counts(fact_order_items, "product_sk"),
+        }
 
         valid_fact_order_items, rejected_fact_order_items = split_valid_and_rejected_facts(
             fact_order_items,
-            required_surrogate_keys=["product_sk"],
-            reject_reason="Missing product_sk after SCD2 point-in-time join",
+            resolved_keys=[("product_sk", "product_id", "order_date", "dim_products_scd2")],
+        )
+        rejected_fact_order_items = rejected_fact_order_items.unionByName(
+            order_items_without_order,
+            allowMissingColumns=True,
         )
 
         order_items_validation = validate_fact_table(
@@ -470,12 +547,15 @@ def main() -> None:
         fact_campaign_spend = fact_campaign_spend.withColumn(
             "spend_year",
             F.year(F.col("spend_date")),
-        )
+        ).cache()
+
+        campaign_spend_resolutions = {
+            "campaign_sk": resolution_counts(fact_campaign_spend, "campaign_sk"),
+        }
 
         valid_fact_campaign_spend, rejected_fact_campaign_spend = split_valid_and_rejected_facts(
             fact_campaign_spend,
-            required_surrogate_keys=["campaign_sk"],
-            reject_reason="Missing campaign_sk after SCD2 point-in-time join",
+            resolved_keys=[("campaign_sk", "campaign_id", "spend_date", "dim_campaigns_scd2")],
         )
 
         campaign_spend_validation = validate_fact_table(
@@ -512,29 +592,65 @@ def main() -> None:
         if any(validation["status"] != "PASS" for validation in validations):
             overall_status = "FAIL"
 
-        report["facts"] = {
-            "fact_orders_scd2": {
-                "source_path": str(orders_source_path),
-                "output_path": str(OUTPUT_PATHS["fact_orders"]),
-                "validation": orders_validation,
-                "rejected_path": str(QUARANTINE_PATHS["fact_orders"]),
-                "rejected_rows": rejected_fact_orders.count(),
-            },
-            "fact_order_items_scd2": {
-                "source_path": str(order_items_source_path),
-                "output_path": str(OUTPUT_PATHS["fact_order_items"]),
-                "validation": order_items_validation,
-                "rejected_path": str(QUARANTINE_PATHS["fact_order_items"]),
-                "rejected_rows": rejected_fact_order_items.count(),
-            },
-            "fact_campaign_spend_scd2": {
-                "source_path": str(ad_spend_source_path),
-                "output_path": str(OUTPUT_PATHS["fact_campaign_spend"]),
-                "validation": campaign_spend_validation,
-                "rejected_path": str(QUARANTINE_PATHS["fact_campaign_spend"]),
-                "rejected_rows": rejected_fact_campaign_spend.count(),
-            },
+        facts = {
+            "fact_orders_scd2": (
+                orders_source_path, "fact_orders", orders_validation,
+                rejected_fact_orders, orders_resolutions,
+            ),
+            "fact_order_items_scd2": (
+                order_items_source_path, "fact_order_items", order_items_validation,
+                rejected_fact_order_items, order_items_resolutions,
+            ),
+            "fact_campaign_spend_scd2": (
+                ad_spend_source_path, "fact_campaign_spend", campaign_spend_validation,
+                rejected_fact_campaign_spend, campaign_spend_resolutions,
+            ),
         }
+
+        for fact_name, (source_path, output_key, validation, rejected, resolutions) in facts.items():
+            rejected_rows = rejected.count()
+            fact_conservation = conservation(
+                silver_rows[fact_name],
+                validation["total_rows"],
+                rejected_rows,
+            )
+            corrupt_dimension_rows = sum(
+                counts.get("no_version_for_time", 0) for counts in resolutions.values()
+            )
+
+            report["facts"][fact_name] = {
+                "source_path": str(source_path),
+                "output_path": str(OUTPUT_PATHS[output_key]),
+                "validation": validation,
+                "rejected_path": str(QUARANTINE_PATHS[output_key]),
+                "rejected_rows": rejected_rows,
+                "resolutions": resolutions,
+                "conservation": fact_conservation,
+            }
+
+            print(
+                f"{fact_name}: silver={fact_conservation['silver_rows']} "
+                f"valid={fact_conservation['valid_rows']} "
+                f"rejected={rejected_rows} "
+                f"unaccounted={fact_conservation['unaccounted_rows']} "
+                f"resolutions={resolutions}"
+            )
+
+            if fact_conservation["status"] != "PASS":
+                overall_status = "FAIL"
+                print(f"  FAIL: {fact_name} conservation: silver != valid + rejected")
+
+            if corrupt_dimension_rows:
+                overall_status = "FAIL"
+                print(
+                    f"  FAIL: {fact_name}: {corrupt_dimension_rows} fact key(s) exist in "
+                    "their dimension but no version covers the fact time (corrupt dimension)"
+                )
+
+    except Exception as exc:
+        overall_status = "FAIL"
+        report["error"] = str(exc)
+        raise
 
     finally:
         report["finished_at_utc"] = datetime.now(timezone.utc).isoformat()

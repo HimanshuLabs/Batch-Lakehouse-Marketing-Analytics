@@ -1,0 +1,7 @@
+# Development and CI tools. Runtime dependencies are in requirements.txt.
+# dbt-core 1.10 / dbt-postgres 1.10 support Python up to 3.13, so CI installs
+# this file in a Python 3.13 environment for dbt; the rest of CI uses 3.14.
+pytest==9.0.3
+ruff==0.17.4
+dbt-core==1.10.15
+dbt-postgres==1.10.0

@@ -1,0 +1,14 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: needs a running PostgreSQL warehouse and the full pipeline (tests/integration)",
+]
+# Integration tests need a finished pipeline run; select them with -m integration.
+addopts = "-ra -m 'not integration'"
+
+[tool.ruff]
+target-version = "py314"
+extend-exclude = ["venv", "venv-airflow", "venv-dbt", "data", "logs", "dbt/target"]
+
+[tool.ruff.lint]
+select = ["E9", "F63", "F7", "F82"]

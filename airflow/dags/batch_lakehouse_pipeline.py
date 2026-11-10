@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from airflow import DAG
 from airflow.operators.bash import BashOperator
@@ -9,7 +10,7 @@ from airflow.operators.bash import BashOperator
 
 PROJECT_ROOT = os.environ.get(
     "PROJECT_ROOT",
-    "/home/manshu/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics",
+    str(Path(__file__).resolve().parents[2]),
 )
 
 RUNNER = f"{PROJECT_ROOT}/scripts/run_airflow_task.sh"
@@ -24,6 +25,7 @@ DEFAULT_ENV = {
         "DBT_BIN",
         f"{PROJECT_ROOT}/venv-dbt/bin/dbt",
     ),
+    "BATCH_DATE": "{{ dag_run.run_after | ds }}",
 }
 
 
@@ -136,7 +138,7 @@ with DAG(
         task_id="create_postgresql_schemas",
         bash_command=(
             "set -euo pipefail\n"
-            "cd /home/manshu/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics\n"
+            f"cd {PROJECT_ROOT}\n"
             "env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/create_schemas.sql"
         ),
         env=DEFAULT_ENV,
@@ -146,7 +148,7 @@ with DAG(
         task_id="load_gold_scd2_to_staging",
         bash_command=(
             "set -euo pipefail\n"
-            "cd /home/manshu/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics\n"
+            f"cd {PROJECT_ROOT}\n"
             "if [ -f scripts/load_gold_to_postgres_staging.py ]; then\n"
             "  source venv/bin/activate\n"
             "  python scripts/load_gold_to_postgres_staging.py\n"
@@ -161,7 +163,7 @@ with DAG(
         task_id="build_warehouse_tables",
         bash_command=(
             "set -euo pipefail\n"
-            "cd /home/manshu/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics\n"
+            f"cd {PROJECT_ROOT}\n"
             "env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/create_warehouse_tables.sql"
         ),
         env=DEFAULT_ENV,
@@ -171,7 +173,7 @@ with DAG(
         task_id="run_scd2_validation",
         bash_command=(
             "set -euo pipefail\n"
-            "cd /home/manshu/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics\n"
+            f"cd {PROJECT_ROOT}\n"
             "env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/scd2_validation_queries.sql"
         ),
         env=DEFAULT_ENV,
@@ -181,7 +183,7 @@ with DAG(
         task_id="run_warehouse_reconciliation",
         bash_command=(
             "set -euo pipefail\n"
-            "cd /home/manshu/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics\n"
+            f"cd {PROJECT_ROOT}\n"
             "env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/reconciliation_report.sql"
         ),
         env=DEFAULT_ENV,
@@ -191,7 +193,7 @@ with DAG(
         task_id="build_reporting_marts",
         bash_command=(
             "set -euo pipefail\n"
-            "cd /home/manshu/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics\n"
+            f"cd {PROJECT_ROOT}\n"
             "env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/create_marts.sql"
         ),
         env=DEFAULT_ENV,

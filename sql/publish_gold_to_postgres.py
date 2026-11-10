@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -11,12 +12,12 @@ from sqlalchemy import create_engine, text
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 GOLD_DIR = PROJECT_ROOT / "data" / "gold"
 
-POSTGRES_USER = "project2"
-POSTGRES_PASSWORD = "project2"
-POSTGRES_HOST = "localhost"
-POSTGRES_PORT = "5434"
-POSTGRES_DB = "marketing_analytics"
-POSTGRES_SCHEMA = "gold"
+POSTGRES_USER = os.getenv("P2_POSTGRES_USER", "project2")
+POSTGRES_PASSWORD = os.getenv("P2_POSTGRES_PASSWORD", "project2")
+POSTGRES_HOST = os.getenv("P2_POSTGRES_HOST", "localhost")
+POSTGRES_PORT = os.getenv("P2_POSTGRES_PORT", "5434")
+POSTGRES_DB = os.getenv("P2_POSTGRES_DB", "marketing_analytics")
+POSTGRES_SCHEMA = os.getenv("P2_POSTGRES_SCHEMA", "gold")
 
 DATABASE_URL = (
     f"postgresql+psycopg://{POSTGRES_USER}:{POSTGRES_PASSWORD}"

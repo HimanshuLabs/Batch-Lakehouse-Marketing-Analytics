@@ -458,7 +458,83 @@ WHERE product_sk = 0
 UNION ALL
 SELECT 'warehouse.fact_conversions.campaign_sk_unknown', COUNT(*)
 FROM warehouse.fact_conversions
-WHERE campaign_sk = 0;
+WHERE campaign_sk = 0
+
+-- Conformed dimensions and dates: 0 is their unknown member too.
+UNION ALL
+SELECT 'warehouse.fact_orders.region_sk_unknown', COUNT(*)
+FROM warehouse.fact_orders
+WHERE region_sk = 0
+
+UNION ALL
+SELECT 'warehouse.fact_orders.channel_sk_unknown', COUNT(*)
+FROM warehouse.fact_orders
+WHERE channel_sk = 0
+
+UNION ALL
+SELECT 'warehouse.fact_orders.order_date_sk_unknown', COUNT(*)
+FROM warehouse.fact_orders
+WHERE order_date_sk = 0
+
+UNION ALL
+SELECT 'warehouse.fact_order_items.region_sk_unknown', COUNT(*)
+FROM warehouse.fact_order_items
+WHERE region_sk = 0
+
+UNION ALL
+SELECT 'warehouse.fact_order_items.channel_sk_unknown', COUNT(*)
+FROM warehouse.fact_order_items
+WHERE channel_sk = 0
+
+UNION ALL
+SELECT 'warehouse.fact_order_items.order_date_sk_unknown', COUNT(*)
+FROM warehouse.fact_order_items
+WHERE order_date_sk = 0
+
+UNION ALL
+SELECT 'warehouse.fact_campaign_spend.region_sk_unknown', COUNT(*)
+FROM warehouse.fact_campaign_spend
+WHERE region_sk = 0
+
+UNION ALL
+SELECT 'warehouse.fact_campaign_spend.channel_sk_unknown', COUNT(*)
+FROM warehouse.fact_campaign_spend
+WHERE channel_sk = 0
+
+UNION ALL
+SELECT 'warehouse.fact_campaign_spend.spend_date_sk_unknown', COUNT(*)
+FROM warehouse.fact_campaign_spend
+WHERE spend_date_sk = 0
+
+UNION ALL
+SELECT 'warehouse.fact_web_events.region_sk_unknown', COUNT(*)
+FROM warehouse.fact_web_events
+WHERE region_sk = 0
+
+UNION ALL
+SELECT 'warehouse.fact_web_events.channel_sk_unknown', COUNT(*)
+FROM warehouse.fact_web_events
+WHERE channel_sk = 0
+
+UNION ALL
+SELECT 'warehouse.fact_web_events.event_date_sk_unknown', COUNT(*)
+FROM warehouse.fact_web_events
+WHERE event_date_sk = 0
+
+UNION ALL
+SELECT 'warehouse.fact_conversions.region_sk_unknown', COUNT(*)
+FROM warehouse.fact_conversions
+WHERE region_sk = 0
+
+UNION ALL
+SELECT 'warehouse.fact_conversions.channel_sk_unknown', COUNT(*)
+FROM warehouse.fact_conversions
+WHERE channel_sk = 0
+
+UNION ALL
+SELECT 'warehouse.fact_conversions.conversion_date_sk_unknown', COUNT(*)
+FROM warehouse.fact_conversions
+WHERE conversion_date_sk = 0;
 
 -- =============================================================================
 -- 6. Fact dates must fall inside dimension effective date ranges
@@ -541,7 +617,157 @@ FROM warehouse.fact_campaign_spend fcs
 JOIN warehouse.dim_campaign dca ON fcs.campaign_sk = dca.campaign_sk
 WHERE fcs.spend_date IS NULL
    OR fcs.spend_date::TIMESTAMP < dca.effective_from
-   OR fcs.spend_date::TIMESTAMP >= dca.effective_to;
+   OR fcs.spend_date::TIMESTAMP >= dca.effective_to
+
+UNION ALL
+
+SELECT
+    'fact_web_events_customer_date_outside_customer_scd2_range' AS check_name,
+    'warehouse.fact_web_events -> warehouse.dim_customer' AS checked_entity,
+    dc.customer_id AS natural_key,
+    fwe.customer_sk::TEXT AS surrogate_key,
+    fwe.event_id AS fact_key,
+    'event_timestamp=' || COALESCE(fwe.event_timestamp::TEXT, 'NULL')
+        || ', customer_range=[' || dc.effective_from || ', ' || dc.effective_to || ')' AS issue_details
+FROM warehouse.fact_web_events fwe
+JOIN warehouse.dim_customer dc ON fwe.customer_sk = dc.customer_sk
+WHERE fwe.event_timestamp IS NULL
+   OR fwe.event_timestamp < dc.effective_from
+   OR fwe.event_timestamp >= dc.effective_to
+
+UNION ALL
+
+SELECT
+    'fact_web_events_product_date_outside_product_scd2_range' AS check_name,
+    'warehouse.fact_web_events -> warehouse.dim_product' AS checked_entity,
+    dp.product_id AS natural_key,
+    fwe.product_sk::TEXT AS surrogate_key,
+    fwe.event_id AS fact_key,
+    'event_timestamp=' || COALESCE(fwe.event_timestamp::TEXT, 'NULL')
+        || ', product_range=[' || dp.effective_from || ', ' || dp.effective_to || ')' AS issue_details
+FROM warehouse.fact_web_events fwe
+JOIN warehouse.dim_product dp ON fwe.product_sk = dp.product_sk
+WHERE fwe.event_timestamp IS NULL
+   OR fwe.event_timestamp < dp.effective_from
+   OR fwe.event_timestamp >= dp.effective_to
+
+UNION ALL
+
+SELECT
+    'fact_web_events_campaign_date_outside_campaign_scd2_range' AS check_name,
+    'warehouse.fact_web_events -> warehouse.dim_campaign' AS checked_entity,
+    dca.campaign_id AS natural_key,
+    fwe.campaign_sk::TEXT AS surrogate_key,
+    fwe.event_id AS fact_key,
+    'event_timestamp=' || COALESCE(fwe.event_timestamp::TEXT, 'NULL')
+        || ', campaign_range=[' || dca.effective_from || ', ' || dca.effective_to || ')' AS issue_details
+FROM warehouse.fact_web_events fwe
+JOIN warehouse.dim_campaign dca ON fwe.campaign_sk = dca.campaign_sk
+WHERE fwe.event_timestamp IS NULL
+   OR fwe.event_timestamp < dca.effective_from
+   OR fwe.event_timestamp >= dca.effective_to;
+
+-- =============================================================================
+-- 6b. Fact keys that exist in their dimension but no version covers the fact
+--     time. The warehouse lookups are in-range only, so such a fact gets the
+--     unknown member (0). Dimension versions run from 1900-01-01 to 9999-12-31
+--     without gaps, so any row here means a corrupt dimension.
+--     A table rebuilt on every run, not a view: it reads the natural keys from
+--     staging, and a view would stop the staging loader from replacing those
+--     tables.
+-- =============================================================================
+
+DROP TABLE IF EXISTS audit.scd2_fact_key_without_covering_version;
+
+CREATE TABLE audit.scd2_fact_key_without_covering_version AS
+SELECT
+    'warehouse.fact_orders.customer_sk' AS fact_key_name,
+    fo.order_id AS fact_key,
+    s.customer_id::TEXT AS natural_key,
+    fo.order_timestamp AS fact_time
+FROM warehouse.fact_orders fo
+JOIN staging.stg_gold_fact_orders_scd2 s ON s.order_id::TEXT = fo.order_id
+WHERE fo.customer_sk = 0
+  AND EXISTS (SELECT 1 FROM warehouse.dim_customer d
+              WHERE d.customer_id = s.customer_id::TEXT AND d.customer_sk <> 0)
+
+UNION ALL
+
+SELECT
+    'warehouse.fact_orders.campaign_sk',
+    fo.order_id,
+    s.campaign_id::BIGINT::TEXT,
+    fo.order_timestamp
+FROM warehouse.fact_orders fo
+JOIN staging.stg_gold_fact_orders_scd2 s ON s.order_id::TEXT = fo.order_id
+WHERE fo.campaign_sk = 0
+  AND EXISTS (SELECT 1 FROM warehouse.dim_campaign d
+              WHERE d.campaign_id = s.campaign_id::BIGINT::TEXT AND d.campaign_sk <> 0)
+
+UNION ALL
+
+SELECT
+    'warehouse.fact_order_items.product_sk',
+    foi.order_item_nk,
+    s.product_id::TEXT,
+    foi.order_timestamp
+FROM warehouse.fact_order_items foi
+JOIN staging.stg_gold_fact_order_items_scd2 s ON s.order_item_id::TEXT = foi.order_item_nk
+WHERE foi.product_sk = 0
+  AND EXISTS (SELECT 1 FROM warehouse.dim_product d
+              WHERE d.product_id = s.product_id::TEXT AND d.product_sk <> 0)
+
+UNION ALL
+
+SELECT
+    'warehouse.fact_campaign_spend.campaign_sk',
+    fcs.campaign_spend_nk,
+    s.campaign_id::BIGINT::TEXT,
+    fcs.spend_date::TIMESTAMP
+FROM warehouse.fact_campaign_spend fcs
+JOIN staging.stg_gold_fact_campaign_spend_scd2 s ON s.spend_id::TEXT = fcs.campaign_spend_nk
+WHERE fcs.campaign_sk = 0
+  AND EXISTS (SELECT 1 FROM warehouse.dim_campaign d
+              WHERE d.campaign_id = s.campaign_id::BIGINT::TEXT AND d.campaign_sk <> 0)
+
+UNION ALL
+
+SELECT
+    'warehouse.fact_web_events.customer_sk',
+    fwe.event_id,
+    s.customer_id::TEXT,
+    fwe.event_timestamp
+FROM warehouse.fact_web_events fwe
+JOIN staging.stg_gold_fact_web_events s ON s.event_id::TEXT = fwe.event_id
+WHERE fwe.customer_sk = 0
+  AND EXISTS (SELECT 1 FROM warehouse.dim_customer d
+              WHERE d.customer_id = s.customer_id::TEXT AND d.customer_sk <> 0)
+
+UNION ALL
+
+SELECT
+    'warehouse.fact_web_events.product_sk',
+    fwe.event_id,
+    s.product_id::TEXT,
+    fwe.event_timestamp
+FROM warehouse.fact_web_events fwe
+JOIN staging.stg_gold_fact_web_events s ON s.event_id::TEXT = fwe.event_id
+WHERE fwe.product_sk = 0
+  AND EXISTS (SELECT 1 FROM warehouse.dim_product d
+              WHERE d.product_id = s.product_id::TEXT AND d.product_sk <> 0)
+
+UNION ALL
+
+SELECT
+    'warehouse.fact_web_events.campaign_sk',
+    fwe.event_id,
+    s.campaign_id::BIGINT::TEXT,
+    fwe.event_timestamp
+FROM warehouse.fact_web_events fwe
+JOIN staging.stg_gold_fact_web_events s ON s.event_id::TEXT = fwe.event_id
+WHERE fwe.campaign_sk = 0
+  AND EXISTS (SELECT 1 FROM warehouse.dim_campaign d
+              WHERE d.campaign_id = s.campaign_id::BIGINT::TEXT AND d.campaign_sk <> 0);
 
 
 -- =============================================================================
@@ -784,10 +1010,20 @@ validation_counts AS (
     SELECT
         'POINT_IN_TIME_CORRECTNESS',
         'fact_dates_fall_inside_dimension_effective_ranges',
-        'transactional warehouse fact tables joined to SCD2 dimensions',
+        'warehouse fact tables joined to SCD2 dimensions',
         COUNT(*)::BIGINT,
-        'Transactional fact timestamps must fall inside the effective window of their joined dimension version. Web events and conversions are excluded because behavioral event facts use inferred/current-dimension fallback when no exact SCD2 window exists.'
+        'Fact timestamps (orders, order items, campaign spend, web events) must fall inside the effective window of their joined dimension version.'
     FROM audit.v_scd2_fact_date_range_violations
+
+    UNION ALL
+
+    SELECT
+        'POINT_IN_TIME_CORRECTNESS',
+        'fact_keys_resolve_to_a_covering_version',
+        'warehouse fact tables joined to SCD2 dimensions',
+        COUNT(*)::BIGINT,
+        'A fact key that exists in its dimension must have a version covering the fact time; otherwise it resolves to the unknown member (0), which means a corrupt dimension.'
+    FROM audit.scd2_fact_key_without_covering_version
 
     UNION ALL
 

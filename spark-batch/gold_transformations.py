@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import date
 from pathlib import Path
 
@@ -24,7 +25,7 @@ SILVER_BASE_DIR = PROJECT_ROOT / "data" / "silver"
 GOLD_BASE_DIR = PROJECT_ROOT / "data" / "gold"
 LOGS_DIR = PROJECT_ROOT / "logs"
 
-BATCH_DATE = date.today().isoformat()
+BATCH_DATE = date.fromisoformat(os.environ.get("BATCH_DATE") or date.today().isoformat()).isoformat()
 
 
 def create_spark_session() -> SparkSession:
@@ -32,6 +33,7 @@ def create_spark_session() -> SparkSession:
         SparkSession.builder
         .appName("Project2_Gold_Transformations")
         .master("local[2]")
+        .config("spark.sql.session.timeZone", os.environ.get("SOURCE_TIMEZONE", "Asia/Kolkata"))
         .config("spark.driver.memory", "4g")
         .config("spark.executor.memory", "4g")
         .config("spark.sql.shuffle.partitions", "2")
@@ -499,6 +501,7 @@ def main() -> None:
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
     spark = create_spark_session()
+    print(f"spark.sql.session.timeZone={spark.conf.get('spark.sql.session.timeZone')}")
 
     print("Starting Gold transformations")
     print(f"Batch date: {BATCH_DATE}")
