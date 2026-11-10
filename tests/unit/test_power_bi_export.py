@@ -1,0 +1,61 @@
+"""data_quality_summary.csv comes only from verified checks.
+
+It used to be a hand-made file that no code produced, with numbers that went
+stale. The power_bi_export task now builds it from warehouse reconciliation,
+the latest SCD2 validation run, the Silver quality report and the
+point-in-time fact report, and refuses to write it when an input is missing.
+"""
+from __future__ import annotations
+
+import pytest
+
+EXPORT_JOB = "sql/export_power_bi_dataset.py"
+
+
+def test_data_quality_summary_is_built_from_verified_checks(load_job):
+    export = load_job(EXPORT_JOB, BATCH_DATE="2026-06-18")
+
+    reconciliation = [
+        {"check_name": "Gold order count equals warehouse fact_orders count", "status": "PASS",
+         "count_difference": 0, "amount_difference": None},
+        {"check_name": "Gold revenue equals warehouse fact_orders net revenue", "status": "FAIL",
+         "count_difference": None, "amount_difference": 12.5},
+    ]
+    scd2_validation = [
+        {"check_name": "no_overlapping_effective_date_ranges", "status": "PASS", "failed_row_count": 0},
+    ]
+    silver_report = [
+        {"table_name": "orders", "status": "PASSED", "quarantine_row_count": "4", "unaccounted_row_count": "0"},
+        {"table_name": "campaigns", "status": "FAILED", "quarantine_row_count": "6", "unaccounted_row_count": "2"},
+    ]
+    pit_report = {"facts": {"fact_orders_scd2": {"conservation": {
+        "status": "PASS", "rejected_rows": 147, "unaccounted_rows": 0}}}}
+
+    rows = export.build_data_quality_summary(reconciliation, scd2_validation, silver_report, pit_report)
+
+    assert [list(row) for row in rows] == [export.SUMMARY_COLUMNS] * len(rows)
+    assert [(r["metric_group"], r["metric_name"], r["metric_value"], r["status"]) for r in rows] == [
+        ("Warehouse Reconciliation", "Gold order count equals warehouse fact_orders count", 0, "PASS"),
+        ("Warehouse Reconciliation", "Gold revenue equals warehouse fact_orders net revenue", 12.5, "FAIL"),
+        ("SCD2 Validation", "no_overlapping_effective_date_ranges", 0, "PASS"),
+        ("Silver Quarantine", "Quarantined rows: campaigns", 6, "FAIL"),
+        ("Silver Quarantine", "Unaccounted rows: campaigns", 2, "FAIL"),
+        ("Silver Quarantine", "Quarantined rows: orders", 4, "PASS"),
+        ("Silver Quarantine", "Unaccounted rows: orders", 0, "PASS"),
+        ("Point-in-Time Facts", "Rejected rows: fact_orders_scd2", 147, "PASS"),
+        ("Point-in-Time Facts", "Unaccounted rows: fact_orders_scd2", 0, "PASS"),
+    ]
+
+    # A missing source is an error, never an empty or invented summary.
+    for missing in ("reconciliation", "scd2_validation", "silver_report"):
+        inputs = {"reconciliation": reconciliation, "scd2_validation": scd2_validation,
+                  "silver_report": silver_report, "pit_report": pit_report}
+        inputs[missing] = []
+        with pytest.raises(ValueError):
+            export.build_data_quality_summary(**inputs)
+    with pytest.raises(ValueError):
+        export.build_data_quality_summary(reconciliation, scd2_validation, silver_report, {"facts": {}})
+    # A report written before the conservation check existed is stale, not zero.
+    stale_report = {"facts": {"fact_orders_scd2": {"rejected_rows": 147}}}
+    with pytest.raises(ValueError, match="rerun point_in_time_fact_joins"):
+        export.build_data_quality_summary(reconciliation, scd2_validation, silver_report, stale_report)

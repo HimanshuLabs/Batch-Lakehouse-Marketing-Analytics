@@ -10,122 +10,12 @@ grep -qxF "data/bi_exports/" .gitignore 2>/dev/null || cat >> .gitignore <<'EOF'
 data/bi_exports/
 EOF
 
-cat > sql/export_power_bi_dataset.py <<'PY'
-from __future__ import annotations
-
-import json
-from datetime import datetime, timezone
-from pathlib import Path
-
-import duckdb
-
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-EXPORT_DIR = PROJECT_ROOT / "data" / "bi_exports"
-LOG_DIR = PROJECT_ROOT / "logs"
-
-EXPORT_DIR.mkdir(parents=True, exist_ok=True)
-LOG_DIR.mkdir(parents=True, exist_ok=True)
-
-
-EXPORTS = {
-    "campaign_performance": """
-        SELECT *
-        FROM read_parquet('data/gold/mart_campaign_performance_scd2/*.parquet')
-    """,
-    "customer_lifetime_value": """
-        SELECT *
-        FROM read_parquet('data/gold/mart_customer_lifetime_value_scd2/*.parquet')
-    """,
-    "product_performance": """
-        SELECT *
-        FROM read_parquet('data/gold/mart_product_performance_scd2/*.parquet')
-    """,
-    "marketing_funnel": """
-        SELECT *
-        FROM read_parquet('data/gold/mart_marketing_funnel_scd2/*.parquet')
-    """,
-    "fact_orders": """
-        SELECT *
-        FROM read_parquet('data/gold/fact_orders_scd2/**/*.parquet')
-    """,
-    "fact_order_items": """
-        SELECT *
-        FROM read_parquet('data/gold/fact_order_items_scd2/**/*.parquet')
-    """,
-    "fact_campaign_spend": """
-        SELECT *
-        FROM read_parquet('data/gold/fact_campaign_spend_scd2/**/*.parquet')
-    """,
+# sql/export_power_bi_dataset.py is tracked in the repository (it also builds
+# data_quality_summary.csv from verified checks); it is not regenerated here.
+test -s sql/export_power_bi_dataset.py || {
+  echo "Missing sql/export_power_bi_dataset.py: restore it from the repository."
+  exit 1
 }
-
-
-def main() -> None:
-    report = {
-        "job_name": "export_power_bi_dataset",
-        "started_at_utc": datetime.now(timezone.utc).isoformat(),
-        "exports": {},
-    }
-
-    overall_status = "PASS"
-    con = duckdb.connect(database=":memory:")
-
-    try:
-        for name, query in EXPORTS.items():
-            output_path = EXPORT_DIR / f"{name}.csv"
-            print(f"Exporting {name} -> {output_path}")
-
-            try:
-                con.execute(
-                    f"""
-                    COPY ({query})
-                    TO '{output_path}'
-                    WITH (HEADER, DELIMITER ',')
-                    """
-                )
-
-                row_count = con.execute(query).fetchdf().shape[0]
-
-                report["exports"][name] = {
-                    "status": "PASS",
-                    "output_path": str(output_path),
-                    "row_count": row_count,
-                }
-
-                print(f"{name}: rows={row_count}")
-
-            except Exception as exc:
-                overall_status = "FAIL"
-                report["exports"][name] = {
-                    "status": "FAIL",
-                    "error": str(exc),
-                }
-                print(f"{name}: FAILED - {exc}")
-
-    except Exception as exc:
-        overall_status = "FAIL"
-        report["error"] = str(exc)
-        raise
-
-    finally:
-        con.close()
-
-        report["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
-        report["overall_status"] = overall_status
-
-        report_path = LOG_DIR / "power_bi_export_report.json"
-        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-
-        print(f"Report written to: {report_path}")
-        print(f"Overall status: {overall_status}")
-
-    if overall_status != "PASS":
-        raise SystemExit("Power BI export failed.")
-
-
-if __name__ == "__main__":
-    main()
-PY
 
 cat > sql/power_bi_dashboard_queries.sql <<'SQL'
 -- Power BI Dashboard Query Pack
@@ -241,21 +131,35 @@ This dashboard visualizes a production-style batch lakehouse pipeline for market
 
 ## Data Sources
 
-Power BI CSV exports are generated from:
+The DAG's `power_bi_export` task (`sql/export_power_bi_dataset.py`) writes these CSV exports:
 
-- campaign_performance.csv
-- customer_lifetime_value.csv
-- product_performance.csv
-- marketing_funnel.csv
-- fact_orders.csv
-- fact_order_items.csv
-- fact_campaign_spend.csv
+| File | Built from | Uploaded to S3 for Power BI Online |
+|---|---|---|
+| `campaign_performance.csv` | Gold `mart_campaign_performance_scd2` | yes |
+| `customer_lifetime_value.csv` | Gold `mart_customer_lifetime_value_scd2` | yes |
+| `product_performance.csv` | Gold `mart_product_performance_scd2` | yes |
+| `marketing_funnel.csv` | Gold `mart_marketing_funnel_scd2` | yes |
+| `data_quality_summary.csv` | verified pipeline checks (see below) | yes |
+| `fact_orders.csv` | Gold `fact_orders_scd2` | no |
+| `fact_order_items.csv` | Gold `fact_order_items_scd2` | no |
+| `fact_campaign_spend.csv` | Gold `fact_campaign_spend_scd2` | no |
 
 Export location:
 
 ```text
 data/bi_exports/
+```
+
+Power BI Online reads the five uploaded files through public HTTPS S3 URLs managed by `terraform/aws-bi-exports` (read-only, exactly those five objects). Only synthetic data is ever uploaded.
+
+## Data Quality Summary
+
+`data_quality_summary.csv` has the columns `metric_group`, `metric_name`, `metric_value` and `status` (`PASS` or `FAIL`). Every row comes from a check the pipeline has already verified; the export task fails rather than write the file when an input is missing.
+
+| metric_group | Source | metric_value |
+|---|---|---|
+| Warehouse Reconciliation | `audit.v_latest_reconciliation_report` | count or amount difference (0 when the check reconciles) |
+| SCD2 Validation | latest run in `audit.scd2_validation_results` | failed row count |
+| Silver Quarantine | `logs/silver_quality_report_<BATCH_DATE>/` | quarantined and unaccounted rows per table |
+| Point-in-Time Facts | `logs/point_in_time_fact_join_report.json` | rejected and unaccounted rows per fact |
 MD
-MD
-exit
-clear
