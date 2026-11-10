@@ -422,9 +422,11 @@ For this Ubuntu-friendly demo:
 
 1. Airflow runs the lakehouse and warehouse pipeline.
 2. PostgreSQL marts are refreshed.
-3. `scripts/export_power_bi_marts.py` writes fresh CSV files into `exports/power_bi/`.
-4. The CSVs are uploaded/refreshed in Power BI Online.
-5. Dashboard visuals reflect the latest warehouse marts.
+3. Route A: `scripts/export_power_bi_marts.py` writes fresh CSV files into `exports/power_bi/`, and they are uploaded in Power BI Online.
+4. Route B: the DAG's `power_bi_export` task writes five files into `data/bi_exports/` (including `data_quality_summary.csv`, built from verified checks), `terraform apply` in `terraform/aws-bi-exports` uploads them to S3, and Power BI Online refreshes them from their public HTTPS URLs (read-only, synthetic data only).
+5. Dashboard visuals reflect the latest data.
+
+See `docs/warehouse/power_bi_refresh_flow.md` for both routes.
 
 ## What this demo proves
 
