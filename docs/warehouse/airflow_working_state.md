@@ -102,7 +102,7 @@ Why these settings:
 - **LocalExecutor with parallelism 1.** At most one task runs at a time, so two Spark jobs never compete for memory. Airflow 3 has no SequentialExecutor.
 - **One shared JWT secret.** Tasks call back to the api-server's Execution API with JWTs, so all three processes need the same `JWT_SECRET`.
 - **Simple auth manager with all admins.** This suits local development only, and the api-server listens on 127.0.0.1 only.
-- **Paused at creation.** Nothing runs until the render gate in step 7 has passed.
+- **Paused at creation.** Nothing runs until you unpause the DAG, so a run's `BATCH_DATE` can be checked first (step 8).
 
 ---
 
@@ -149,12 +149,15 @@ The UI is at `http://127.0.0.1:8080`.
 
 ## 7. Trigger a run for a chosen BATCH_DATE
 
-The DAG sets `BATCH_DATE` from `{{ dag_run.run_after | ds }}`. In Airflow 3.2.0:
+The DAG sets `BATCH_DATE` from `{{ (dag_run.logical_date or dag_run.run_after) | ds }}`: the run's logical date when it has one, otherwise its `run_after` time. Both are in UTC, so `BATCH_DATE` is the UTC day.
 
-- `airflow dags trigger --logical-date ...` has no run-after option, so the run gets `run_after = now`;
-- `airflow dags test` also gets `run_after = now`.
+**From the UI.** Trigger the DAG and set **Logical Date** to the day you want to process or rerun. Use 12:00 on that day: noon keeps the UTC day the same whichever timezone the UI shows. To process today, leave the field at its default, now. "Today" means the current UTC day, so between 00:00 and 05:30 IST it is still the previous day.
 
-Either one renders today's date as `BATCH_DATE`. For a date that has never been run, that makes `generate_data` create a brand-new batch. Trigger through the REST API instead, which accepts `run_after`.
+**From the CLI**, the same applies: `airflow dags trigger batch_lakehouse_marketing_analytics -l 2026-06-04T12:00:00+00:00` for a given day, or the same command without `-l` for today.
+
+Each logical date can have only one run. To rerun a day that already has a run, either clear that run in the UI, or trigger again with another time on the same day, for example 12:01.
+
+**Scripted (REST).** The REST API sets both dates explicitly, which suits scripts. Pair it with the render gate in step 8.
 
 First run of a date, when no run holds that logical date yet:
 
@@ -165,7 +168,7 @@ curl -s -X POST http://127.0.0.1:8080/api/v2/dags/batch_lakehouse_marketing_anal
   -d '{"dag_run_id":"manual__2026-06-18","logical_date":"2026-06-18T12:00:00Z","run_after":"2026-06-18T12:00:00Z","conf":{}}'
 ```
 
-Rerun of a date that already has a run: the metadata table allows only one run per logical date. Send `"logical_date": null` with `run_after` set and a new run id. `BATCH_DATE` comes from `run_after`, so it is unchanged.
+Rerun of a date that already has a run: send `"logical_date": null` with `run_after` set and a new run id. Without a logical date, `BATCH_DATE` comes from `run_after`, so it is the same day.
 
 ```bash
 curl -s -X POST http://127.0.0.1:8080/api/v2/dags/batch_lakehouse_marketing_analytics/dagRuns \
@@ -173,13 +176,11 @@ curl -s -X POST http://127.0.0.1:8080/api/v2/dags/batch_lakehouse_marketing_anal
   -d '{"dag_run_id":"manual__rerun2_2026-06-18","logical_date":null,"run_after":"2026-06-18T12:00:00Z","conf":{}}'
 ```
 
-Noon UTC keeps the rendered date on the intended day.
-
 ---
 
 ## 8. Render gate, then unpause
 
-With the DAG still paused, render `BATCH_DATE` from the stored run. Both lines must print exactly `'BATCH_DATE': '2026-06-18'`:
+With the DAG still paused, render `BATCH_DATE` from the stored run, however it was triggered. Both lines must print exactly `'BATCH_DATE': '2026-06-18'`:
 
 ```bash
 RUN_ID=manual__rerun2_2026-06-18
@@ -264,8 +265,8 @@ power_bi_export
 | `QueuePool limit of size 5 overflow 10 reached` (historical) | SQLite metadata database under UI/API load | PostgreSQL metadata database, now in its own `airflow_postgres` container |
 | `mashumaro.exceptions.UnserializableField` from dbt (historical) | dbt 1.10 installed on Python 3.14 | `venv-dbt` on Python 3.13 via uv |
 | `Could not find profile named 'marketing_lakehouse_warehouse'` | `dbt/profiles.yml` missing | `cp dbt/profiles.yml.example dbt/profiles.yml` |
-| A triggered run renders today's `BATCH_DATE` | CLI trigger sets `run_after = now` | REST trigger with `run_after`, then the render gate |
-| A rerun trigger is rejected | one run per logical date | `"logical_date": null` with `run_after` set |
+| A run triggered for an earlier day rendered today's `BATCH_DATE` (historical) | `BATCH_DATE` came only from `run_after`, which the UI and CLI set to now | `BATCH_DATE` now uses the logical date when the run has one |
+| A second trigger for the same logical date is rejected | one run per logical date | clear the existing run, use another time on the same day, or REST with `"logical_date": null` |
 | `kill $!` leaves Airflow running | wrapper PID; api-server renames its title | record PIDs from `ps`/`ss`, then send SIGTERM |
 | `airflow users create` not found | Airflow 3 removed it | simple auth manager with `SIMPLE_AUTH_MANAGER_ALL_ADMINS=True` |
 
