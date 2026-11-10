@@ -802,30 +802,17 @@ cat exports/power_bi/export_manifest.json
 
 ---
 
-## 19. Known Limitations
+## 19. Design Decisions and Known Limitations
 
-- **Public S3 read is a deliberate design choice.**
-  - The five route B CSVs are synthetic and readable by anyone who has their URLs. Power BI Online needs that.
-  - The bucket policy does not require HTTPS for those reads.
-  - The bucket name includes the AWS account ID, so the account ID is visible in every URL.
-- **Orders without a campaign are rejected.** Organic orders, with a NULL campaign, have no campaign version to join. The point-in-time join rejects them to quarantine; that is 45 orders in the current data. They are not mapped to the unknown campaign member. This stays as it is until the Project 4 model is retrained (v003), so that model's inputs do not change underneath it.
-- **Business dates are in UTC.** Silver and Gold parse source timestamps as Asia/Kolkata, but the warehouse derives business dates (date keys and mart dates) in UTC. An order placed between 00:00 and 05:30 IST counts on the previous day.
-- **Dev dependency transitive versions are not pinned.** `requirements-dev.txt` pins pytest, ruff, dbt-core, and dbt-postgres, but not the packages they pull in, so those can drift between installs.
-- **Screenshots show earlier numbers.** The committed Power BI screenshots predate the latest data fixes. The current numbers are in `exports/power_bi/` and in the route B files.
+Deliberate trade-offs for a portfolio project built on synthetic data:
 
-Code-level items that are known and not yet fixed:
+- **Public dashboard files.** Power BI Online reads five synthetic CSVs from S3 through public, read-only object URLs (no listing, no write access). The bucket policy does not enforce TLS, which is acceptable for synthetic data; a production setup would serve the files privately, for example through CloudFront with origin access control.
+- **Orders without a campaign.** Organic orders (no campaign) are quarantined by the point-in-time join rather than mapped to an "unknown campaign" member (45 orders in the sample data). The change is deliberately deferred so the downstream ML model's training inputs stay stable, and is planned alongside that model's next version.
+- **Business dates in UTC.** Spark parses source timestamps as Asia/Kolkata, but the warehouse derives date keys and mart dates in UTC, so orders between 00:00 and 05:30 IST fall on the previous day. Moving business dates to IST is planned with the same model update.
+- **Reproducibility scope.** Direct dependencies are pinned; transitive dependencies of the dev tools are not.
+- **Screenshots** show the dashboard layout; the current figures are in `exports/power_bi/`.
 
-| ID | Where | Limitation |
-|---|---|---|
-| C-1 | `scripts/load_gold_to_postgres_staging.py` | The `FAILED` audit insert inside `except` can itself raise when PostgreSQL is down. That aborts the remaining sources. |
-| C-2 | `scripts/load_gold_to_postgres_staging.py` | `to_sql(replace)` and the audit insert are not one transaction, so a failure mid-load can leave a half-written staging table. |
-| C-3 | `spark-batch/point_in_time_fact_joins.py` | Fact validation runs on the DataFrame before writing, not on what was written. |
-| C-4 | `sql/run_scd2_duckdb_analytics.py`, `sql/export_power_bi_dataset.py` | `duckdb.connect` sits outside `try`, so no report is written if the connect fails. |
-| C-5 | `sql/export_power_bi_dataset.py` | Each export query runs twice: once for the export, then again for the row count. |
-| C-6 | `sql/run_scd2_duckdb_analytics.py` | `split_sql_queries` splits on `;` even inside string literals. |
-| C-8 | `scripts/run_airflow_task.sh` | `run_optional_python_file` passes silently when its script is missing. |
-| C-12 | `data-generator/generate_data.py` | The target directory is not fsynced after the atomic rename. |
-| C-13 | `sql/warehouse/create_warehouse_tables.sql` | Fact row keys (`order_sk`, `order_item_sk`, `campaign_spend_sk`, `event_sk`, `conversion_sk`) are insert-order `IDENTITY` values, so a rebuild may number rows differently. Nothing downstream reads them; `order_sk` is only the last tie-breaker in `mart_revenue_daily`. Dimension keys are deterministic. |
+Smaller code-level improvements (error handling, transactions and edge cases) are listed in [`docs/known_limitations.md`](docs/known_limitations.md).
 
 ---
 
