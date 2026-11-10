@@ -25,7 +25,7 @@ DEFAULT_ENV = {
         "DBT_BIN",
         f"{PROJECT_ROOT}/venv-dbt/bin/dbt",
     ),
-    "BATCH_DATE": "{{ dag_run.run_after | ds }}",
+    "BATCH_DATE": "{{ (dag_run.logical_date or dag_run.run_after) | ds }}",
 }
 
 

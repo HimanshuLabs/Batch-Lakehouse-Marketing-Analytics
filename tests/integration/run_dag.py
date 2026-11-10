@@ -30,7 +30,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DAG_FILE = REPO_ROOT / "airflow" / "dags" / "batch_lakehouse_pipeline.py"
-BATCH_DATE_TEMPLATE = "{{ dag_run.run_after | ds }}"
+BATCH_DATE_TEMPLATE = "{{ (dag_run.logical_date or dag_run.run_after) | ds }}"
 
 
 def load_dag() -> tuple[object, dict[str, dict], list[tuple[str, str]]]:
