@@ -30,7 +30,7 @@ jobs:
       - name: Set up Python 3.14 (matches the local project venv)
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
-          python-version: "3.14.4"
+          python-version: "3.14"
 
       - name: Validate required files and repository guardrails
         run: |
@@ -148,7 +148,7 @@ jobs:
       - name: Set up Python 3.13 for the dev tools
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
-          python-version: "3.13.18"
+          python-version: "3.13"
           cache: "pip"
           cache-dependency-path: requirements-dev.txt
 
@@ -208,7 +208,7 @@ jobs:
       - name: Set up Python 3.14 (matches the local project venv)
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
-          python-version: "3.14.4"
+          python-version: "3.14"
           cache: "pip"
           cache-dependency-path: |
             requirements.txt
@@ -255,13 +255,13 @@ jobs:
         id: py313
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
-          python-version: "3.13.18"
+          python-version: "3.13"
 
       - name: Set up Python 3.14 for the pipeline
         id: py314
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
-          python-version: "3.14.4"
+          python-version: "3.14"
           cache: "pip"
           cache-dependency-path: |
             requirements.txt
@@ -330,7 +330,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
-          python-version: "3.14.4"
+          python-version: "3.14"
 
       - name: Validate Power BI exports, manifest, docs, and screenshots
         run: |
