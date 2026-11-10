@@ -4,6 +4,8 @@ P2-03 (fixed in 1831e6b): a rule that evaluates to NULL put a row in neither
 Silver nor quarantine, so the row vanished.
 N-13 (fixed in 62b273d): 'NaN'-like text stayed as text, and NaN / Infinity
 passed every "<= 0" rule; non-rule doubles could carry NaN into averages.
+p2-data-v2: an order item whose line_amount is not quantity x discounted_price
+(the generator's dirty line_amount = 1) passed Silver and reached Gold.
 """
 from __future__ import annotations
 
@@ -168,3 +170,23 @@ def test_non_finite_value_in_a_non_rule_double_becomes_null(run_silver, table, c
     stored = valid[bad][column]
     assert stored is None, f"{value!r} in {column} must become NULL, got {stored!r}"
     assert not (isinstance(stored, float) and (math.isnan(stored) or math.isinf(stored)))
+
+
+# --- p2-data-v2: line_amount must be quantity x discounted_price ------------
+
+def test_a_line_amount_that_is_not_quantity_times_price_is_quarantined(spark, load_job, write_bronze):
+    # Every row is 5 x 13673.69 = 68368.45.
+    line_amounts = {
+        "1000": "68368.45",   # exact: valid
+        "1001": "68368.455",  # 0.005 off, rounding to cents: valid
+        "1002": "68368.47",   # 0.02 off: quarantined
+        "1003": "1",          # the generator's dirty line_amount: quarantined
+    }
+    silver = load_job(SILVER_JOB, BATCH_DATE=BATCH_DATE)
+    write_bronze("order_items", [{"order_item_id": key, "line_amount": value} for key, value in line_amounts.items()])
+    valid, invalid = silver.clean_order_items(silver.create_spark_session())
+
+    reasons = {row["order_item_id"]: row["quarantine_reason"] for row in invalid.collect()}
+    assert {row["order_item_id"] for row in valid.collect()} == {1000, 1001}
+    reason = "Invalid order item record: line_amount differs from quantity x discounted_price by more than 0.01"
+    assert reasons == {1002: reason, 1003: reason}

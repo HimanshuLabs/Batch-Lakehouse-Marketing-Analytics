@@ -6,6 +6,7 @@ from pathlib import Path
 
 from pyspark.sql import DataFrame, SparkSession, Window
 from pyspark.sql.functions import (
+    abs as spark_abs,
     coalesce,
     col,
     current_timestamp,
@@ -64,6 +65,11 @@ FREE_TEXT_COLUMNS = {"search_query"}
 #   order_items: original_price, discount_percent
 #   web_events:  cart_value, engagement_score, purchase_probability,
 #                cart_abandonment_probability
+LINE_AMOUNT_TOLERANCE = 0.01
+LINE_AMOUNT_MISMATCH_REASON = (
+    "Invalid order item record: line_amount differs from quantity x discounted_price by more than 0.01"
+)
+
 NON_RULE_DOUBLE_COLUMNS = {
     "order_items": {"original_price", "discount_percent"},
     "web_events": {
@@ -511,6 +517,15 @@ def clean_order_items(spark: SparkSession) -> tuple[DataFrame, DataFrame]:
         invalid_condition,
         "Invalid order item record: bad id/quantity/price/line amount",
     )
+
+    # line_amount must be quantity x discounted_price (rounded to cents), or
+    # the order total and product revenue would disagree.
+    valid, line_amount_mismatch = split_valid_invalid(
+        valid,
+        spark_abs(col("line_amount") - col("expected_line_amount")) > LINE_AMOUNT_TOLERANCE,
+        LINE_AMOUNT_MISMATCH_REASON,
+    )
+    invalid = invalid.unionByName(line_amount_mismatch)
 
     valid = deduplicate_latest(valid, ["order_item_id"], "ingestion_timestamp")
     valid = add_silver_metadata(valid, "silver_order_items")

@@ -26,8 +26,12 @@ BATCH_DATE = date.fromisoformat(os.environ.get("BATCH_DATE") or date.today().iso
 RAW_DIR = PROJECT_ROOT / "data" / "raw" / f"batch_date={BATCH_DATE}"
 
 # All master-data dates are relative to this fixed anchor, never to the clock.
-# It is the first batch date, so BATCH_DATE=2026-05-18 reproduces the original
-# raw batch (all CSVs byte for byte; web events apart from the random UUIDs).
+# It is the first batch date. BATCH_DATE=2026-05-18 makes the same random draws
+# as the original generator, so customers, products, campaigns and ad_spend
+# match the original raw batch byte for byte (web events apart from the random
+# UUIDs). orders.csv and order_items.csv differ by design: every order has at
+# least one item and its cart_value is the sum of its items (see
+# generate_orders_and_items).
 ANCHOR_DATE = date(2026, 5, 18)
 BATCH_DAY = date.fromisoformat(BATCH_DATE)
 BATCH_INDEX = (BATCH_DAY - ANCHOR_DATE).days
@@ -508,6 +512,12 @@ def generate_web_events(
 
 
 def generate_orders(web_events: list[dict], rng: random.Random, count: int) -> pd.DataFrame:
+    """Orders without amounts; cart_value is filled from the items later.
+
+    The random draws are the original generator's, so every later stream
+    (order items, ad spend) is unchanged. Only the duplicate-ID dirty row is
+    applied here, because the items draw their order from these IDs.
+    """
     purchase_events = [event for event in web_events if event.get("event_type") == "purchase"]
 
     rows = []
@@ -521,7 +531,7 @@ def generate_orders(web_events: list[dict], rng: random.Random, count: int) -> p
                 "campaign_id": event["campaign_id"],
                 "order_timestamp": event["event_timestamp"],
                 "payment_method": event["payment_method"] or rng.choice(["UPI", "Credit Card", "Debit Card"]),
-                "cart_value": max(float(event["cart_value"]), 199.0),
+                "cart_value": None,
                 "fraud_score": event["fraud_score"],
                 "country": event["country"],
                 "city": event["city"],
@@ -532,16 +542,14 @@ def generate_orders(web_events: list[dict], rng: random.Random, count: int) -> p
 
     df = pd.DataFrame(rows)
 
-    # Dirty records
+    # Dirty record: a duplicate order ID (both rows get that order's total).
     df.loc[0, "order_id"] = df.loc[1, "order_id"]
-    df.loc[2, "cart_value"] = -500
-    df.loc[3, "user_id"] = 999999
-    df.loc[4, "order_timestamp"] = "not-a-date"
 
     return df
 
 
 def generate_order_items(orders: pd.DataFrame, products: pd.DataFrame, rng: random.Random, count: int) -> pd.DataFrame:
+    """Clean order items, with the original generator's random draws."""
     valid_order_ids = orders["order_id"].dropna().astype(int).unique().tolist()
     valid_products = products.dropna(subset=["product_id"]).drop_duplicates("product_id").to_dict("records")
 
@@ -568,14 +576,68 @@ def generate_order_items(orders: pd.DataFrame, products: pd.DataFrame, rng: rand
             }
         )
 
-    df = pd.DataFrame(rows)
+    return pd.DataFrame(rows)
 
-    # Dirty records
-    df.loc[0, "product_id"] = 999999
-    df.loc[1, "quantity"] = -3
-    df.loc[2, "line_amount"] = 1
 
-    return df
+def fill_empty_orders(orders: pd.DataFrame, items: pd.DataFrame, fill_rng: random.Random) -> pd.DataFrame:
+    """Give every order at least one item by moving one item from an order with two or more.
+
+    fill_rng is its own stream, so the main fact stream (and with it ad spend)
+    is not disturbed. Donors and their items are chosen from sorted lists, so
+    the result is deterministic per BATCH_DATE.
+    """
+    items = items.copy()
+    order_ids = sorted(set(orders["order_id"].dropna().astype(int)))
+    if len(items) < len(order_ids):
+        raise ValueError(f"{len(items)} order items cannot cover {len(order_ids)} orders")
+
+    items_by_order: dict[int, list[int]] = {}
+    for index, order_id in items["order_id"].items():
+        items_by_order.setdefault(int(order_id), []).append(index)
+
+    for empty_order in (order_id for order_id in order_ids if order_id not in items_by_order):
+        donor = fill_rng.choice(sorted(order_id for order_id, indexes in items_by_order.items() if len(indexes) >= 2))
+        moved = fill_rng.choice(sorted(items_by_order[donor]))
+        items_by_order[donor].remove(moved)
+        items_by_order[empty_order] = [moved]
+        items.loc[moved, "order_id"] = empty_order
+
+    return items
+
+
+def generate_orders_and_items(
+    web_events: list[dict],
+    products: pd.DataFrame,
+    rng: random.Random,
+    fill_rng: random.Random,
+    order_count: int,
+    item_count: int,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Orders whose cart_value is the sum of their own items' line_amount.
+
+    1. orders and items with the original random draws (rng)
+    2. every empty order takes one item from an order with two or more (fill_rng)
+    3. cart_value = round(sum of the order's clean line_amounts, 2)
+    4. the dirty records last, so they stay dirty
+    """
+    orders = generate_orders(web_events, rng, order_count)
+    items = generate_order_items(orders, products, rng, item_count)
+    items = fill_empty_orders(orders, items, fill_rng)
+
+    totals = items.groupby("order_id")["line_amount"].sum().round(2)
+    orders["cart_value"] = orders["order_id"].map(totals).astype(float)
+
+    # Dirty order records
+    orders.loc[2, "cart_value"] = -500
+    orders.loc[3, "user_id"] = 999999
+    orders.loc[4, "order_timestamp"] = "not-a-date"
+
+    # Dirty order item records (their orders' totals stay the clean sum)
+    items.loc[0, "product_id"] = 999999
+    items.loc[1, "quantity"] = -3
+    items.loc[2, "line_amount"] = 1
+
+    return orders, items
 
 
 def generate_ad_spend(campaigns: pd.DataFrame, rng: random.Random, window_days: int, count: int) -> pd.DataFrame:
@@ -673,8 +735,10 @@ def build_batch() -> dict[str, object]:
     web_events = generate_web_events(
         customers, products, campaigns, fact_rng, fact_faker, uuid_rng, window_days, counts["web_events"]
     )
-    orders = generate_orders(web_events, fact_rng, counts["orders"])
-    order_items = generate_order_items(orders, products, fact_rng, counts["order_items"])
+    fill_rng = random.Random(f"order_fill|{BATCH_DATE}")
+    orders, order_items = generate_orders_and_items(
+        web_events, products, fact_rng, fill_rng, counts["orders"], counts["order_items"]
+    )
     ad_spend = generate_ad_spend(campaigns, fact_rng, window_days, counts["ad_spend"])
 
     return {

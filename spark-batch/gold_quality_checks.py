@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import json
 import os
 from datetime import date
 from pathlib import Path
 
 from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import functions as F
 from pyspark.sql.functions import col
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
+BRONZE_BASE_DIR = PROJECT_ROOT / "data" / "bronze"
 SILVER_BASE_DIR = PROJECT_ROOT / "data" / "silver"
 GOLD_BASE_DIR = PROJECT_ROOT / "data" / "gold"
 LOGS_DIR = PROJECT_ROOT / "logs"
@@ -126,6 +129,127 @@ GOLD_TABLES = {
         ],
     },
 }
+
+
+# An order's total must equal the sum of its lines (both rounded to cents).
+ORDER_TOTAL_TOLERANCE = 0.01
+ORDER_TOTALS_CHECK = "order_totals_vs_lines"
+
+
+def order_total_check(
+    orders: DataFrame,
+    items: DataFrame,
+    bronze_items: DataFrame,
+    order_amount_column: str,
+) -> dict:
+    """Each complete order's total equals the sum of its lines' line_amount.
+
+    An order is complete when every distinct order_item_id that Bronze holds
+    for it reached `items`. Orders that lost an item (Silver quarantine, a
+    point-in-time reject) are excluded and counted, never failed. FAIL means a
+    complete order whose total differs by more than ORDER_TOTAL_TOLERANCE, or
+    an order with no item in Bronze at all.
+    """
+    bronze = (
+        bronze_items
+        .select(
+            F.expr("try_cast(try_cast(order_id as double) as int)").alias("order_id"),
+            F.expr("try_cast(try_cast(order_item_id as double) as int)").alias("order_item_id"),
+        )
+        .filter(F.col("order_id").isNotNull())
+        .groupBy("order_id")
+        .agg(
+            F.countDistinct("order_item_id").alias("bronze_items"),
+            # A Bronze item without a usable ID can never reach the facts.
+            F.sum(F.col("order_item_id").isNull().cast("int")).alias("bronze_items_without_id"),
+        )
+    )
+    lines = items.groupBy("order_id").agg(
+        F.countDistinct("order_item_id").alias("items"),
+        F.sum("line_amount").alias("line_total"),
+    )
+    per_order = (
+        orders.select("order_id", F.col(order_amount_column).alias("order_total"))
+        .join(bronze, "order_id", "left")
+        .join(lines, "order_id", "left")
+        .withColumn(
+            "outcome",
+            F.when(F.col("bronze_items").isNull(), F.lit("no_bronze_items"))
+            .when(
+                (F.col("bronze_items_without_id") > 0)
+                | (F.coalesce(F.col("items"), F.lit(0)) != F.col("bronze_items")),
+                F.lit("incomplete"),
+            )
+            .when(
+                F.col("order_total").isNull()
+                | (F.abs(F.col("order_total") - F.col("line_total")) > ORDER_TOTAL_TOLERANCE),
+                F.lit("mismatched"),
+            )
+            .otherwise(F.lit("matched")),
+        )
+    )
+
+    counts = {row["outcome"]: row["count"] for row in per_order.groupBy("outcome").count().collect()}
+    mismatched_examples = [
+        row["order_id"]
+        for row in per_order.filter(F.col("outcome") == "mismatched").orderBy("order_id").limit(5).collect()
+    ]
+    mismatched = counts.get("mismatched", 0)
+    no_bronze_items = counts.get("no_bronze_items", 0)
+
+    return {
+        "checked_orders": counts.get("matched", 0) + mismatched,
+        "mismatched_orders": mismatched,
+        "excluded_incomplete_orders": counts.get("incomplete", 0),
+        "orders_without_bronze_items": no_bronze_items,
+        "tolerance": ORDER_TOTAL_TOLERANCE,
+        "mismatched_order_examples": mismatched_examples,
+        "status": "PASS" if mismatched == 0 and no_bronze_items == 0 else "FAIL",
+    }
+
+
+def validate_order_totals(spark: SparkSession) -> tuple[dict, dict]:
+    """Run order_total_check on Gold fact_orders and fact_order_items.
+
+    Returns (the check's counts, a row for the Gold quality report).
+    """
+    paths = {
+        "fact_orders": GOLD_BASE_DIR / "fact_orders",
+        "fact_order_items": GOLD_BASE_DIR / "fact_order_items",
+        "bronze_order_items": BRONZE_BASE_DIR / "bronze_order_items",
+    }
+    frames = {name: read_parquet_if_exists(spark, path) for name, path in paths.items()}
+    missing = [str(paths[name]) for name, frame in frames.items() if frame is None]
+
+    if missing:
+        result = {"status": "FAIL", "error": f"missing input: {missing}"}
+        failure_reason = result["error"]
+    else:
+        result = order_total_check(
+            frames["fact_orders"], frames["fact_order_items"], frames["bronze_order_items"], "order_amount"
+        )
+        failure_reason = (
+            ""
+            if result["status"] == "PASS"
+            else (
+                f"{result['mismatched_orders']} order(s) whose total differs from the sum of their lines "
+                f"(e.g. {result['mismatched_order_examples']}); "
+                f"{result['orders_without_bronze_items']} order(s) with no item in Bronze"
+            )
+        )
+
+    report_row = {
+        "table_name": ORDER_TOTALS_CHECK,
+        "status": "PASSED" if result["status"] == "PASS" else "FAILED",
+        "gold_row_count": count_df(frames["fact_orders"]),
+        "source_silver_row_count": count_df(read_parquet_if_exists(spark, SILVER_BASE_DIR / "silver_orders")),
+        "missing_required_columns": "",
+        "null_violations": "{}",
+        "negative_violations": "{}",
+        "failure_reason": failure_reason,
+        "batch_date": BATCH_DATE,
+    }
+    return result, report_row
 
 
 def create_spark_session() -> SparkSession:
@@ -287,6 +411,22 @@ def main() -> None:
 
         if result["failure_reason"]:
             print(f"  reason: {result['failure_reason']}")
+
+    order_totals, order_totals_row = validate_order_totals(spark)
+    results.append(order_totals_row)
+    print(
+        f"{ORDER_TOTALS_CHECK}: {order_totals_row['status']} "
+        + " ".join(f"{key}={value}" for key, value in order_totals.items() if key != "status")
+    )
+    if order_totals_row["failure_reason"]:
+        print(f"  reason: {order_totals_row['failure_reason']}")
+
+    order_totals_path = LOGS_DIR / f"gold_order_totals_report_{BATCH_DATE}.json"
+    order_totals_path.write_text(
+        json.dumps({"check_name": ORDER_TOTALS_CHECK, "batch_date": BATCH_DATE, **order_totals}, indent=2),
+        encoding="utf-8",
+    )
+    print(f"Order totals report written to: {order_totals_path}")
 
     report_df = spark.createDataFrame(results)
     report_path = LOGS_DIR / f"gold_quality_report_{BATCH_DATE}"

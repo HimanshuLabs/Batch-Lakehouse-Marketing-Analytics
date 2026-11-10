@@ -3,6 +3,10 @@
 Fixed in e2d35c1: a batch is reproduced byte for byte from its BATCH_DATE, a
 batch folder only ever appears complete (written to a temporary folder, then
 renamed), and dates before the anchor batch are refused.
+
+p2-data-v2: every order has at least one item, and its cart_value is the sum
+of its own items' line_amount (it used to be copied from an unrelated
+purchase event). The dirty records stay dirty.
 """
 from __future__ import annotations
 
@@ -57,3 +61,38 @@ def test_a_date_before_the_anchor_is_refused(load_job, project_root):
     with pytest.raises(SystemExit):
         load_job(GENERATOR, BATCH_DATE="2026-05-17").main()
     assert not (project_root / "data" / "raw" / "batch_date=2026-05-17").exists()
+
+
+@pytest.fixture
+def increment_batch(load_job, project_root):
+    """One generated increment batch: (orders, order_items)."""
+    load_job(GENERATOR, BATCH_DATE="2026-06-18").main()
+    folder = raw_dir(project_root, "2026-06-18")
+    return pd.read_csv(folder / "orders.csv"), pd.read_csv(folder / "order_items.csv")
+
+
+def test_every_order_has_at_least_one_item(increment_batch):
+    orders, items = increment_batch
+    empty = sorted(set(orders["order_id"]) - set(items["order_id"]))
+    assert empty == [], f"{len(empty)} orders have no items, e.g. {empty[:5]}"
+
+
+def test_order_totals_equal_the_sum_of_their_lines(increment_batch):
+    orders, items = increment_batch
+    # Totals are built from the clean line amounts. Of the dirty item rows only
+    # row 2 has a dirty line_amount (1); its clean amount is quantity x price.
+    # Row 1's quantity is dirty (-3) but its line_amount is still the clean one.
+    clean_line = items["line_amount"].copy()
+    clean_line[2] = round(items.loc[2, "quantity"] * items.loc[2, "discounted_price"], 2)
+    sums = clean_line.groupby(items["order_id"]).sum().round(2)
+    totals = orders.assign(line_sum=orders["order_id"].map(sums))
+
+    dirty = totals["cart_value"] <= 0
+    assert dirty.sum() == 1, "the one dirty order (cart_value -500) must stay dirty"
+    mismatched = totals[~dirty & ((totals["cart_value"] - totals["line_sum"]).abs() > 0.005)]
+    assert mismatched.empty, mismatched[["order_id", "cart_value", "line_sum"]].head().to_string()
+
+    # The dirty item rows are still dirty.
+    assert items.loc[0, "product_id"] == 999999
+    assert items.loc[1, "quantity"] == -3
+    assert items.loc[2, "line_amount"] == 1

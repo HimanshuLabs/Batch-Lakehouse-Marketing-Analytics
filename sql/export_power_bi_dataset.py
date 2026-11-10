@@ -7,6 +7,7 @@ Writes, into data/bi_exports/ by default:
       SCD2 validation            the latest run in audit.scd2_validation_results
       Silver quarantine          logs/silver_quality_report_<BATCH_DATE>/
       point-in-time facts        logs/point_in_time_fact_join_report.json
+                                 (row conservation and order totals vs lines)
     The warehouse is read in a read-only session. A missing or empty input
     fails the task; no number is ever written by hand.
 
@@ -88,6 +89,12 @@ def build_data_quality_summary(
             f"the point-in-time fact report has no conservation counts for {stale}: "
             "it predates the conservation check; rerun point_in_time_fact_joins"
         )
+    order_totals = pit_report.get("order_totals") or {}
+    if "checked_orders" not in order_totals:
+        raise ValueError(
+            "the point-in-time fact report has no order totals check: "
+            f"{order_totals.get('error') or 'it predates the check'}; rerun point_in_time_fact_joins"
+        )
 
     rows: list[dict] = []
 
@@ -138,6 +145,20 @@ def build_data_quality_summary(
             "metric_group": "Point-in-Time Facts",
             "metric_name": f"Unaccounted rows: {fact}",
             "metric_value": conservation["unaccounted_rows"],
+            "status": status,
+        })
+
+    status = _status(order_totals["status"] == "PASS")
+    for metric_name, key in (
+        ("Order totals checked: orders", "checked_orders"),
+        ("Order totals not equal to sum of lines: orders", "mismatched_orders"),
+        ("Order totals excluded, incomplete: orders", "excluded_incomplete_orders"),
+        ("Order totals with no Bronze items: orders", "orders_without_bronze_items"),
+    ):
+        rows.append({
+            "metric_group": "Point-in-Time Facts",
+            "metric_name": metric_name,
+            "metric_value": order_totals[key],
             "status": status,
         })
 
