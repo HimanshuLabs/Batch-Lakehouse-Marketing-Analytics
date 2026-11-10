@@ -812,8 +812,6 @@ Deliberate trade-offs for a portfolio project built on synthetic data:
 - **Reproducibility scope.** Direct dependencies are pinned; transitive dependencies of the dev tools are not.
 - **Screenshots** show the dashboard layout; the current figures are in `exports/power_bi/`.
 
-Smaller code-level improvements (error handling, transactions and edge cases) are listed in [`docs/known_limitations.md`](docs/known_limitations.md).
-
 ---
 
 ## 20. Repository Hygiene
