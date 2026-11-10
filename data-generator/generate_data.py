@@ -629,6 +629,16 @@ def fsync_file(path: Path) -> None:
         os.fsync(file.fileno())
 
 
+def fsync_dir(path: Path) -> None:
+    # A directory's entries (new files, a rename) are durable only once the
+    # directory itself is fsynced.
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def raw_dir_is_complete(raw_dir: Path) -> bool:
     return all((raw_dir / name).is_file() and (raw_dir / name).stat().st_size > 0 for name in RAW_FILES)
 
@@ -697,6 +707,7 @@ def write_batch(raw_dir: Path, outputs: dict[str, object]) -> None:
         else:
             output.to_csv(path, index=False)  # type: ignore[union-attr]
         fsync_file(path)
+    fsync_dir(tmp_dir)
 
     if raw_dir.exists():
         # Only an incomplete folder can reach this point; keep it for inspection.
@@ -705,6 +716,7 @@ def write_batch(raw_dir: Path, outputs: dict[str, object]) -> None:
         print(f"Moved incomplete folder aside: {aside}")
 
     tmp_dir.rename(raw_dir)
+    fsync_dir(raw_dir.parent)
 
 
 def main() -> None:
