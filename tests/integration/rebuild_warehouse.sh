@@ -3,9 +3,10 @@
 # result does not depend on the build or on insert order:
 #   A, B  the warehouse SQL as committed, twice
 #   C     the same, with the dim_region / dim_channel source lists reversed
-# Keys, the key-free fingerprint (tests/sql/keyfree.sql) and every mart must
-# be identical across A, B and C, and every region/channel key must equal
-# warehouse.deterministic_sk(prefix, natural key).
+# Keys (dimension and fact), the key-free fingerprint (tests/sql/keyfree.sql)
+# and every mart must be identical across A, B and C, every region/channel key
+# must equal warehouse.deterministic_sk(prefix, natural key), and every fact
+# row key must equal warehouse.deterministic_fact_sk(prefix, natural key).
 #
 # Usage: bash tests/integration/rebuild_warehouse.sh <work dir>
 # Env:   PGCONTAINER (default project2_postgres): the Postgres container to use.
@@ -58,11 +59,11 @@ SELECT 'channel', channel_sk, channel_nk, channel_name, channel_group FROM wareh
 SELECT 'customer', customer_sk, customer_id, effective_from FROM warehouse.dim_customer ORDER BY customer_sk;
 SELECT 'product', product_sk, product_id, effective_from FROM warehouse.dim_product ORDER BY product_sk;
 SELECT 'campaign', campaign_sk, campaign_id, effective_from FROM warehouse.dim_campaign ORDER BY campaign_sk;
-SELECT 'orders', order_id, customer_sk, campaign_sk, order_date_sk, region_sk, channel_sk FROM warehouse.fact_orders ORDER BY order_id;
-SELECT 'items', order_item_nk, customer_sk, product_sk, order_date_sk, region_sk, channel_sk FROM warehouse.fact_order_items ORDER BY order_item_nk;
-SELECT 'spend', campaign_spend_nk, campaign_sk, spend_date_sk, region_sk, channel_sk FROM warehouse.fact_campaign_spend ORDER BY campaign_spend_nk;
-SELECT 'web', event_id, customer_sk, product_sk, campaign_sk, event_date_sk, region_sk, channel_sk FROM warehouse.fact_web_events ORDER BY event_id;
-SELECT 'conversions', conversion_nk, customer_sk, product_sk, campaign_sk, conversion_date_sk, region_sk, channel_sk FROM warehouse.fact_conversions ORDER BY conversion_nk;
+SELECT 'orders', order_id, order_sk, customer_sk, campaign_sk, order_date_sk, region_sk, channel_sk FROM warehouse.fact_orders ORDER BY order_id;
+SELECT 'items', order_item_nk, order_item_sk, order_sk, customer_sk, product_sk, order_date_sk, region_sk, channel_sk FROM warehouse.fact_order_items ORDER BY order_item_nk;
+SELECT 'spend', campaign_spend_nk, campaign_spend_sk, campaign_sk, spend_date_sk, region_sk, channel_sk FROM warehouse.fact_campaign_spend ORDER BY campaign_spend_nk;
+SELECT 'web', event_id, event_sk, customer_sk, product_sk, campaign_sk, event_date_sk, region_sk, channel_sk FROM warehouse.fact_web_events ORDER BY event_id;
+SELECT 'conversions', conversion_nk, conversion_sk, event_sk, customer_sk, product_sk, campaign_sk, conversion_date_sk, region_sk, channel_sk FROM warehouse.fact_conversions ORDER BY conversion_nk;
 SQL
     psql_db < "$REPO/tests/sql/keyfree.sql" > "$WORK/$tag-keyfree.tsv"
     psql_db < "$REPO/tests/sql/marts_fingerprint.sql" > "$WORK/$tag-marts.tsv"
@@ -95,6 +96,26 @@ if [ "$non_hash_keys" = "0" ]; then
     echo "PASS  every region/channel key is deterministic_sk(prefix, natural key)"
 else
     echo "FAIL  $non_hash_keys region/channel key(s) are not deterministic_sk(prefix, natural key)"; failed=1
+fi
+
+# Fact row keys, and the parent keys items and conversions carry.
+non_hash_fact_keys=$(psql_db -c "
+SELECT (SELECT count(*) FROM warehouse.fact_orders
+        WHERE order_sk IS DISTINCT FROM warehouse.deterministic_fact_sk('order', order_id))
+     + (SELECT count(*) FROM warehouse.fact_order_items
+        WHERE order_item_sk IS DISTINCT FROM warehouse.deterministic_fact_sk('order_item', order_item_nk)
+           OR order_sk IS DISTINCT FROM warehouse.deterministic_fact_sk('order', order_id))
+     + (SELECT count(*) FROM warehouse.fact_campaign_spend
+        WHERE campaign_spend_sk IS DISTINCT FROM warehouse.deterministic_fact_sk('campaign_spend', campaign_spend_nk))
+     + (SELECT count(*) FROM warehouse.fact_web_events
+        WHERE event_sk IS DISTINCT FROM warehouse.deterministic_fact_sk('web_event', event_id))
+     + (SELECT count(*) FROM warehouse.fact_conversions
+        WHERE conversion_sk IS DISTINCT FROM warehouse.deterministic_fact_sk('conversion', conversion_nk)
+           OR event_sk IS DISTINCT FROM warehouse.deterministic_fact_sk('web_event', event_id))")
+if [ "$non_hash_fact_keys" = "0" ]; then
+    echo "PASS  every fact row key (and items' order_sk, conversions' event_sk) is deterministic_fact_sk(prefix, natural key)"
+else
+    echo "FAIL  $non_hash_fact_keys fact row(s) have a key that is not deterministic_fact_sk(prefix, natural key)"; failed=1
 fi
 
 echo

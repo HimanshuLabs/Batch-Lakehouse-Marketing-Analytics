@@ -274,6 +274,17 @@ def write_table(df: DataFrame, output_path: Path, partition_column: str | None =
     writer.parquet(str(output_path))
 
 
+def read_written(spark: SparkSession, path: Path, empty_like: DataFrame) -> DataFrame:
+    """Read a table back as it was written, so checks see what is on disk.
+
+    An empty DataFrame is written without Parquet files, which Spark cannot read
+    back; that case returns an empty frame with the in-memory schema.
+    """
+    if not any(path.rglob("*.parquet")):
+        return empty_like.limit(0)
+    return spark.read.parquet(str(path))
+
+
 def split_valid_and_rejected_facts(
     df: DataFrame,
     resolved_keys: List[tuple[str, str, str, str]],
@@ -430,17 +441,17 @@ def main() -> None:
             ],
         )
 
-        orders_validation = validate_fact_table(
-            valid_fact_orders,
-            fact_name="fact_orders_scd2",
-            primary_key="order_id",
-            required_surrogate_keys=["customer_sk", "campaign_sk"],
-        )
-
         write_table(
             valid_fact_orders,
             OUTPUT_PATHS["fact_orders"],
             partition_column="order_year",
+        )
+
+        orders_validation = validate_fact_table(
+            read_written(spark, OUTPUT_PATHS["fact_orders"], valid_fact_orders),
+            fact_name="fact_orders_scd2",
+            primary_key="order_id",
+            required_surrogate_keys=["customer_sk", "campaign_sk"],
         )
 
         write_table(
@@ -508,17 +519,17 @@ def main() -> None:
             allowMissingColumns=True,
         )
 
-        order_items_validation = validate_fact_table(
-            valid_fact_order_items,
-            fact_name="fact_order_items_scd2",
-            primary_key="order_item_id",
-            required_surrogate_keys=["product_sk"],
-        )
-
         write_table(
             valid_fact_order_items,
             OUTPUT_PATHS["fact_order_items"],
             partition_column="order_year",
+        )
+
+        order_items_validation = validate_fact_table(
+            read_written(spark, OUTPUT_PATHS["fact_order_items"], valid_fact_order_items),
+            fact_name="fact_order_items_scd2",
+            primary_key="order_item_id",
+            required_surrogate_keys=["product_sk"],
         )
 
         write_table(
@@ -558,17 +569,17 @@ def main() -> None:
             resolved_keys=[("campaign_sk", "campaign_id", "spend_date", "dim_campaigns_scd2")],
         )
 
-        campaign_spend_validation = validate_fact_table(
-            valid_fact_campaign_spend,
-            fact_name="fact_campaign_spend_scd2",
-            primary_key="spend_id",
-            required_surrogate_keys=["campaign_sk"],
-        )
-
         write_table(
             valid_fact_campaign_spend,
             OUTPUT_PATHS["fact_campaign_spend"],
             partition_column="spend_year",
+        )
+
+        campaign_spend_validation = validate_fact_table(
+            read_written(spark, OUTPUT_PATHS["fact_campaign_spend"], valid_fact_campaign_spend),
+            fact_name="fact_campaign_spend_scd2",
+            primary_key="spend_id",
+            required_surrogate_keys=["campaign_sk"],
         )
 
         write_table(
@@ -608,7 +619,7 @@ def main() -> None:
         }
 
         for fact_name, (source_path, output_key, validation, rejected, resolutions) in facts.items():
-            rejected_rows = rejected.count()
+            rejected_rows = read_written(spark, QUARANTINE_PATHS[output_key], rejected).count()
             fact_conservation = conservation(
                 silver_rows[fact_name],
                 validation["total_rows"],
