@@ -67,5 +67,6 @@ def test_days_since_last_order_counts_business_days():
     code = sql_code(MARTS_SQL)
     assert re.search(r"\bCURRENT_DATE\b", code, re.IGNORECASE) is None, "CURRENT_DATE is the session's (UTC) day"
     assert (
-        "warehouse.business_today() - warehouse.business_date(o.last_order_timestamp)" in code
+        "MAX(warehouse.business_date(order_timestamp))" in code
+        and "- warehouse.business_date(o.last_order_timestamp)" in code
     ), "days_since_last_order must compare two Asia/Kolkata dates"

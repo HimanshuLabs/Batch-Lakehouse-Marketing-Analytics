@@ -166,7 +166,7 @@ $$;
 
 DO $$
 DECLARE
-    run_id TEXT := to_char(clock_timestamp(), 'YYYYMMDDHH24MISSUS') || '-' || substr(md5(random()::TEXT), 1, 8);
+    run_id TEXT := NULLIF(current_setting('p2.run_id', true), '');
     checked_time TIMESTAMPTZ := CURRENT_TIMESTAMP;
 
     source_table TEXT;
@@ -947,3 +947,27 @@ FROM audit.v_latest_reconciliation_report
 ORDER BY
     CASE status WHEN 'FAIL' THEN 0 ELSE 1 END,
     check_name;
+
+-- Persist diagnostic FAIL rows before raising, so failed runs remain inspectable.
+DO $$
+DECLARE
+    current_run TEXT := NULLIF(current_setting('p2.run_id', true), '');
+    report RECORD;
+    check_count BIGINT;
+    failures BIGINT;
+BEGIN
+    FOR report IN SELECT * FROM (VALUES
+        ('reconciliation_report', 'reconciliation_run_id'),
+        ('scd2_validation_results', 'validation_run_id'),
+        ('mart_validation_report', 'validation_run_id')
+    ) AS reports(table_name, run_column)
+    LOOP
+        EXECUTE format('SELECT count(*), count(*) FILTER (WHERE status IS DISTINCT FROM ''PASS'') FROM audit.%I WHERE %I = $1',
+                       report.table_name, report.run_column)
+        INTO check_count, failures USING current_run;
+        IF check_count = 0 OR failures > 0 THEN
+            RAISE EXCEPTION 'Quality gate failed: % run % has % checks, % failures',
+                report.table_name, current_run, check_count, failures;
+        END IF;
+    END LOOP;
+END $$;

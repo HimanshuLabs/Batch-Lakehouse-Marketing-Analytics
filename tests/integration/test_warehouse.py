@@ -158,7 +158,9 @@ def test_organic_orders_are_on_the_unknown_campaign_not_rejected():
     ).fetchone()[0] if any(rejects.rglob("*.parquet")) else 0
     assert null_campaign_rejects == 0
 
-    organic = pit_report()["facts"]["fact_orders_scd2"]["resolutions"]["campaign_sk"]["unknown_member"]
+    # Organic orders that became facts: one rejected for another key (an
+    # unknown customer) is in "resolutions" but never reaches the warehouse.
+    organic = pit_report()["facts"]["fact_orders_scd2"]["fact_resolutions"]["campaign_sk"]["unknown_member"]
     assert organic > 0, "the sample data has organic orders; none reached the facts"
     # The warehouse keeps them on the unknown campaign member (campaign_sk 0).
     warehouse_unknown = int(sql(

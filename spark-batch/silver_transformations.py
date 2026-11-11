@@ -63,6 +63,7 @@ FREE_TEXT_COLUMNS = {"search_query"}
 # a non-finite value there is quarantined by not_finite instead.
 #   customers, products, campaigns, orders, ad_spend: none
 #   order_items: original_price, discount_percent
+# original_price is normalized first, then its NULL price rule quarantines it.
 #   web_events:  cart_value, engagement_score, purchase_probability,
 #                cart_abandonment_probability
 LINE_AMOUNT_TOLERANCE = 0.01
@@ -499,7 +500,7 @@ def clean_order_items(spark: SparkSession) -> tuple[DataFrame, DataFrame]:
         )
     )
 
-    # NULL allowed: product_name, category, original_price, discount_percent.
+    # NULL allowed: product_name, category, discount_percent.
     invalid_condition = (
         col("order_item_id").isNull()
         | col("order_id").isNull()
@@ -517,6 +518,16 @@ def clean_order_items(spark: SparkSession) -> tuple[DataFrame, DataFrame]:
         invalid_condition,
         "Invalid order item record: bad id/quantity/price/line amount",
     )
+
+    for condition, reason in (
+        (col("original_price").isNull(), "original_price is NULL"),
+        (col("original_price") <= 0, "original_price must be positive"),
+        (col("discounted_price") > col("original_price"), "discounted_price exceeds original_price"),
+    ):
+        valid, rejected = split_valid_invalid(
+            valid, condition, f"Invalid order item record: {reason}",
+        )
+        invalid = invalid.unionByName(rejected)
 
     # line_amount must be quantity x discounted_price (rounded to cents), or
     # the order total and product revenue would disagree.

@@ -40,7 +40,7 @@ def test_data_quality_summary_is_built_from_verified_checks(load_job):
     ]
     pit_report = {"facts": {"fact_orders_scd2": {
         "conservation": {"status": "PASS", "rejected_rows": 147, "unaccounted_rows": 0},
-        "resolutions": {"campaign_sk": {"in_range": 2052, "unknown_member": 45}}}},
+        "fact_resolutions": {"campaign_sk": {"in_range": 2052, "unknown_member": 45}}}},
         "order_totals": {"status": "PASS", "checked_orders": 1900, "mismatched_orders": 0,
                          "excluded_incomplete_orders": 197, "orders_without_bronze_items": 0}}
 
@@ -96,7 +96,7 @@ def test_data_quality_summary_reports_the_order_totals_check(load_job):
     silver_report = [{"table_name": "orders", "status": "PASSED", "quarantine_row_count": "4",
                       "unaccounted_row_count": "0"}]
     facts = {"fact_orders_scd2": {"conservation": {"status": "PASS", "rejected_rows": 0, "unaccounted_rows": 0},
-                                  "resolutions": {"campaign_sk": {"unknown_member": 0}}}}
+                                  "fact_resolutions": {"campaign_sk": {"unknown_member": 0}}}}
     failed = {"status": "FAIL", "checked_orders": 10, "mismatched_orders": 2,
               "excluded_incomplete_orders": 3, "orders_without_bronze_items": 0}
 
@@ -150,7 +150,7 @@ def test_data_quality_summary_counts_organic_orders_on_the_unknown_campaign(load
                     "excluded_incomplete_orders": 0, "orders_without_bronze_items": 0}
 
     report = {"facts": {"fact_orders_scd2": {"conservation": conservation,
-                                             "resolutions": {"campaign_sk": {"unknown_member": 45}}}},
+                                             "fact_resolutions": {"campaign_sk": {"unknown_member": 45}}}},
               "order_totals": order_totals}
     rows = export.build_data_quality_summary(reconciliation, scd2_validation, silver_report, report,
                                              WEB_EVENT_REJECTS)
@@ -174,7 +174,7 @@ def test_data_quality_summary_counts_rejected_web_events(load_job):
                       "unaccounted_row_count": "0"}]
     report = {"facts": {"fact_orders_scd2": {
         "conservation": {"status": "PASS", "rejected_rows": 0, "unaccounted_rows": 0},
-        "resolutions": {"campaign_sk": {"unknown_member": 0}}}},
+        "fact_resolutions": {"campaign_sk": {"unknown_member": 0}}}},
         "order_totals": {"status": "PASS", "checked_orders": 1, "mismatched_orders": 0,
                          "excluded_incomplete_orders": 0, "orders_without_bronze_items": 0}}
 

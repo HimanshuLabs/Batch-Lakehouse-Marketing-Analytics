@@ -769,6 +769,7 @@ BEGIN
         RAISE NOTICE 'No customer dimension staging table found.';
     ELSE
         EXECUTE format($sql$
+            CREATE TEMP TABLE dimension_input ON COMMIT DROP AS
             WITH src AS (
                 SELECT to_jsonb(s) AS r FROM %s s
             ),
@@ -804,9 +805,29 @@ BEGIN
                     coalesce(warehouse.safe_bool(r->>'is_current'), true) AS is_current,
                     warehouse.safe_timestamp(coalesce(r->>'source_updated_at', r->>'effective_from', r->>'updated_at')) AS source_updated_at,
                     coalesce(nullif(r->>'scd_hash', ''), nullif(r->>'record_hash', '')) AS scd_hash,
+                    jsonb_build_array(
+                        coalesce(nullif(r->>'customer_id', ''), nullif(r->>'user_id', ''), 'UNKNOWN'),
+                        coalesce(warehouse.safe_timestamp(coalesce(
+                            nullif(r->>'source_updated_at', ''), nullif(r->>'effective_from', ''),
+                            nullif(r->>'valid_from', '')
+                        )), TIMESTAMP '1900-01-01')
+                    ) AS dimension_identity,
                     md5(r::TEXT) AS row_fingerprint
                 FROM src
             )
+            SELECT * FROM mapped;
+
+            DO $guard$
+            BEGIN
+                IF EXISTS (
+                    SELECT customer_sk FROM dimension_input
+                    GROUP BY customer_sk
+                    HAVING COUNT(DISTINCT dimension_identity) > 1
+                ) THEN
+                    RAISE EXCEPTION 'Surrogate-key collision in dim_customer: different version identities share a key';
+                END IF;
+            END $guard$;
+
             INSERT INTO warehouse.dim_customer (
                 customer_sk, customer_id, customer_name, email, gender, age,
                 membership_tier, loyalty_points, preferred_language, customer_segment,
@@ -827,7 +848,7 @@ BEGIN
                     ELSE effective_to
                 END AS effective_to,
                 is_current, source_updated_at, scd_hash
-            FROM mapped
+            FROM dimension_input
             WHERE customer_sk IS NOT NULL
             ORDER BY customer_sk, source_updated_at DESC NULLS LAST, row_fingerprint
             ON CONFLICT (customer_sk) DO UPDATE SET
@@ -850,6 +871,7 @@ BEGIN
                 source_updated_at = EXCLUDED.source_updated_at,
                 scd_hash = EXCLUDED.scd_hash,
                 warehouse_loaded_at = CURRENT_TIMESTAMP;
+            DROP TABLE dimension_input;
         $sql$, source_table);
     END IF;
 END $$;
@@ -870,6 +892,7 @@ BEGIN
         RAISE NOTICE 'No product dimension staging table found.';
     ELSE
         EXECUTE format($sql$
+            CREATE TEMP TABLE dimension_input ON COMMIT DROP AS
             WITH src AS (
                 SELECT to_jsonb(s) AS r FROM %s s
             ),
@@ -899,9 +922,29 @@ BEGIN
                     coalesce(warehouse.safe_bool(r->>'is_current'), true) AS is_current,
                     warehouse.safe_timestamp(coalesce(r->>'source_updated_at', r->>'effective_from', r->>'updated_at')) AS source_updated_at,
                     coalesce(nullif(r->>'scd_hash', ''), nullif(r->>'record_hash', '')) AS scd_hash,
+                    jsonb_build_array(
+                        coalesce(nullif(r->>'product_id', ''), 'UNKNOWN'),
+                        coalesce(warehouse.safe_timestamp(coalesce(
+                            nullif(r->>'source_updated_at', ''), nullif(r->>'effective_from', ''),
+                            nullif(r->>'valid_from', '')
+                        )), TIMESTAMP '1900-01-01')
+                    ) AS dimension_identity,
                     md5(r::TEXT) AS row_fingerprint
                 FROM src
             )
+            SELECT * FROM mapped;
+
+            DO $guard$
+            BEGIN
+                IF EXISTS (
+                    SELECT product_sk FROM dimension_input
+                    GROUP BY product_sk
+                    HAVING COUNT(DISTINCT dimension_identity) > 1
+                ) THEN
+                    RAISE EXCEPTION 'Surrogate-key collision in dim_product: different version identities share a key';
+                END IF;
+            END $guard$;
+
             INSERT INTO warehouse.dim_product (
                 product_sk, product_id, product_name, category, brand,
                 original_price, current_price, inventory_remaining,
@@ -920,7 +963,7 @@ BEGIN
                     ELSE effective_to
                 END AS effective_to,
                 is_current, source_updated_at, scd_hash
-            FROM mapped
+            FROM dimension_input
             WHERE product_sk IS NOT NULL
             ORDER BY product_sk, source_updated_at DESC NULLS LAST, row_fingerprint
             ON CONFLICT (product_sk) DO UPDATE SET
@@ -937,6 +980,7 @@ BEGIN
                 source_updated_at = EXCLUDED.source_updated_at,
                 scd_hash = EXCLUDED.scd_hash,
                 warehouse_loaded_at = CURRENT_TIMESTAMP;
+            DROP TABLE dimension_input;
         $sql$, source_table);
     END IF;
 END $$;
@@ -957,6 +1001,7 @@ BEGIN
         RAISE NOTICE 'No campaign dimension staging table found.';
     ELSE
         EXECUTE format($sql$
+            CREATE TEMP TABLE dimension_input ON COMMIT DROP AS
             WITH src AS (
                 SELECT to_jsonb(s) AS r FROM %s s
             ),
@@ -989,9 +1034,29 @@ BEGIN
                     coalesce(warehouse.safe_bool(r->>'is_current'), true) AS is_current,
                     warehouse.safe_timestamp(coalesce(r->>'source_updated_at', r->>'effective_from', r->>'updated_at')) AS source_updated_at,
                     coalesce(nullif(r->>'scd_hash', ''), nullif(r->>'record_hash', '')) AS scd_hash,
+                    jsonb_build_array(
+                        coalesce(nullif(r->>'campaign_id', ''), 'UNKNOWN'),
+                        coalesce(warehouse.safe_timestamp(coalesce(
+                            nullif(r->>'source_updated_at', ''), nullif(r->>'effective_from', ''),
+                            nullif(r->>'valid_from', '')
+                        )), TIMESTAMP '1900-01-01')
+                    ) AS dimension_identity,
                     md5(r::TEXT) AS row_fingerprint
                 FROM src
             )
+            SELECT * FROM mapped;
+
+            DO $guard$
+            BEGIN
+                IF EXISTS (
+                    SELECT campaign_sk FROM dimension_input
+                    GROUP BY campaign_sk
+                    HAVING COUNT(DISTINCT dimension_identity) > 1
+                ) THEN
+                    RAISE EXCEPTION 'Surrogate-key collision in dim_campaign: different version identities share a key';
+                END IF;
+            END $guard$;
+
             INSERT INTO warehouse.dim_campaign (
                 campaign_sk, campaign_id, campaign_name, channel,
                 traffic_source, target_segment, campaign_status, ab_test_group, campaign_start_date, campaign_end_date,
@@ -1011,7 +1076,7 @@ BEGIN
                     ELSE effective_to
                 END AS effective_to,
                 is_current, source_updated_at, scd_hash
-            FROM mapped
+            FROM dimension_input
             WHERE campaign_sk IS NOT NULL
             ORDER BY campaign_sk, source_updated_at DESC NULLS LAST, row_fingerprint
             ON CONFLICT (campaign_sk) DO UPDATE SET
@@ -1031,6 +1096,7 @@ BEGIN
                 source_updated_at = EXCLUDED.source_updated_at,
                 scd_hash = EXCLUDED.scd_hash,
                 warehouse_loaded_at = CURRENT_TIMESTAMP;
+            DROP TABLE dimension_input;
         $sql$, source_table);
     END IF;
 END $$;

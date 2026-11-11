@@ -146,7 +146,8 @@ SELECT
     CASE
         WHEN o.last_order_timestamp IS NULL THEN NULL
         -- Both sides are business dates (Asia/Kolkata), like the fact date keys.
-        ELSE warehouse.business_today() - warehouse.business_date(o.last_order_timestamp)
+        ELSE (SELECT MAX(warehouse.business_date(order_timestamp)) FROM warehouse.fact_orders)
+             - warehouse.business_date(o.last_order_timestamp)
     END AS days_since_last_order,
 
     (COALESCE(o.total_order_count, 0) >= 2) AS repeat_purchase_signal,
@@ -789,7 +790,7 @@ COMMENT ON TABLE audit.mart_validation_report IS
 'Audit table for validating BI-ready marts against warehouse facts and expected metric rules.';
 
 CREATE TEMP TABLE mart_validation_context AS
-SELECT 'mart_validation_' || to_char(CURRENT_TIMESTAMP, 'YYYYMMDDHH24MISSMS') AS validation_run_id;
+SELECT NULLIF(current_setting('p2.run_id', true), '') AS validation_run_id;
 
 -- 1. All five mart views exist.
 INSERT INTO audit.mart_validation_report (
@@ -863,9 +864,6 @@ FROM mart_validation_context mvc
 CROSS JOIN (
     SELECT COALESCE(SUM(fo.net_revenue), 0)::NUMERIC AS source_amount
     FROM warehouse.fact_orders fo
-    JOIN warehouse.dim_date dd
-        ON fo.order_date_sk = dd.date_sk
-    WHERE dd.date_sk <> 0
 ) src
 CROSS JOIN (
     SELECT COALESCE(SUM(net_revenue), 0)::NUMERIC AS target_amount

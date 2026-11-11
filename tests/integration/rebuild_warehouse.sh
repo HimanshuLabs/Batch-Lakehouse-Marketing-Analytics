@@ -27,7 +27,7 @@ if [ "$PGCONTAINER" = "project2_postgres" ] && [ "${CI:-}" != "true" ] && [ "${P
 fi
 
 mkdir -p "$WORK"
-psql_db() { docker exec -i "$PGCONTAINER" psql -U project2 -d marketing_analytics -v ON_ERROR_STOP=1 -At -F $'\t' "$@"; }
+psql_db() { docker exec -i -e "PGOPTIONS=-c p2.run_id=${P2_RUN_ID}" "$PGCONTAINER" psql -U project2 -d marketing_analytics -v ON_ERROR_STOP=1 -At -F $'\t' "$@"; }
 
 # Build C uses a copy of create_warehouse_tables.sql with the first two
 # FOREACH source lists (dim_region, dim_channel) reversed.
@@ -45,6 +45,7 @@ PY
 
 build() {
     local tag=$1 warehouse_sql=$2
+    export P2_RUN_ID="integration-$tag-$(date +%s%N)-$$"
     echo "== build $tag"
     for f in "$warehouse_sql" \
              "$REPO/sql/warehouse/scd2_validation_queries.sql" "$REPO/sql/warehouse/create_marts.sql" \

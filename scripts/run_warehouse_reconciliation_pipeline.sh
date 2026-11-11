@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export P2_RUN_ID="${P2_RUN_ID:-warehouse-$(date +%s%N)-$$}"
 
 echo "Running warehouse reconciliation pipeline..."
 

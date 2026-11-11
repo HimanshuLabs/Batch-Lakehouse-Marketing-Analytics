@@ -20,8 +20,8 @@
     "silver_orders": 2244,
     "quarantine_orders": 4,
     "bronze_order_items": 5625,
-    "silver_order_items": 5621,
-    "quarantine_order_items": 4,
+    "silver_order_items": 5591,
+    "quarantine_order_items": 34,
     "bronze_ad_spend": 1125,
     "silver_ad_spend": 1119,
     "quarantine_ad_spend": 6,
@@ -32,7 +32,7 @@
     "gold_dim_products": 147,
     "gold_dim_campaigns": 37,
     "gold_fact_orders": 2244,
-    "gold_fact_order_items": 5621,
+    "gold_fact_order_items": 5591,
     "gold_fact_ad_spend": 1119,
     "gold_fact_web_events": 8880,
     "gold_dim_customers_scd2": 501,
@@ -42,7 +42,7 @@
     "gold_fact_order_items_scd2": 5244,
     "gold_fact_campaign_spend_scd2": 1068,
     "quarantine_fact_orders_scd2_rejects": 102,
-    "quarantine_fact_order_items_scd2_rejects": 377,
+    "quarantine_fact_order_items_scd2_rejects": 347,
     "quarantine_fact_campaign_spend_scd2_rejects": 51
   },
   "warehouse": {
