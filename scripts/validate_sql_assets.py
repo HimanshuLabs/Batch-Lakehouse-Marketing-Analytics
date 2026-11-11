@@ -19,7 +19,6 @@ REQUIRED_FILES = {
 
 OPTIONAL_FILES = {
     "sql/warehouse/powerbi_export_queries.sql": [],
-    "sql/warehouse/repair_web_event_surrogate_keys.sql": [],
 }
 
 FORBIDDEN_PATTERNS = [

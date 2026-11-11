@@ -292,7 +292,6 @@ Main SQL assets:
 sql/warehouse/create_schemas.sql
 sql/warehouse/load_gold_to_staging.sql
 sql/warehouse/create_warehouse_tables.sql
-sql/warehouse/repair_web_event_surrogate_keys.sql
 sql/warehouse/create_marts.sql
 sql/warehouse/create_indexes.sql
 sql/warehouse/reconciliation_report.sql

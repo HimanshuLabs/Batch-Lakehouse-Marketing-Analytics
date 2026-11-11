@@ -46,7 +46,7 @@ PY
 build() {
     local tag=$1 warehouse_sql=$2
     echo "== build $tag"
-    for f in "$warehouse_sql" "$REPO/sql/warehouse/repair_web_event_surrogate_keys.sql" \
+    for f in "$warehouse_sql" \
              "$REPO/sql/warehouse/scd2_validation_queries.sql" "$REPO/sql/warehouse/create_marts.sql" \
              "$REPO/sql/warehouse/reconciliation_report.sql"; do
         if ! psql_db -q < "$f" > "$WORK/$tag-$(basename "$f" .sql).log" 2>&1; then

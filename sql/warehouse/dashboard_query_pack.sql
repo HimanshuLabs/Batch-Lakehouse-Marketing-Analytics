@@ -181,10 +181,11 @@ Source:
 Expected output columns:
     - campaign_id
     - campaign_name
-    - campaign_type
     - channel
     - traffic_source
     - target_segment
+    - campaign_status
+    - ab_test_group
     - campaign_budget
     - total_spend
     - budget_remaining
@@ -207,10 +208,11 @@ Expected output columns:
 SELECT
     campaign_id,
     campaign_name,
-    COALESCE(campaign_type, 'Unknown') AS campaign_type,
     COALESCE(channel, 'Unknown') AS channel,
     COALESCE(traffic_source, 'Unknown') AS traffic_source,
     COALESCE(target_segment, 'Unknown') AS target_segment,
+    campaign_status,
+    ab_test_group,
     campaign_budget,
     total_spend,
     budget_remaining,
@@ -356,7 +358,6 @@ Expected output columns:
     - channel_group
     - campaign_id
     - campaign_name
-    - campaign_type
     - traffic_source
     - total_event_count
     - session_count
@@ -379,7 +380,6 @@ SELECT
     COALESCE(channel_group, 'Unknown') AS channel_group,
     campaign_id,
     campaign_name,
-    COALESCE(campaign_type, 'Unknown') AS campaign_type,
     COALESCE(traffic_source, 'Unknown') AS traffic_source,
     total_event_count,
     session_count,

@@ -26,6 +26,16 @@ FAR_FUTURE_DATE = "9999-12-31"
 # Interpreted in UTC (spark.sql.session.timeZone is UTC).
 BEGINNING_OF_TIME = "1900-01-01 00:00:00"
 
+# Per dimension:
+#   tracked_columns     attributes whose change opens a new version (hashed into
+#                       record_hash and so into the surrogate key)
+#   untracked_optional  tracked_columns that may be missing from the source; kept
+#                       as NULL and left out of the hash
+#   carried_columns     source attributes kept on each version but never hashed:
+#                       a change alone opens no version and no key changes. Each
+#                       version carries the values of the source row that opened
+#                       it. They must exist in the source.
+
 
 DIMENSION_CONFIGS: Dict[str, Dict[str, object]] = {
     "customers": {
@@ -51,6 +61,13 @@ DIMENSION_CONFIGS: Dict[str, Dict[str, object]] = {
             "loyalty_tier": "membership_tier",
         },
         "untracked_optional": [],
+        "carried_columns": [
+            "gender",
+            "age",
+            "preferred_language",
+            "loyalty_points",
+            "is_prime_user",
+        ],
         "date_candidates": [
             "updated_at",
             "event_timestamp",
@@ -82,6 +99,10 @@ DIMENSION_CONFIGS: Dict[str, Dict[str, object]] = {
             "brand",
             "status",
         ],
+        "carried_columns": [
+            "original_price",
+            "inventory_remaining",
+        ],
         "date_candidates": [
             "updated_at",
             "event_timestamp",
@@ -111,6 +132,9 @@ DIMENSION_CONFIGS: Dict[str, Dict[str, object]] = {
             "channel": "traffic_source",
         },
         "untracked_optional": [],
+        "carried_columns": [
+            "ab_test_group",
+        ],
         "date_candidates": [
             "updated_at",
             "start_date",
@@ -245,7 +269,9 @@ def build_scd2_dimension(
     date_candidates: List[str],
     column_map: Dict[str, str],
     untracked_optional: List[str],
+    carried_columns: List[str] | None = None,
 ) -> DataFrame:
+    carried_columns = list(carried_columns or [])
     df = normalize_dimension_columns(df, natural_key, column_map)
 
     if natural_key not in df.columns:
@@ -253,6 +279,13 @@ def build_scd2_dimension(
         raise ValueError(
             f"Missing natural key column: {natural_key}. "
             f"Available columns: {available_columns}"
+        )
+
+    missing_carried = [column for column in carried_columns if column not in df.columns]
+    if missing_carried:
+        raise ValueError(
+            f"SCD2 dimension '{dimension_name}' is missing carried columns: "
+            f"{', '.join(missing_carried)}. Available columns: {', '.join(df.columns)}"
         )
 
     effective_column = first_existing_column(df, date_candidates)
@@ -300,9 +333,12 @@ def build_scd2_dimension(
 
     hashed = build_record_hash(cleaned, hashed_columns)
 
+    # Carried columns only break exact ties (same time and hash), so the row a
+    # version carries is deterministic; they never decide versions or keys.
     base_window = Window.partitionBy(natural_key).orderBy(
         F.col("effective_from").asc(),
         F.col("record_hash").asc(),
+        *[F.col(column).asc_nulls_first() for column in carried_columns],
     )
 
     with_previous = hashed.withColumn(
@@ -359,7 +395,7 @@ def build_scd2_dimension(
         F.col(natural_key),
     ]
 
-    for column in tracked_columns:
+    for column in tracked_columns + carried_columns:
         selected_columns.append(F.col(column))
 
     selected_columns.extend(
@@ -459,6 +495,7 @@ def main() -> None:
             date_candidates = config["date_candidates"]  # type: ignore[assignment]
             column_map = config["column_map"]  # type: ignore[assignment]
             untracked_optional = config["untracked_optional"]  # type: ignore[assignment]
+            carried_columns = config["carried_columns"]  # type: ignore[assignment]
 
             source_df = read_table(spark, source_path)
 
@@ -471,6 +508,7 @@ def main() -> None:
                 date_candidates=date_candidates,
                 column_map=column_map,
                 untracked_optional=untracked_optional,
+                carried_columns=carried_columns,
             )
 
             write_dimension(scd2_df, output_path)
@@ -494,6 +532,7 @@ def main() -> None:
                 "tracked_columns": tracked_columns,
                 "column_map": column_map,
                 "untracked_optional": untracked_optional,
+                "carried_columns": carried_columns,
                 "validation": validation,
             }
 

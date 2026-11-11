@@ -227,6 +227,212 @@ def test_business_dates_are_ist_dates_like_gold():
     ) == [["0"]]
 
 
+def test_no_phantom_column_and_no_invented_member():
+    # campaign_type existed in no source: it is gone from the warehouse and marts.
+    assert sql(
+        "select table_schema || '.' || table_name from information_schema.columns "
+        "where table_schema in ('warehouse', 'marts') and column_name = 'campaign_type'"
+    ) == []
+    # Every SCD2 dimension member is a Gold SCD2 key or the unknown member.
+    for dimension, key, staging in (
+        ("dim_customer", "customer_id", "stg_gold_dim_customers_scd2"),
+        ("dim_product", "product_id", "stg_gold_dim_products_scd2"),
+        ("dim_campaign", "campaign_id", "stg_gold_dim_campaigns_scd2"),
+    ):
+        invented = sql(
+            f"select {key} from warehouse.{dimension} d where {key} <> 'UNKNOWN' "
+            f"and not exists (select 1 from staging.{staging} s where s.{key}::BIGINT::TEXT = d.{key})"
+        )
+        assert invented == [], (dimension, invented)
+    assert sql(
+        "select count(*) from warehouse.dim_campaign where campaign_name ilike 'inferred%' "
+        "union all select count(*) from warehouse.dim_customer where customer_name ilike 'inferred%' "
+        "union all select count(*) from warehouse.dim_product where product_name ilike 'inferred%'"
+    ) == [["0"], ["0"], ["0"]]
+
+
+def test_web_events_with_a_key_missing_from_its_dimension_are_rejected_and_counted():
+    staging, facts, rejects = (int(sql(f"select count(*) from {t}")[0][0]) for t in (
+        "staging.stg_gold_fact_web_events", "warehouse.fact_web_events", "audit.fact_web_events_rejects"))
+    assert staging == facts + rejects
+    assert rejects > 0, "the sample data has web events for quarantined customers, products and campaigns"
+
+    reasons = {row[0] for row in sql("select distinct unnest(string_to_array(reject_reason, '; ')) "
+                                     "from audit.fact_web_events_rejects")}
+    assert reasons <= {f"{key}_id not in dim_{key}" for key in ("customer", "product", "campaign")} | {
+        f"no dim_{key} version covers event_timestamp" for key in ("customer", "product", "campaign")}, reasons
+    # Each named key really is absent from its dimension, and no rejected event
+    # reached the facts or the conversions.
+    assert sql(
+        "select count(*) from audit.fact_web_events_rejects r where "
+        "(r.reject_reason like '%customer_id not in dim_customer%' "
+        " and exists (select 1 from warehouse.dim_customer d where d.customer_id = r.customer_id)) "
+        "or (r.reject_reason like '%product_id not in dim_product%' "
+        " and exists (select 1 from warehouse.dim_product d where d.product_id = r.product_id)) "
+        "or (r.reject_reason like '%campaign_id not in dim_campaign%' "
+        " and exists (select 1 from warehouse.dim_campaign d where d.campaign_id = r.campaign_id)) "
+        "or r.customer_id = 'UNKNOWN' and r.product_id = 'UNKNOWN' and r.campaign_id = 'UNKNOWN'"
+    ) == [["0"]]
+    assert sql(
+        "select (select count(*) from warehouse.fact_web_events f join audit.fact_web_events_rejects r using (event_id))"
+        " + (select count(*) from warehouse.fact_conversions c join audit.fact_web_events_rejects r using (event_id))"
+    ) == [["0"]]
+    # A web event with no campaign is a fact on the unknown campaign, not a reject.
+    assert int(sql(
+        "select count(*) from warehouse.fact_web_events f join staging.stg_gold_fact_web_events s "
+        "on s.event_id::TEXT = f.event_id where s.campaign_id is null and f.campaign_sk = 0"
+    )[0][0]) > 0
+    checks = dict(sql("select check_name, status from audit.v_latest_reconciliation_report"))
+    assert checks["Staging web event row count equals warehouse fact_web_events plus rejected web events"] == "PASS"
+    assert checks["Rejected web events equal staging events with a source key missing from its dimension"] == "PASS"
+
+    with (PROJECT_ROOT / "data" / "bi_exports" / "data_quality_summary.csv").open(encoding="utf-8", newline="") as f:
+        summary = {row["metric_name"]: row for row in csv.DictReader(f)}
+    assert int(summary["Rejected rows: fact_web_events"]["metric_value"]) == rejects
+    assert summary["Rejected rows: fact_web_events"]["status"] == "PASS"
+
+
+# Carried SCD2 attributes: (dimension, column, Gold SCD2 staging table).
+CARRIED_ATTRIBUTES = [
+    ("dim_customer", "gender", "stg_gold_dim_customers_scd2"),
+    ("dim_customer", "age", "stg_gold_dim_customers_scd2"),
+    ("dim_customer", "preferred_language", "stg_gold_dim_customers_scd2"),
+    ("dim_customer", "loyalty_points", "stg_gold_dim_customers_scd2"),
+    ("dim_customer", "is_prime_user", "stg_gold_dim_customers_scd2"),
+    ("dim_product", "original_price", "stg_gold_dim_products_scd2"),
+    ("dim_product", "inventory_remaining", "stg_gold_dim_products_scd2"),
+    ("dim_campaign", "campaign_status", "stg_gold_dim_campaigns_scd2"),
+    ("dim_campaign", "ab_test_group", "stg_gold_dim_campaigns_scd2"),
+]
+
+
+@pytest.mark.parametrize("dimension,column,staging", CARRIED_ATTRIBUTES)
+def test_dimension_attributes_carry_the_source_values(dimension, column, staging):
+    key = dimension.replace("dim_", "") + "_sk"
+    warehouse_rows, warehouse_values, distinct = (int(v) for v in sql(
+        f"select count(*), count({column}), count(distinct {column}) from warehouse.{dimension} where {key} <> 0")[0])
+    staging_rows, staging_values = (int(v) for v in sql(
+        f"select count(*), count({column}) from staging.{staging}")[0])
+    # Every Gold SCD2 version is in the warehouse with its value; none is
+    # replaced by a default, none is lost.
+    assert (warehouse_rows, warehouse_values) == (staging_rows, staging_values)
+    assert warehouse_values > 0 and distinct > 1, (dimension, column, warehouse_values, distinct)
+
+
+def test_orders_take_the_channel_of_their_campaign():
+    by_campaign = dict(sql(
+        "select case when campaign_sk = 0 then 'organic' else 'campaign' end, "
+        "count(*) filter (where channel_sk = 0) from warehouse.fact_orders group by 1"
+    ))
+    assert by_campaign == {"organic": by_campaign["organic"], "campaign": "0"}
+    assert int(by_campaign["organic"]) == int(sql(
+        "select count(*) from warehouse.fact_orders where campaign_sk = 0")[0][0]) > 0
+    # The channel is the order's campaign version's channel; items share it.
+    assert sql(
+        "select count(*) from warehouse.fact_orders fo join warehouse.dim_campaign dc using (campaign_sk) "
+        "join warehouse.dim_channel ch using (channel_sk) where ch.channel_nk <> warehouse.channel_nk(dc.channel)"
+    ) == [["0"]]
+    assert sql(
+        "select count(*) from warehouse.fact_order_items foi join warehouse.fact_orders fo using (order_sk) "
+        "where foi.channel_sk <> fo.channel_sk"
+    ) == [["0"]]
+
+
+@pytest.mark.parametrize("column", ["search_query", "time_on_page_sec", "scroll_depth_percent",
+                                    "schema_version", "source_system"])
+def test_web_event_engagement_and_lineage_fields_are_loaded(column):
+    loaded = int(sql(f"select count({column}) from warehouse.fact_web_events")[0][0])
+    expected = int(sql(
+        f"select count(s.{column}) from staging.stg_gold_fact_web_events s "
+        f"join warehouse.fact_web_events f on f.event_id = s.event_id::TEXT"
+    )[0][0])
+    assert loaded == expected > 0
+
+
+def test_order_discount_is_the_sum_of_its_item_discounts():
+    mismatched, total = sql(
+        "select count(*) filter (where fo.discount_amount <> coalesce(i.discount, 0)), sum(fo.discount_amount) "
+        "from warehouse.fact_orders fo left join (select order_sk, sum(discount_amount) as discount "
+        "from warehouse.fact_order_items group by order_sk) i using (order_sk)"
+    )[0]
+    assert mismatched == "0" and float(total) > 0
+    # Net revenue (the discounted order total) still equals Gold's.
+    checks = dict(sql("select check_name, status from audit.v_latest_reconciliation_report"))
+    assert checks["Gold revenue equals warehouse fact_orders net revenue"] == "PASS"
+    # Each item's discount is (original_price - discounted_price) x quantity from Gold.
+    assert sql(
+        "select count(*) from warehouse.fact_order_items f join staging.stg_gold_fact_order_items_scd2 s "
+        "on s.order_item_id::TEXT = f.order_item_nk "
+        "where f.discount_amount is distinct from ((s.original_price - s.discounted_price) * s.quantity)::NUMERIC(18, 2)"
+    ) == [["0"]]
+
+
+# Warehouse and mart columns that are allowed to be entirely NULL, entirely
+# Unknown or one constant value, each with the reason. Every other column must
+# vary. A column listed here that varies again is stale and fails too.
+CONSTANT_COLUMNS_ALLOWED = {
+    ("*", "warehouse_loaded_at"): "set once per build",
+    ("warehouse.dim_product", "brand"): "no source has a product brand",
+    ("marts.mart_product_sales", "brand"): "no source has a product brand",
+    ("warehouse.fact_orders", "order_status"): "orders have no status in the source; every order is 'completed'",
+    ("warehouse.fact_orders", "tax_amount"): "not in the source orders",
+    ("warehouse.fact_orders", "shipping_amount"): "not in the source orders",
+    ("marts.mart_revenue_daily", "tax_amount"): "not in the source orders",
+    ("marts.mart_revenue_daily", "shipping_amount"): "not in the source orders",
+    ("warehouse.fact_campaign_spend", "region_sk"): "ad spend has no geography: the unknown region",
+    ("warehouse.fact_campaign_spend", "conversions"): "the ad platform feed has no conversions",
+    ("warehouse.fact_campaign_spend", "attributed_revenue"): "the ad platform feed has no revenue",
+    ("marts.mart_campaign_performance", "ad_platform_conversions"): "the ad platform feed has no conversions",
+    ("marts.mart_campaign_performance", "platform_attributed_revenue"): "the ad platform feed has no revenue",
+    ("warehouse.fact_conversions", "conversion_type"): "the sample's only conversion event is 'purchase'",
+    ("warehouse.fact_web_events", "schema_version"): "every source row is schema v1",
+    ("warehouse.fact_web_events", "source_system"): "one source system: web_events",
+    ("marts.mart_customer_360", "country"): "every sample customer is in India",
+    ("marts.mart_marketing_funnel", "year_number"): "every sample event is in 2026",
+    ("marts.mart_revenue_daily", "year_number"): "every sample order is in 2026",
+}
+
+
+def column_profile() -> dict[tuple[str, str], str]:
+    """{(relation, column): why it is degenerate} for warehouse and mart columns."""
+    columns: dict[str, list[str]] = {}
+    for schema, table, column in sql(
+        "select table_schema, table_name, column_name from information_schema.columns "
+        "where table_schema in ('warehouse', 'marts') order by table_schema, table_name, ordinal_position"
+    ):
+        columns.setdefault(f"{schema}.{table}", []).append(column)
+    degenerate: dict[tuple[str, str], str] = {}
+    for relation, names in columns.items():
+        parts = ["count(*)"]
+        for name in names:
+            parts += [f'count("{name}")', f'count(distinct "{name}"::TEXT)',
+                      f"""count(*) filter (where "{name}"::TEXT ~* '^(unknown|inferred)')"""]
+        row = [int(v) for v in sql(f"select {', '.join(parts)} from {relation}")[0]]
+        if row[0] == 0:
+            degenerate[(relation, "*")] = "no rows"
+            continue
+        for index, name in enumerate(names):
+            values, distinct, unknown = row[1 + 3 * index: 4 + 3 * index]
+            if values == 0:
+                degenerate[(relation, name)] = "entirely NULL"
+            elif unknown == values:
+                degenerate[(relation, name)] = "entirely Unknown/Inferred"
+            elif distinct == 1:
+                degenerate[(relation, name)] = "one constant value"
+    return degenerate
+
+
+def test_no_warehouse_or_mart_column_is_empty_unknown_or_constant():
+    degenerate = column_profile()
+
+    def allowed(key):
+        return key in CONSTANT_COLUMNS_ALLOWED or ("*", key[1]) in CONSTANT_COLUMNS_ALLOWED
+
+    assert {key: why for key, why in degenerate.items() if not allowed(key)} == {}
+    stale = [key for key in CONSTANT_COLUMNS_ALLOWED if key[0] != "*" and key not in degenerate]
+    assert stale == [], "these columns vary now; remove them from CONSTANT_COLUMNS_ALLOWED"
+
+
 def test_golden_counts():
     expected = json.loads(EXPECTED_COUNTS.read_text(encoding="utf-8"))
     actual = collect_counts()
