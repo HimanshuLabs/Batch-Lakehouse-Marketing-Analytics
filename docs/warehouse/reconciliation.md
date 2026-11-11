@@ -15,6 +15,9 @@ The goal is simple: dashboards should not become beautiful lies.
 | Campaign spend | staging.gold_fact_campaign_spend_scd2 | warehouse.fact_campaign_spend |
 | Null customer keys | expected zero | warehouse.fact_orders |
 | Duplicate order ids | expected zero | warehouse.fact_orders |
+| Web event rows | staging.stg_gold_fact_web_events | warehouse.fact_web_events + audit.fact_web_events_rejects |
+| Rejected web events | staging events with a key missing from its dimension | audit.fact_web_events_rejects |
+| Gross minus discount equals net revenue | expected zero mismatched complete orders | warehouse.fact_orders |
 
 ## Output Table
 

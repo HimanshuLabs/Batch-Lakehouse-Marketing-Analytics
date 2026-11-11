@@ -28,7 +28,7 @@ This project demonstrates practical Data Engineering and Analytics Engineering c
 | Historical correctness | SCD Type 2 customer/product/campaign dimensions and point-in-time fact joins |
 | Reproducibility | Deterministic, incremental batches; reruns of a batch leave the lake and the warehouse unchanged |
 | BI readiness | Revenue, campaign, product, customer, and funnel marts built for reporting |
-| Analytics engineering | 21 dbt models and 65 dbt tests, docs, lineage, and exposures |
+| Analytics engineering | 21 dbt models and 67 dbt tests, docs, lineage, and exposures |
 | Orchestration | One Airflow 3 DAG of 23 tasks covering lakehouse, warehouse, dbt, and reporting |
 | Reporting | Power BI Online dashboard assets, screenshots, CSV exports, and refresh flow documentation |
 | Infrastructure | Terraform for the S3 layer that serves the Power BI CSVs |
@@ -415,7 +415,7 @@ exports/power_bi/export_manifest.json
 - the bucket policy grants public `s3:GetObject` on exactly those five objects, with no listing and no write;
 - the module uploads the five files from `data/bi_exports/`.
 
-`terraform output power_bi_csv_urls` prints the HTTPS URLs that Power BI uses. `data_quality_summary.csv` is built only from verified checks: warehouse reconciliation, SCD2 validation, Silver quarantine, and point-in-time conservation. See `docs/power_bi_dashboard_spec.md` and `docs/terraform_aws_bi_exports.md`.
+`terraform output power_bi_csv_urls` prints the HTTPS URLs that Power BI uses. `data_quality_summary.csv` is built only from verified checks: warehouse reconciliation, SCD2 validation, Silver quarantine, point-in-time conservation, and the web events the warehouse rejects. See `docs/power_bi_dashboard_spec.md` and `docs/terraform_aws_bi_exports.md`.
 
 Power BI docs:
 
@@ -769,7 +769,7 @@ ORDER BY status;
 "
 ```
 
-Expected: `PASS | 14`.
+Expected: `PASS | 16`.
 
 ### Warehouse marts
 
@@ -791,7 +791,7 @@ bash scripts/run_warehouse_sql.sh sql/warehouse/scd2_validation_queries.sql
 ### Data quality summary
 
 ```bash
-awk -F, 'NR>1 && $4!="PASS"' data/bi_exports/data_quality_summary.csv   # prints nothing when every check passes
+python -c "import csv; print([r for r in csv.DictReader(open('data/bi_exports/data_quality_summary.csv', newline='')) if r['status'] != 'PASS'])"   # prints [] when every check passes
 ```
 
 ### Power BI exports

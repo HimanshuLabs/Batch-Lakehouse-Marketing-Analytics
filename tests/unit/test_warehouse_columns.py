@@ -17,6 +17,9 @@ A sweep of the warehouse found columns that were empty or invented:
     scroll_depth_percent, schema_version and source_system.
   - fact_orders.discount_amount was always 0; it is now the sum of its items'
     (original_price - discounted_price) x quantity.
+  - E2: gross_amount equalled net revenue, so gross - discount did not; it is now
+    the sum of original_price x quantity over the order's loaded items, and
+    reconciliation checks gross - discount = net for every complete order.
 
 No Postgres runs in the unit tests, so the SQL is checked as text; the
 behaviour is checked on a real build by tests/integration/test_warehouse.py.
@@ -104,12 +107,22 @@ def test_no_channel_comes_from_the_lineage_source_column():
         "an order's channel must be its point-in-time campaign's channel"
 
 
-def test_order_discount_is_the_sum_of_its_item_discounts():
+def test_order_gross_and_discount_are_the_sums_of_their_items():
     code = re.sub(r"\s+", " ", sql_code(TABLES_SQL))
+    assert ("warehouse.safe_numeric(r->>'original_price') "
+            "* coalesce(warehouse.safe_int(r->>'quantity'), 1) AS gross_amount") in code
     assert ("(warehouse.safe_numeric(r->>'original_price') - warehouse.safe_numeric(r->>'discounted_price')) "
             "* coalesce(warehouse.safe_int(r->>'quantity'), 1) AS discount_amount") in code
-    assert "discount_amount = item_counts.discount_amount" in code
-    assert "COALESCE(SUM(discount_amount), 0) AS discount_amount" in code
+    # Every order, with or without loaded items, takes both sums from its items.
+    assert "SET gross_amount = order_amounts.gross_amount, discount_amount = order_amounts.discount_amount," in code
+    assert ("COALESCE(SUM(i.gross_amount), 0) AS gross_amount, COALESCE(SUM(i.discount_amount), 0) AS discount_amount "
+            "FROM warehouse.fact_orders o LEFT JOIN warehouse.fact_order_items i") in code
+
+
+def test_reconciliation_checks_gross_minus_discount_equals_net():
+    code = re.sub(r"\s+", " ", sql_code(WAREHOUSE_DIR / "reconciliation_report.sql"))
+    assert "'Order gross minus discount equals net revenue for every complete order'" in code
+    assert "WHERE o.line_total = o.net_revenue AND o.gross_amount - o.discount_amount <> o.net_revenue" in code
 
 
 def test_gold_web_events_keep_the_engagement_and_lineage_fields(spark, load_job):

@@ -27,10 +27,10 @@ Observed local row counts:
 
 | Table | Row Count |
 |---|---:|
-| `warehouse.dim_campaign` | 43 |
-| `warehouse.dim_customer` | 508 |
+| `warehouse.dim_campaign` | 41 |
+| `warehouse.dim_customer` | 505 |
 | `warehouse.dim_date` | 151 |
-| `warehouse.dim_product` | 154 |
+| `warehouse.dim_product` | 153 |
 | `warehouse.fact_campaign_spend` | 1,182 |
 | `warehouse.fact_order_items` | 5,810 |
 | `warehouse.fact_orders` | 2,373 |
@@ -85,7 +85,7 @@ Observed local behavior:
 - This is acceptable because:
   - `warehouse.fact_orders` has only 2,373 rows,
   - `warehouse.dim_date` has only 151 rows,
-  - `warehouse.dim_customer` has only 508 rows.
+  - `warehouse.dim_customer` has only 505 rows.
 
 The query is still index-eligible through:
 

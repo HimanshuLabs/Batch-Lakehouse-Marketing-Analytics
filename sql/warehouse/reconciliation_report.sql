@@ -172,6 +172,7 @@ DECLARE
     source_table TEXT;
     source_value NUMERIC(38, 6);
     target_value NUMERIC(38, 6);
+    order_count_excluded NUMERIC(38, 6);
 BEGIN
     /*
     ---------------------------------------------------------------------------
@@ -847,6 +848,54 @@ BEGIN
         0.01,
         checked_time,
         'Compares BI-visible fact_order_items.line_revenue to mart_product_sales.product_revenue, excluding UNKNOWN product rows because the product mart is business-facing.'
+    );
+
+    /*
+    ---------------------------------------------------------------------------
+    Order gross minus discount equals net revenue
+    ---------------------------------------------------------------------------
+    gross_amount and discount_amount are sums over the order's loaded items. For
+    a complete order (its loaded lines add up to its net revenue) gross minus
+    discount must equal net revenue exactly. An order that lost items to Silver
+    quarantine or point-in-time rejection is excluded and counted, as in the
+    point-in-time order totals check.
+    */
+
+    SELECT
+        COUNT(*) FILTER (
+            WHERE o.line_total = o.net_revenue
+              AND o.gross_amount - o.discount_amount <> o.net_revenue
+        )::NUMERIC,
+        COUNT(*) FILTER (WHERE o.line_total = o.net_revenue)::NUMERIC,
+        COUNT(*) FILTER (WHERE o.line_total IS DISTINCT FROM o.net_revenue)::NUMERIC
+    INTO target_value, source_value, order_count_excluded
+    FROM (
+        SELECT fo.net_revenue, fo.gross_amount, fo.discount_amount, items.line_total
+        FROM warehouse.fact_orders fo
+        LEFT JOIN (
+            SELECT order_sk, SUM(line_revenue) AS line_total
+            FROM warehouse.fact_order_items
+            GROUP BY order_sk
+        ) items
+            ON items.order_sk = fo.order_sk
+    ) o;
+
+    PERFORM audit.record_reconciliation_check(
+        run_id,
+        'Order gross minus discount equals net revenue for every complete order',
+        'Warehouse integrity',
+        'expected zero complete orders where gross_amount - discount_amount <> net_revenue',
+        'warehouse.fact_orders',
+        'gross_discount_net_mismatched_orders',
+        'COUNT',
+        0,
+        target_value,
+        0,
+        checked_time,
+        format(
+            'Checked %s complete orders; excluded %s incomplete orders (items quarantined or rejected, or none loaded).',
+            source_value::BIGINT, order_count_excluded::BIGINT
+        )
     );
 END $$;
 
