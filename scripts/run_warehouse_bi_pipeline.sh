@@ -4,9 +4,6 @@ set -euo pipefail
 echo "==> Building warehouse facts and dimensions"
 env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/create_warehouse_tables.sql
 
-echo "==> Repairing web-event surrogate keys (point-in-time safety net; no-op on a fresh build)"
-env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/repair_web_event_surrogate_keys.sql
-
 echo "==> Building SCD2 validation views and results"
 env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/scd2_validation_queries.sql
 

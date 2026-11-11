@@ -150,7 +150,7 @@ WITH target_campaign AS (
         dc.campaign_sk,
         dc.campaign_id,
         dc.campaign_name,
-        dc.campaign_type
+        dc.campaign_status
     FROM warehouse.dim_campaign dc
     JOIN (
         SELECT
@@ -166,7 +166,7 @@ WITH target_campaign AS (
 SELECT
     tc.campaign_id,
     tc.campaign_name,
-    tc.campaign_type,
+    tc.campaign_status,
     COUNT(*) AS spend_days,
     SUM(fcs.spend_amount) AS total_spend,
     SUM(fcs.attributed_revenue) AS attributed_revenue,
@@ -180,7 +180,7 @@ JOIN warehouse.fact_campaign_spend fcs
 GROUP BY
     tc.campaign_id,
     tc.campaign_name,
-    tc.campaign_type
+    tc.campaign_status
 ORDER BY
     roas DESC;
 

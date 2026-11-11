@@ -15,7 +15,7 @@ UNION ALL
 SELECT 'fact_orders', count(*),
        md5(string_agg(f.order_id || ':' || f.customer_sk || ':' || f.campaign_sk || ':' || f.order_date_sk
                       || ':' || r.region_nk || ':' || c.channel_nk || ':' || coalesce(f.order_timestamp::TEXT, '')
-                      || ':' || f.item_count || ':' || f.gross_amount || ':' || f.net_revenue
+                      || ':' || f.item_count || ':' || f.gross_amount || ':' || f.discount_amount || ':' || f.net_revenue
                       || ':' || coalesce(f.payment_method, '') || ':' || coalesce(f.source_record_hash, ''),
                       ',' ORDER BY f.order_id))
 FROM warehouse.fact_orders f
@@ -60,6 +60,11 @@ SELECT 'fact_conversions', count(*),
 FROM warehouse.fact_conversions f
 JOIN warehouse.dim_region r USING (region_sk)
 JOIN warehouse.dim_channel c USING (channel_sk)
+UNION ALL
+SELECT 'audit.fact_web_events_rejects', count(*),
+       md5(string_agg(event_id || ':' || customer_id || ':' || product_id || ':' || campaign_id || ':' || reject_reason,
+                      ',' ORDER BY event_id))
+FROM audit.fact_web_events_rejects
 UNION ALL
 SELECT 'dim_customer / dim_product / dim_campaign', (SELECT count(*) FROM warehouse.dim_customer)
        + (SELECT count(*) FROM warehouse.dim_product) + (SELECT count(*) FROM warehouse.dim_campaign),

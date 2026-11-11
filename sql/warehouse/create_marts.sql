@@ -204,10 +204,11 @@ WITH current_campaigns AS (
     SELECT
         campaign_id,
         campaign_name,
-        campaign_type,
         channel,
         traffic_source,
         target_segment,
+        campaign_status,
+        ab_test_group,
         campaign_start_date,
         campaign_end_date,
         budget
@@ -269,10 +270,11 @@ conversions_by_campaign AS (
 SELECT
     cc.campaign_id,
     cc.campaign_name,
-    cc.campaign_type,
     cc.channel,
     cc.traffic_source,
     cc.target_segment,
+    cc.campaign_status,
+    cc.ab_test_group,
     cc.campaign_start_date,
     cc.campaign_end_date,
     ROUND(COALESCE(cc.budget, 0), 2) AS campaign_budget,
@@ -619,7 +621,6 @@ WITH event_enriched AS (
 
         dc.campaign_id,
         dc.campaign_name,
-        dc.campaign_type,
         dc.traffic_source,
         dc.target_segment,
 
@@ -655,7 +656,6 @@ SELECT
 
     COALESCE(campaign_id, 'UNKNOWN') AS campaign_id,
     COALESCE(campaign_name, 'Unknown') AS campaign_name,
-    COALESCE(campaign_type, 'Unknown') AS campaign_type,
     COALESCE(traffic_source, 'Unknown') AS traffic_source,
     COALESCE(target_segment, 'Unknown') AS target_segment,
 
@@ -731,7 +731,6 @@ GROUP BY
     COALESCE(channel_group, 'Unknown'),
     COALESCE(campaign_id, 'UNKNOWN'),
     COALESCE(campaign_name, 'Unknown'),
-    COALESCE(campaign_type, 'Unknown'),
     COALESCE(traffic_source, 'Unknown'),
     COALESCE(target_segment, 'Unknown');
 

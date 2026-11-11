@@ -46,21 +46,21 @@
     "quarantine_fact_campaign_spend_scd2_rejects": 51
   },
   "warehouse": {
-    "warehouse.dim_customer": 505,
-    "warehouse.dim_product": 152,
-    "warehouse.dim_campaign": 42,
+    "warehouse.dim_customer": 502,
+    "warehouse.dim_product": 151,
+    "warehouse.dim_campaign": 40,
     "warehouse.dim_date": 137,
     "warehouse.dim_region": 799,
     "warehouse.dim_channel": 8,
     "warehouse.fact_orders": 2142,
     "warehouse.fact_order_items": 5244,
     "warehouse.fact_campaign_spend": 1068,
-    "warehouse.fact_web_events": 8880,
-    "warehouse.fact_conversions": 1445,
-    "marts.mart_customer_360": 500,
-    "marts.mart_product_sales": 148,
-    "marts.mart_campaign_performance": 39,
+    "warehouse.fact_web_events": 8362,
+    "warehouse.fact_conversions": 1372,
+    "marts.mart_customer_360": 497,
+    "marts.mart_product_sales": 147,
+    "marts.mart_campaign_performance": 37,
     "marts.mart_revenue_daily": 136,
-    "marts.mart_marketing_funnel": 7792
+    "marts.mart_marketing_funnel": 7346
   }
 }

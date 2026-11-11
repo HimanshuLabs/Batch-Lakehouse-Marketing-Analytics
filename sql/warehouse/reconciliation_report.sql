@@ -379,21 +379,6 @@ BEGIN
         INTO source_value;
     END IF;
 
-    IF to_regclass('staging.stg_gold_fact_web_events') IS NOT NULL THEN
-        SELECT COUNT(*)::NUMERIC
-    INTO source_value
-    FROM (
-        SELECT DISTINCT customer_id::TEXT AS customer_id
-        FROM staging.stg_gold_dim_customers_scd2
-        WHERE customer_id IS NOT NULL
-
-        UNION
-
-        SELECT DISTINCT customer_id::TEXT AS customer_id
-        FROM staging.stg_gold_fact_web_events
-        WHERE customer_id IS NOT NULL
-    ) expected_customers;
-    END IF;
 
     SELECT COUNT(DISTINCT customer_id)::NUMERIC
     INTO target_value
@@ -403,9 +388,9 @@ BEGIN
 
     PERFORM audit.record_reconciliation_check(
         run_id,
-        'Gold plus inferred customer dimension row count equals warehouse dim_customer row count',
+        'Gold customer dimension key count equals warehouse dim_customer key count',
         'Staging-to-warehouse row count',
-        COALESCE(source_table, 'missing customer staging table') || ' + inferred web-event customer keys',
+        COALESCE(source_table, 'missing customer staging table'),
         'warehouse.dim_customer',
         'customer_dimension_rows',
         'COUNT',
@@ -413,7 +398,7 @@ BEGIN
         target_value,
         0,
         checked_time,
-        'Excludes warehouse unknown customer member customer_sk = 0 and includes inferred late-arriving web-event customer keys.'
+        'Distinct customer_id on both sides, excluding the unknown member customer_sk = 0. No member is invented: a web event whose customer is not in the dimension is rejected into audit.fact_web_events_rejects.'
     );
 
     source_table := audit.first_existing_table(
@@ -433,21 +418,6 @@ BEGIN
         INTO source_value;
     END IF;
 
-    IF to_regclass('staging.stg_gold_fact_web_events') IS NOT NULL THEN
-        SELECT COUNT(*)::NUMERIC
-    INTO source_value
-    FROM (
-        SELECT DISTINCT product_id::TEXT AS product_id
-        FROM staging.stg_gold_dim_products_scd2
-        WHERE product_id IS NOT NULL
-
-        UNION
-
-        SELECT DISTINCT product_id::TEXT AS product_id
-        FROM staging.stg_gold_fact_web_events
-        WHERE product_id IS NOT NULL
-    ) expected_products;
-    END IF;
 
     SELECT COUNT(DISTINCT product_id)::NUMERIC
     INTO target_value
@@ -457,9 +427,9 @@ BEGIN
 
     PERFORM audit.record_reconciliation_check(
         run_id,
-        'Gold plus inferred product dimension row count equals warehouse dim_product row count',
+        'Gold product dimension key count equals warehouse dim_product key count',
         'Staging-to-warehouse row count',
-        COALESCE(source_table, 'missing product staging table') || ' + inferred web-event product keys',
+        COALESCE(source_table, 'missing product staging table'),
         'warehouse.dim_product',
         'product_dimension_rows',
         'COUNT',
@@ -467,7 +437,7 @@ BEGIN
         target_value,
         0,
         checked_time,
-        'Excludes warehouse unknown product member product_sk = 0 and includes inferred late-arriving web-event product keys.'
+        'Distinct product_id on both sides, excluding the unknown member product_sk = 0. No member is invented: a web event whose product is not in the dimension is rejected into audit.fact_web_events_rejects.'
     );
 
     source_table := audit.first_existing_table(
@@ -487,26 +457,6 @@ BEGIN
         INTO source_value;
     END IF;
 
-    IF to_regclass('staging.stg_gold_fact_web_events') IS NOT NULL THEN
-        SELECT COUNT(*)::NUMERIC
-    INTO source_value
-    FROM (
-        SELECT DISTINCT campaign_id::TEXT AS campaign_id
-        FROM staging.stg_gold_dim_campaigns_scd2
-        WHERE campaign_id IS NOT NULL
-
-        UNION
-
-        SELECT DISTINCT
-            CASE
-                WHEN campaign_id = FLOOR(campaign_id)
-                    THEN campaign_id::BIGINT::TEXT
-                ELSE campaign_id::TEXT
-            END AS campaign_id
-        FROM staging.stg_gold_fact_web_events
-        WHERE campaign_id IS NOT NULL
-    ) expected_campaigns;
-    END IF;
 
     SELECT COUNT(DISTINCT campaign_id)::NUMERIC
     INTO target_value
@@ -516,9 +466,9 @@ BEGIN
 
     PERFORM audit.record_reconciliation_check(
         run_id,
-        'Gold plus inferred campaign dimension row count equals warehouse dim_campaign row count',
+        'Gold campaign dimension key count equals warehouse dim_campaign key count',
         'Staging-to-warehouse row count',
-        COALESCE(source_table, 'missing campaign staging table') || ' + inferred web-event campaign keys',
+        COALESCE(source_table, 'missing campaign staging table'),
         'warehouse.dim_campaign',
         'campaign_dimension_rows',
         'COUNT',
@@ -526,7 +476,7 @@ BEGIN
         target_value,
         0,
         checked_time,
-        'Excludes warehouse unknown campaign member campaign_sk = 0 and includes inferred late-arriving web-event campaign keys.'
+        'Distinct campaign_id on both sides, excluding the unknown member campaign_sk = 0. No member is invented: a web event whose campaign is not in the dimension is rejected into audit.fact_web_events_rejects.'
     );
 
     source_table := audit.first_existing_table(
@@ -571,23 +521,86 @@ BEGIN
         INTO source_value;
     END IF;
 
-    SELECT COUNT(*)::NUMERIC
-    INTO target_value
-    FROM warehouse.fact_web_events;
+    -- Every staging web event is a warehouse fact or a reject, never dropped.
+    SELECT
+        (SELECT COUNT(*) FROM warehouse.fact_web_events)
+        + (SELECT COUNT(*) FROM audit.fact_web_events_rejects)
+    INTO target_value;
 
     PERFORM audit.record_reconciliation_check(
         run_id,
-        'Staging web event row count equals warehouse fact_web_events row count',
+        'Staging web event row count equals warehouse fact_web_events plus rejected web events',
         'Staging-to-warehouse row count',
         COALESCE(source_table, 'missing web event staging table'),
-        'warehouse.fact_web_events',
+        'warehouse.fact_web_events + audit.fact_web_events_rejects',
         'web_event_rows',
         'COUNT',
         source_value,
         target_value,
         0,
         checked_time,
-        NULL
+        format(
+            'fact_web_events %s + rejected %s (a source customer/product/campaign key with no covering dimension version).',
+            (SELECT COUNT(*) FROM warehouse.fact_web_events),
+            (SELECT COUNT(*) FROM audit.fact_web_events_rejects)
+        )
+    );
+
+    /*
+    ---------------------------------------------------------------------------
+    Web-event rejects, recomputed from staging and the dimensions
+    ---------------------------------------------------------------------------
+    A staging web event must be rejected exactly when one of its source keys
+    (customer, product, campaign) is present and no version of that dimension
+    covers the event time. A NULL key is the unknown member, not a reject.
+    */
+
+    source_value := NULL;
+
+    IF source_table IS NOT NULL THEN
+        EXECUTE format($sql$
+            SELECT COUNT(*)::NUMERIC
+            FROM (
+                SELECT
+                    warehouse.safe_timestamp(coalesce(r->>'event_timestamp', r->>'event_time')) AS event_ts,
+                    coalesce(nullif(r->>'customer_id', ''), nullif(r->>'user_id', '')) AS customer_id,
+                    nullif(r->>'product_id', '') AS product_id,
+                    coalesce(nullif((warehouse.safe_numeric(r->>'campaign_id')::BIGINT)::TEXT, ''), nullif(r->>'campaign_id', '')) AS campaign_id
+                FROM (SELECT to_jsonb(s) AS r FROM %s s) src
+            ) e
+            WHERE (e.customer_id IS NOT NULL AND NOT EXISTS (
+                      SELECT 1 FROM warehouse.dim_customer d
+                      WHERE d.customer_id = e.customer_id
+                        AND e.event_ts >= d.effective_from AND e.event_ts < d.effective_to))
+               OR (e.product_id IS NOT NULL AND NOT EXISTS (
+                      SELECT 1 FROM warehouse.dim_product d
+                      WHERE d.product_id = e.product_id
+                        AND e.event_ts >= d.effective_from AND e.event_ts < d.effective_to))
+               OR (e.campaign_id IS NOT NULL AND NOT EXISTS (
+                      SELECT 1 FROM warehouse.dim_campaign d
+                      WHERE d.campaign_id = e.campaign_id
+                        AND e.event_ts >= d.effective_from AND e.event_ts < d.effective_to))
+        $sql$, source_table)
+        INTO source_value;
+    END IF;
+
+    SELECT COUNT(*)::NUMERIC
+    INTO target_value
+    FROM audit.fact_web_events_rejects;
+
+    PERFORM audit.record_reconciliation_check(
+        run_id,
+        'Rejected web events equal staging events with a source key missing from its dimension',
+        'Warehouse integrity',
+        COALESCE(source_table, 'missing web event staging table') || ' with warehouse dimensions',
+        'audit.fact_web_events_rejects',
+        'rejected_web_event_rows',
+        'COUNT',
+        source_value,
+        target_value,
+        0,
+        checked_time,
+        'A NULL key resolves to the unknown member (0); a present key with no covering dimension version is rejected, never given an invented member.'
     );
 
     /*

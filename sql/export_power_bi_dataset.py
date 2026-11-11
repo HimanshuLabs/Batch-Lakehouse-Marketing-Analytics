@@ -4,6 +4,8 @@ Writes, into data/bi_exports/ by default:
   - the Gold SCD2 marts and facts as CSV (DuckDB over the Gold parquet), and
   - data_quality_summary.csv, built only from checks the pipeline has verified:
       warehouse reconciliation   audit.v_latest_reconciliation_report
+      warehouse web-event rejects audit.fact_web_events_rejects (a source key
+                                 with no covering dimension version)
       SCD2 validation            the latest run in audit.scd2_validation_results
       Silver quarantine          logs/silver_quality_report_<BATCH_DATE>/
       point-in-time facts        logs/point_in_time_fact_join_report.json
@@ -63,18 +65,28 @@ def _status(passed: bool) -> str:
     return "PASS" if passed else "FAIL"
 
 
+WEB_EVENT_CONSERVATION_CHECK = (
+    "Staging web event row count equals warehouse fact_web_events plus rejected web events"
+)
+# Counts in audit.fact_web_events_rejects: all rejects, then those naming each key.
+WEB_EVENT_REJECT_KEYS = ("customer", "product", "campaign")
+
+
 def build_data_quality_summary(
     reconciliation: list[dict],
     scd2_validation: list[dict],
     silver_report: list[dict],
     pit_report: dict,
+    web_event_rejects: dict | None,
 ) -> list[dict]:
-    """Rows for data_quality_summary.csv from the four verified sources.
+    """Rows for data_quality_summary.csv from the five verified sources.
 
-    reconciliation   rows of audit.v_latest_reconciliation_report
-    scd2_validation  rows of the latest audit.scd2_validation_results run
-    silver_report    rows of logs/silver_quality_report_<BATCH_DATE>/*.csv
-    pit_report       logs/point_in_time_fact_join_report.json
+    reconciliation     rows of audit.v_latest_reconciliation_report
+    scd2_validation    rows of the latest audit.scd2_validation_results run
+    silver_report      rows of logs/silver_quality_report_<BATCH_DATE>/*.csv
+    pit_report         logs/point_in_time_fact_join_report.json
+    web_event_rejects  counts from audit.fact_web_events_rejects: rejected_rows,
+                       and customer / product / campaign (rejects naming each key)
     """
     if not reconciliation:
         raise ValueError("no warehouse reconciliation run found")
@@ -97,6 +109,14 @@ def build_data_quality_summary(
         raise ValueError(
             "the point-in-time fact report has no unknown_member count for fact_orders_scd2 campaign_sk: "
             "it predates organic orders on the unknown campaign; rerun point_in_time_fact_joins"
+        )
+    if web_event_rejects is None:
+        raise ValueError("no web-event reject counts: the warehouse predates audit.fact_web_events_rejects; rebuild it")
+    web_event_conservation = [r for r in reconciliation if r["check_name"] == WEB_EVENT_CONSERVATION_CHECK]
+    if not web_event_conservation:
+        raise ValueError(
+            f"the reconciliation run has no check {WEB_EVENT_CONSERVATION_CHECK!r}: "
+            "it predates web-event rejects; rerun reconciliation_report.sql"
         )
     order_totals = pit_report.get("order_totals") or {}
     if "checked_orders" not in order_totals:
@@ -179,11 +199,30 @@ def build_data_quality_summary(
             "status": status,
         })
 
+    # Web events with a source key that is not in its dimension are rejected and
+    # counted (a NULL key is the unknown member, not a reject). The status is
+    # that of the reconciliation check that every staging event is a fact or a reject.
+    status = web_event_conservation[0]["status"]
+    rows.append({
+        "metric_group": "Warehouse Facts",
+        "metric_name": "Rejected rows: fact_web_events",
+        "metric_value": web_event_rejects["rejected_rows"],
+        "status": status,
+    })
+    for key in WEB_EVENT_REJECT_KEYS:
+        rows.append({
+            "metric_group": "Warehouse Facts",
+            "metric_name": f"Rejected rows, {key} key not in dimension: fact_web_events",
+            "metric_value": web_event_rejects[key],
+            "status": status,
+        })
+
     return rows
 
 
-def read_warehouse_checks() -> tuple[list[dict], list[dict]]:
-    """The latest reconciliation and SCD2 validation results, read-only."""
+def read_warehouse_checks() -> tuple[list[dict], list[dict], dict | None]:
+    """The latest reconciliation and SCD2 validation results and the web-event
+    reject counts (None when the warehouse has no reject table), read-only."""
     import psycopg
     from psycopg.rows import dict_row
 
@@ -207,7 +246,16 @@ def read_warehouse_checks() -> tuple[list[dict], list[dict]]:
             "WHERE validation_run_id = (SELECT validation_run_id FROM audit.scd2_validation_results "
             "ORDER BY checked_at DESC LIMIT 1)"
         ).fetchall()
-    return [dict(r) for r in reconciliation], [dict(r) for r in scd2_validation]
+        web_event_rejects = None
+        if connection.execute("SELECT to_regclass('audit.fact_web_events_rejects') IS NOT NULL AS present").fetchone()["present"]:
+            web_event_rejects = dict(connection.execute(
+                "SELECT count(*) AS rejected_rows, "
+                "count(*) FILTER (WHERE reject_reason LIKE '%dim_customer%') AS customer, "
+                "count(*) FILTER (WHERE reject_reason LIKE '%dim_product%') AS product, "
+                "count(*) FILTER (WHERE reject_reason LIKE '%dim_campaign%') AS campaign "
+                "FROM audit.fact_web_events_rejects"
+            ).fetchone())
+    return [dict(r) for r in reconciliation], [dict(r) for r in scd2_validation], web_event_rejects
 
 
 def read_silver_report(batch_date: str) -> list[dict]:
@@ -290,9 +338,10 @@ def main() -> None:
         summary_path = export_dir / f"{DATA_QUALITY_SUMMARY}.csv"
         print(f"Exporting {DATA_QUALITY_SUMMARY} -> {summary_path}")
         try:
-            reconciliation, scd2_validation = read_warehouse_checks()
+            reconciliation, scd2_validation, web_event_rejects = read_warehouse_checks()
             rows = build_data_quality_summary(
-                reconciliation, scd2_validation, read_silver_report(BATCH_DATE), read_pit_report()
+                reconciliation, scd2_validation, read_silver_report(BATCH_DATE), read_pit_report(),
+                web_event_rejects,
             )
             write_summary(rows, summary_path)
             report["exports"][DATA_QUALITY_SUMMARY] = {

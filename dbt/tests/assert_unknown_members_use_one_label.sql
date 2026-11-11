@@ -21,13 +21,13 @@ union all
 select 'dim_campaign', campaign_id, campaign_name
 from {{ ref('dim_campaign') }}
 where campaign_sk = 0
-  and (campaign_id <> 'UNKNOWN' or campaign_name <> 'Unknown' or campaign_type <> 'Unknown'
-       or channel <> 'Unknown' or traffic_source <> 'Unknown' or target_segment <> 'Unknown')
+  and (campaign_id <> 'UNKNOWN' or campaign_name <> 'Unknown' or channel <> 'Unknown'
+       or traffic_source <> 'Unknown' or target_segment <> 'Unknown' or campaign_status <> 'Unknown'
+       or ab_test_group <> 'Unknown')
 
 union all
 
 select 'mart_marketing_funnel', campaign_id, campaign_name
 from {{ ref('mart_marketing_funnel') }}
 where campaign_id = 'UNKNOWN'
-  and (campaign_name <> 'Unknown' or campaign_type <> 'Unknown'
-       or traffic_source <> 'Unknown' or target_segment <> 'Unknown')
+  and (campaign_name <> 'Unknown' or traffic_source <> 'Unknown' or target_segment <> 'Unknown')

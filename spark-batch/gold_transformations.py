@@ -207,6 +207,9 @@ def build_fact_web_events(web_events: DataFrame) -> DataFrame:
             "operating_system",
             "browser",
             "network_type",
+            "search_query",
+            "time_on_page_sec",
+            "scroll_depth_percent",
             "engagement_score",
             "purchase_probability",
             "cart_abandonment_probability",
@@ -215,6 +218,8 @@ def build_fact_web_events(web_events: DataFrame) -> DataFrame:
             "fraud_score",
             "city",
             "country",
+            "schema_version",
+            "source_system",
         ),
         "fact_web_events",
     )

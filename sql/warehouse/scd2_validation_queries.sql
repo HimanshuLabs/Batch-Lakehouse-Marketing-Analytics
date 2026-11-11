@@ -846,10 +846,11 @@ GROUP BY
     effective_to,
     is_current,
     COALESCE(campaign_name, '__NULL__'),
-    COALESCE(campaign_type, '__NULL__'),
     COALESCE(channel, '__NULL__'),
     COALESCE(traffic_source, '__NULL__'),
     COALESCE(target_segment, '__NULL__'),
+    COALESCE(campaign_status, '__NULL__'),
+    COALESCE(ab_test_group, '__NULL__'),
     COALESCE(campaign_start_date::TEXT, '__NULL__'),
     COALESCE(campaign_end_date::TEXT, '__NULL__'),
     COALESCE(budget::TEXT, '__NULL__')
