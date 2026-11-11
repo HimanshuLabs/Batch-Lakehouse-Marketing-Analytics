@@ -442,7 +442,9 @@ CREATE TABLE warehouse.fact_order_items (
     quantity INTEGER NOT NULL DEFAULT 1,
     unit_price NUMERIC(18, 2) NOT NULL DEFAULT 0,
     discount_percent NUMERIC(9, 4) NOT NULL DEFAULT 0,
-    -- (original_price - discounted_price) x quantity; NULL when a price is missing.
+    -- original_price x quantity, and (original_price - discounted_price) x quantity;
+    -- NULL when a price is missing. gross_amount - discount_amount = line_revenue.
+    gross_amount NUMERIC(18, 2),
     discount_amount NUMERIC(18, 2),
     line_revenue NUMERIC(18, 2) NOT NULL DEFAULT 0,
     warehouse_loaded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -450,6 +452,7 @@ CREATE TABLE warehouse.fact_order_items (
         quantity >= 0
         AND unit_price >= 0
         AND discount_percent >= 0
+        AND (gross_amount IS NULL OR gross_amount >= 0)
         AND (discount_amount IS NULL OR discount_amount >= 0)
         AND line_revenue >= 0
     )
@@ -1276,6 +1279,8 @@ BEGIN
                         0
                     ) AS unit_price,
                     coalesce(warehouse.safe_numeric(r->>'discount_percent'), 0) AS discount_percent,
+                    warehouse.safe_numeric(r->>'original_price')
+                        * coalesce(warehouse.safe_int(r->>'quantity'), 1) AS gross_amount,
                     (warehouse.safe_numeric(r->>'original_price') - warehouse.safe_numeric(r->>'discounted_price'))
                         * coalesce(warehouse.safe_int(r->>'quantity'), 1) AS discount_amount,
                     coalesce(
@@ -1290,7 +1295,7 @@ BEGIN
             INSERT INTO warehouse.fact_order_items (
                 order_item_sk, order_item_nk, order_sk, order_id, customer_sk, product_sk,
                 order_date_sk, region_sk, channel_sk, order_timestamp,
-                quantity, unit_price, discount_percent, discount_amount, line_revenue
+                quantity, unit_price, discount_percent, gross_amount, discount_amount, line_revenue
             )
             SELECT DISTINCT ON (b.order_item_nk)
                 warehouse.deterministic_fact_sk('order_item', b.order_item_nk) AS order_item_sk,
@@ -1309,6 +1314,7 @@ BEGIN
                 b.quantity,
                 b.unit_price,
                 b.discount_percent,
+                b.gross_amount,
                 b.discount_amount,
                 CASE
                     WHEN b.source_line_revenue > 0 THEN b.source_line_revenue
@@ -1352,6 +1358,7 @@ BEGIN
                 quantity = EXCLUDED.quantity,
                 unit_price = EXCLUDED.unit_price,
                 discount_percent = EXCLUDED.discount_percent,
+                gross_amount = EXCLUDED.gross_amount,
                 discount_amount = EXCLUDED.discount_amount,
                 line_revenue = EXCLUDED.line_revenue,
                 warehouse_loaded_at = CURRENT_TIMESTAMP;
@@ -1366,13 +1373,10 @@ END $$;
 -- fact_orders is order-grain. Some Gold order outputs contain revenue but do
 -- not contain item_count. After fact_order_items is loaded, derive item_count
 -- from matching order item rows so order-level reporting is not misleading.
--- discount_amount is the sum of the items' discounts ((original_price -
--- discounted_price) x quantity); net_revenue (the discounted total) is unchanged.
 
 UPDATE warehouse.fact_orders fo
 SET
     item_count = item_counts.item_count,
-    discount_amount = item_counts.discount_amount,
     warehouse_loaded_at = CURRENT_TIMESTAMP
 FROM (
     SELECT
@@ -1380,13 +1384,37 @@ FROM (
         COALESCE(
             NULLIF(SUM(CASE WHEN quantity > 0 THEN quantity ELSE 0 END), 0),
             COUNT(*)
-        )::INTEGER AS item_count,
-        COALESCE(SUM(discount_amount), 0) AS discount_amount
+        )::INTEGER AS item_count
     FROM warehouse.fact_order_items
     WHERE order_id IS NOT NULL
     GROUP BY order_id
 ) item_counts
 WHERE fo.order_id = item_counts.order_id;
+
+-- gross_amount and discount_amount of every order are the sums over its loaded
+-- items (original_price x quantity, and (original_price - discounted_price) x
+-- quantity); an order with no loaded item has 0. net_revenue (the discounted
+-- order total from Gold) is unchanged, so gross_amount - discount_amount =
+-- net_revenue for every complete order. An order that lost items to quarantine
+-- or rejection keeps its full net_revenue but only its loaded items' gross and
+-- discount (audit: reconciliation_report.sql).
+
+UPDATE warehouse.fact_orders fo
+SET
+    gross_amount = order_amounts.gross_amount,
+    discount_amount = order_amounts.discount_amount,
+    warehouse_loaded_at = CURRENT_TIMESTAMP
+FROM (
+    SELECT
+        o.order_sk,
+        COALESCE(SUM(i.gross_amount), 0) AS gross_amount,
+        COALESCE(SUM(i.discount_amount), 0) AS discount_amount
+    FROM warehouse.fact_orders o
+    LEFT JOIN warehouse.fact_order_items i
+        ON i.order_sk = o.order_sk
+    GROUP BY o.order_sk
+) order_amounts
+WHERE fo.order_sk = order_amounts.order_sk;
 
 DO $$
 DECLARE

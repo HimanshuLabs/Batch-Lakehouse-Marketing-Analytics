@@ -207,9 +207,9 @@ For a batch date whose raw files already exist, `generate_data` logs `Raw data f
 airflow tasks states-for-dag-run batch_lakehouse_marketing_analytics "$RUN_ID"
 
 docker exec project2_postgres psql -U project2 -d marketing_analytics -c "
-SELECT status, COUNT(*) FROM audit.v_latest_reconciliation_report GROUP BY status;"   # PASS | 14
+SELECT status, COUNT(*) FROM audit.v_latest_reconciliation_report GROUP BY status;"   # PASS | 16
 
-awk -F, 'NR>1 && $4!="PASS"' data/bi_exports/data_quality_summary.csv              # prints nothing
+python -c "import csv; print([r for r in csv.DictReader(open('data/bi_exports/data_quality_summary.csv', newline='')) if r['status'] != 'PASS'])"   # prints []
 ```
 
 ---

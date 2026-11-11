@@ -349,13 +349,29 @@ def test_web_event_engagement_and_lineage_fields_are_loaded(column):
     assert loaded == expected > 0
 
 
-def test_order_discount_is_the_sum_of_its_item_discounts():
-    mismatched, total = sql(
-        "select count(*) filter (where fo.discount_amount <> coalesce(i.discount, 0)), sum(fo.discount_amount) "
-        "from warehouse.fact_orders fo left join (select order_sk, sum(discount_amount) as discount "
-        "from warehouse.fact_order_items group by order_sk) i using (order_sk)"
+def test_order_gross_and_discount_are_the_sums_of_their_items():
+    mismatched, total, gross_mismatched = sql(
+        "select count(*) filter (where fo.discount_amount <> coalesce(i.discount, 0)), sum(fo.discount_amount), "
+        "count(*) filter (where fo.gross_amount <> coalesce(i.gross, 0)) "
+        "from warehouse.fact_orders fo left join (select order_sk, sum(discount_amount) as discount, "
+        "sum(gross_amount) as gross from warehouse.fact_order_items group by order_sk) i using (order_sk)"
     )[0]
     assert mismatched == "0" and float(total) > 0
+    assert gross_mismatched == "0"
+    # gross - discount = net for every complete order (its loaded lines add up to
+    # its net revenue); the incomplete ones are exactly those the point-in-time
+    # order totals check excludes.
+    complete_mismatched, excluded = (int(v) for v in sql(
+        "select count(*) filter (where i.lines = fo.net_revenue "
+        "and fo.gross_amount - fo.discount_amount <> fo.net_revenue), "
+        "count(*) filter (where i.lines is distinct from fo.net_revenue) "
+        "from warehouse.fact_orders fo left join (select order_sk, sum(line_revenue) as lines "
+        "from warehouse.fact_order_items group by order_sk) i using (order_sk)"
+    )[0])
+    assert complete_mismatched == 0
+    assert excluded == pit_report()["order_totals"]["excluded_incomplete_orders"]
+    checks = dict(sql("select check_name, status from audit.v_latest_reconciliation_report"))
+    assert checks["Order gross minus discount equals net revenue for every complete order"] == "PASS"
     # Net revenue (the discounted order total) still equals Gold's.
     checks = dict(sql("select check_name, status from audit.v_latest_reconciliation_report"))
     assert checks["Gold revenue equals warehouse fact_orders net revenue"] == "PASS"
@@ -363,7 +379,8 @@ def test_order_discount_is_the_sum_of_its_item_discounts():
     assert sql(
         "select count(*) from warehouse.fact_order_items f join staging.stg_gold_fact_order_items_scd2 s "
         "on s.order_item_id::TEXT = f.order_item_nk "
-        "where f.discount_amount is distinct from ((s.original_price - s.discounted_price) * s.quantity)::NUMERIC(18, 2)"
+        "where f.discount_amount is distinct from ((s.original_price - s.discounted_price) * s.quantity)::NUMERIC(18, 2) "
+        "or f.gross_amount is distinct from (s.original_price * s.quantity)::NUMERIC(18, 2)"
     ) == [["0"]]
 
 

@@ -41,3 +41,4 @@ Power BI Online reads the five uploaded files through public HTTPS S3 URLs manag
 | SCD2 Validation | latest run in `audit.scd2_validation_results` | failed row count |
 | Silver Quarantine | `logs/silver_quality_report_<BATCH_DATE>/` | quarantined and unaccounted rows per table |
 | Point-in-Time Facts | `logs/point_in_time_fact_join_report.json` | rejected and unaccounted rows per fact |
+| Warehouse Facts | `audit.fact_web_events_rejects` | web events rejected because a customer, product or campaign key is not in its dimension: the total, and per key |
