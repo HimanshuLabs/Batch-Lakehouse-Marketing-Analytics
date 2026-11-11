@@ -79,11 +79,16 @@ def create_spark_session() -> SparkSession:
 
 def read_source(spark: SparkSession, source_format: str, source_path: Path) -> DataFrame:
     if source_format == "csv":
+        # RFC 4180, as the generator (pandas) writes it: a quoted field keeps
+        # its commas and line breaks, and a doubled quote is one quote.
         return (
             spark.read
             .option("header", "true")
             .option("inferSchema", "false")
             .option("mode", "PERMISSIVE")
+            .option("multiLine", "true")
+            .option("quote", '"')
+            .option("escape", '"')
             .csv(str(source_path))
         )
 

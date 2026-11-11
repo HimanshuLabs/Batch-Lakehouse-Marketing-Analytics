@@ -120,7 +120,7 @@ def test_campaign_mart_counts_budget_once_across_days_and_versions():
     """Protect the existing correct aggregation while changing source delivery."""
     import os
     import psycopg
-    from conftest import CODE_ROOT
+    from conftest import CODE_ROOT, MINIMAL_STAGING_SQL
     if os.environ.get('P2_F_SANDBOX') != '1':
         pytest.skip('requires dedicated disposable warehouse on localhost:5546')
     with psycopg.connect(host='127.0.0.1', port=5546, user='project2', password='project2',
@@ -128,7 +128,7 @@ def test_campaign_mart_counts_budget_once_across_days_and_versions():
         conn.execute('DROP SCHEMA IF EXISTS marts CASCADE; DROP SCHEMA IF EXISTS warehouse CASCADE; '
                      'DROP SCHEMA IF EXISTS audit CASCADE; DROP SCHEMA IF EXISTS staging CASCADE; CREATE SCHEMA staging; '
                      "SELECT set_config('p2.run_id', 'budget-regression', false)")
-        conn.execute((CODE_ROOT / 'sql/warehouse/create_warehouse_tables.sql').read_text())
+        conn.execute(MINIMAL_STAGING_SQL + (CODE_ROOT / 'sql/warehouse/create_warehouse_tables.sql').read_text())
         conn.execute("INSERT INTO warehouse.dim_campaign(campaign_sk,campaign_id,budget,effective_from,effective_to,is_current) "
                      "VALUES (1,'campaign',1000,'2026-01-01','2026-02-01',false),"
                      "(2,'campaign',1200,'2026-02-01','9999-12-31',true)")

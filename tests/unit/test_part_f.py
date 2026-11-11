@@ -4,7 +4,7 @@ import os
 import sys
 
 import pytest
-from conftest import CODE_ROOT
+from conftest import CODE_ROOT, MINIMAL_STAGING_SQL
 
 
 @pytest.mark.parametrize('price,reason', [
@@ -60,7 +60,7 @@ def pg():
 
 
 def warehouse_sql():
-    return (CODE_ROOT / 'sql/warehouse/create_warehouse_tables.sql').read_text()
+    return MINIMAL_STAGING_SQL + (CODE_ROOT / 'sql/warehouse/create_warehouse_tables.sql').read_text()
 
 
 def marts_sql():
@@ -158,9 +158,11 @@ def test_reconciliation_task_failure_persists_and_reaches_summary(pg, load_job, 
     pg.execute(warehouse_sql())
     pg.execute("CREATE TABLE audit.scd2_validation_results (validation_run_id text,status text); "
                "INSERT INTO audit.scd2_validation_results VALUES ('part-f-test','PASS'); "
-               "CREATE TABLE staging.stg_gold_fact_web_events (event_id text)")
+               "CREATE TABLE IF NOT EXISTS staging.stg_gold_fact_web_events (event_id text)")
     pg.execute(marts_sql())
-    # Missing staging produces genuine failed source-vs-target checks.
+    # A staging order that never reached the warehouse is a genuine failed
+    # source-vs-target check (missing staging tables now fail the build itself).
+    pg.execute("INSERT INTO staging.stg_gold_fact_orders_scd2 (order_id) VALUES ('never-loaded')")
     result = subprocess.run(['bash', str(CODE_ROOT / 'scripts/run_warehouse_sql.sh'),
                              str(CODE_ROOT / 'sql/warehouse/reconciliation_report.sql')],
                             cwd=tmp_path, env={**os.environ, 'PGCONTAINER': 'p2-part-f-sandbox',

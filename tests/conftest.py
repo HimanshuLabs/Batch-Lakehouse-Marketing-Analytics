@@ -24,6 +24,21 @@ CODE_ROOT = Path(os.environ.get("P2_CODE_ROOT", REPO_ROOT)).resolve()
 
 _module_counter = itertools.count()
 
+# The staging tables create_warehouse_tables.sql requires (a missing one is an
+# error). Database tests that build the warehouse from a few hand-made rows run
+# this first; a table the test already created is kept.
+MINIMAL_STAGING_SQL = "".join(
+    f"CREATE TABLE IF NOT EXISTS staging.{table} ({columns});\n" for table, columns in (
+        ("stg_gold_dim_customers_scd2", "customer_id text, effective_from timestamp"),
+        ("stg_gold_dim_products_scd2", "product_id text, effective_from timestamp"),
+        ("stg_gold_dim_campaigns_scd2", "campaign_id text, effective_from timestamp"),
+        ("stg_gold_fact_orders_scd2", "order_id text"),
+        ("stg_gold_fact_order_items_scd2", "order_item_id text"),
+        ("stg_gold_fact_campaign_spend_scd2", "spend_id text"),
+        ("stg_gold_fact_web_events", "event_id text"),
+    )
+)
+
 
 @pytest.fixture(scope="session")
 def spark():
