@@ -10,6 +10,9 @@ out silently; they are rejected with a reason, and the job checks that every
 Silver row is a valid fact or a reject.
 Order totals (p2-data-v2): every complete order's total must equal the sum of
 its lines; orders that lost an item are excluded and counted, not failed.
+8b (p2-data-v2): an organic order (NULL campaign_id) was rejected; it now
+resolves to the unknown campaign member ('UNKNOWN') and is counted as its own
+resolution. NULL customer and product keys are still rejected.
 """
 from __future__ import annotations
 
@@ -119,6 +122,30 @@ def test_rejects_name_every_failing_key(spark, pit):
     }
 
 
+def test_a_null_campaign_resolves_to_the_unknown_member(spark, pit):
+    facts = join_customers(pit, spark, [
+        (1, 5, "2026-06-01 10:00:00"),
+        (2, 5, "2026-06-01 10:00:00"),
+        (3, None, "2026-06-01 10:00:00"),
+    ]).withColumn("campaign_id", F.when(F.col("order_id") == 1, F.lit(4)).otherwise(F.lit(None).cast("int")))
+    facts = pit.point_in_time_join(
+        fact_df=facts, dim_df=campaigns(spark), fact_key="campaign_id", dim_key="campaign_id",
+        fact_timestamp="order_date", surrogate_key="campaign_sk", null_key_to_unknown_member=True,
+    )
+    rows = {row["order_id"]: row.asDict() for row in facts.collect()}
+    assert {k: (v["campaign_sk"], v["campaign_sk_resolution"]) for k, v in rows.items()} == {
+        1: ("campaign-4-v1", "in_range"), 2: ("UNKNOWN", "unknown_member"), 3: ("UNKNOWN", "unknown_member"),
+    }
+
+    valid, rejected = pit.split_valid_and_rejected_facts(facts, resolved_keys=[
+        ("customer_sk", "customer_id", "order_date", "dim_customers_scd2"),
+        ("campaign_sk", "campaign_id", "order_date", "dim_campaigns_scd2"),
+    ])
+    assert sorted(row["order_id"] for row in valid.collect()) == [1, 2]
+    # A NULL customer is still a reject, whatever its campaign.
+    assert {row["order_id"]: row["reject_reason"] for row in rejected.collect()} == {3: "customer_id is NULL"}
+
+
 # --- the job end to end, in a temporary project ----------------------------
 
 def write_project(spark, root, orders: list[tuple], items: list[tuple],
@@ -184,6 +211,26 @@ def test_the_job_rejects_items_of_rejected_orders_and_conserves_rows(spark, pit,
         conservation = report["facts"][fact]["conservation"]
         assert conservation["status"] == "PASS" and conservation["unaccounted_rows"] == 0, (fact, conservation)
     assert report["facts"]["fact_orders_scd2"]["resolutions"]["customer_sk"]["key_not_in_dimension"] == 1
+
+
+def test_the_job_keeps_organic_orders_on_the_unknown_campaign(spark, pit, project_root, no_stop):
+    write_project(spark, project_root,
+                  orders=[(1, 5, 4, "2026-06-01 10:00:00"), (2, 5, None, "2026-06-01 10:00:00")],
+                  items=[(10, 1, 4), (20, 2, 4)])
+    pit.main()
+
+    facts = {row["order_id"]: row["campaign_sk"] for row in
+             spark.read.parquet(str(project_root / "data" / "gold" / "fact_orders_scd2")).collect()}
+    assert facts == {1: "campaign-4-v1", 2: "UNKNOWN"}
+    items = {row["order_item_id"] for row in
+             spark.read.parquet(str(project_root / "data" / "gold" / "fact_order_items_scd2")).collect()}
+    assert items == {10, 20}, "the organic order's item is a valid fact too"
+
+    report = json.loads((project_root / "logs" / "point_in_time_fact_join_report.json").read_text())
+    assert report["overall_status"] == "PASS"
+    campaign = report["facts"]["fact_orders_scd2"]["resolutions"]["campaign_sk"]
+    assert (campaign["in_range"], campaign["unknown_member"], campaign["no_key"]) == (1, 1, 0)
+    assert report["facts"]["fact_orders_scd2"]["rejected_rows"] == 0
 
 
 def test_the_job_checks_order_totals_and_excludes_incomplete_orders(spark, pit, project_root, no_stop):

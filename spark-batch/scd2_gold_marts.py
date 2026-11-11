@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict
 
-from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import Column, DataFrame, SparkSession
 from pyspark.sql import functions as F
 
 
@@ -28,6 +29,22 @@ INPUT_PATHS = {
     "dim_campaigns": GOLD_DIR / "dim_campaigns_scd2",
     "silver_web_events": SILVER_DIR / "silver_web_events",
 }
+
+# Business dates are Asia/Kolkata calendar days, like Gold (which derives them
+# in SOURCE_TIMEZONE). The session stays UTC and timestamps stay UTC; only a
+# date derived from a timestamp goes through business_date.
+BUSINESS_TIMEZONE = os.environ.get("SOURCE_TIMEZONE", "Asia/Kolkata")
+
+
+def business_date(timestamp: Column) -> Column:
+    """The calendar day of a UTC timestamp in BUSINESS_TIMEZONE."""
+    return F.to_date(F.from_utc_timestamp(timestamp, BUSINESS_TIMEZONE))
+
+# The unknown member's key and display label (see point_in_time_fact_joins).
+# Organic orders carry campaign_sk 'UNKNOWN': they count in every mart except
+# campaign performance, which lists real campaigns only (as the warehouse does).
+UNKNOWN_KEY = "UNKNOWN"
+UNKNOWN_LABEL = "Unknown"
 
 OUTPUT_PATHS = {
     "mart_campaign_performance": GOLD_DIR / "mart_campaign_performance_scd2",
@@ -200,7 +217,8 @@ def build_customer_lifetime_value_mart(
         .withColumnRenamed("dim_customer_id", "customer_id")
         .withColumn(
             "customer_lifetime_days",
-            F.datediff(F.col("last_order_date"), F.col("first_order_date")),
+            # Days between the first and last order's business dates.
+            F.datediff(business_date(F.col("last_order_date")), business_date(F.col("first_order_date"))),
         )
         .withColumn("built_at", F.current_timestamp())
     )
@@ -270,13 +288,13 @@ def normalize_web_events(web_events: DataFrame) -> DataFrame:
         result = result.withColumn("event_timestamp", F.col("event_time"))
 
     if "event_date" not in result.columns:
-        result = result.withColumn("event_date", F.to_date(F.col("event_timestamp")))
+        result = result.withColumn("event_date", business_date(F.col("event_timestamp")))
 
     if "channel" not in result.columns:
         if "traffic_source" in result.columns:
             result = result.withColumn("channel", F.col("traffic_source"))
         else:
-            result = result.withColumn("channel", F.lit("unknown"))
+            result = result.withColumn("channel", F.lit(UNKNOWN_LABEL))
 
     if "campaign_id" not in result.columns:
         result = result.withColumn("campaign_id", F.lit(None).cast("string"))
@@ -353,6 +371,7 @@ def validate_marts(
     mart_marketing_funnel: DataFrame,
 ) -> Dict[str, object]:
     fact_order_revenue = get_sum(fact_orders, "total_amount")
+    campaign_order_revenue = get_sum(fact_orders.filter(F.col("campaign_sk") != UNKNOWN_KEY), "total_amount")
     campaign_mart_revenue = get_sum(mart_campaign_performance, "total_revenue")
     clv_mart_revenue = get_sum(mart_customer_lifetime_value, "total_revenue")
 
@@ -365,7 +384,9 @@ def validate_marts(
     tolerance = 0.01
 
     checks = {
-        "campaign_revenue_reconciles_to_fact_orders": abs(fact_order_revenue - campaign_mart_revenue) <= tolerance,
+        "campaign_revenue_reconciles_to_campaign_fact_orders": (
+            abs(campaign_order_revenue - campaign_mart_revenue) <= tolerance
+        ),
         "clv_revenue_reconciles_to_fact_orders": abs(fact_order_revenue - clv_mart_revenue) <= tolerance,
         "product_revenue_reconciles_to_fact_order_items": abs(fact_item_revenue - product_mart_revenue) <= tolerance,
         "campaign_spend_reconciles_to_fact_campaign_spend": abs(fact_spend - campaign_mart_spend) <= tolerance,
@@ -380,6 +401,8 @@ def validate_marts(
         "checks": checks,
         "metrics": {
             "fact_order_revenue": fact_order_revenue,
+            "campaign_fact_order_revenue": campaign_order_revenue,
+            "unknown_campaign_order_revenue": fact_order_revenue - campaign_order_revenue,
             "campaign_mart_revenue": campaign_mart_revenue,
             "clv_mart_revenue": clv_mart_revenue,
             "fact_item_revenue": fact_item_revenue,

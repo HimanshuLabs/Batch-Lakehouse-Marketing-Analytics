@@ -145,7 +145,8 @@ SELECT
 
     CASE
         WHEN o.last_order_timestamp IS NULL THEN NULL
-        ELSE CURRENT_DATE - o.last_order_timestamp::DATE
+        -- Both sides are business dates (Asia/Kolkata), like the fact date keys.
+        ELSE warehouse.business_today() - warehouse.business_date(o.last_order_timestamp)
     END AS days_since_last_order,
 
     (COALESCE(o.total_order_count, 0) >= 2) AS repeat_purchase_signal,
@@ -653,7 +654,7 @@ SELECT
     COALESCE(channel_group, 'Unknown') AS channel_group,
 
     COALESCE(campaign_id, 'UNKNOWN') AS campaign_id,
-    COALESCE(campaign_name, 'Unknown Campaign') AS campaign_name,
+    COALESCE(campaign_name, 'Unknown') AS campaign_name,
     COALESCE(campaign_type, 'Unknown') AS campaign_type,
     COALESCE(traffic_source, 'Unknown') AS traffic_source,
     COALESCE(target_segment, 'Unknown') AS target_segment,
@@ -729,7 +730,7 @@ GROUP BY
     COALESCE(channel_name, 'Unknown'),
     COALESCE(channel_group, 'Unknown'),
     COALESCE(campaign_id, 'UNKNOWN'),
-    COALESCE(campaign_name, 'Unknown Campaign'),
+    COALESCE(campaign_name, 'Unknown'),
     COALESCE(campaign_type, 'Unknown'),
     COALESCE(traffic_source, 'Unknown'),
     COALESCE(target_segment, 'Unknown');

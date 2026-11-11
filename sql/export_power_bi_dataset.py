@@ -7,7 +7,8 @@ Writes, into data/bi_exports/ by default:
       SCD2 validation            the latest run in audit.scd2_validation_results
       Silver quarantine          logs/silver_quality_report_<BATCH_DATE>/
       point-in-time facts        logs/point_in_time_fact_join_report.json
-                                 (row conservation and order totals vs lines)
+                                 (row conservation, organic orders on the
+                                 unknown campaign, order totals vs lines)
     The warehouse is read in a read-only session. A missing or empty input
     fails the task; no number is ever written by hand.
 
@@ -89,6 +90,14 @@ def build_data_quality_summary(
             f"the point-in-time fact report has no conservation counts for {stale}: "
             "it predates the conservation check; rerun point_in_time_fact_joins"
         )
+    campaign_resolutions = (
+        pit_report["facts"].get("fact_orders_scd2", {}).get("resolutions", {}).get("campaign_sk", {})
+    )
+    if "unknown_member" not in campaign_resolutions:
+        raise ValueError(
+            "the point-in-time fact report has no unknown_member count for fact_orders_scd2 campaign_sk: "
+            "it predates organic orders on the unknown campaign; rerun point_in_time_fact_joins"
+        )
     order_totals = pit_report.get("order_totals") or {}
     if "checked_orders" not in order_totals:
         raise ValueError(
@@ -147,6 +156,14 @@ def build_data_quality_summary(
             "metric_value": conservation["unaccounted_rows"],
             "status": status,
         })
+
+    # Organic orders are valid facts on the unknown campaign member; a count, not a failure.
+    rows.append({
+        "metric_group": "Point-in-Time Facts",
+        "metric_name": "Orders with no campaign (unknown campaign member): orders",
+        "metric_value": campaign_resolutions["unknown_member"],
+        "status": "PASS",
+    })
 
     status = _status(order_totals["status"] == "PASS")
     for metric_name, key in (

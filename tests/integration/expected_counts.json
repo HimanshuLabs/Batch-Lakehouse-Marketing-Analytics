@@ -38,29 +38,29 @@
     "gold_dim_customers_scd2": 501,
     "gold_dim_products_scd2": 150,
     "gold_dim_campaigns_scd2": 39,
-    "gold_fact_orders_scd2": 2097,
-    "gold_fact_order_items_scd2": 5141,
+    "gold_fact_orders_scd2": 2142,
+    "gold_fact_order_items_scd2": 5244,
     "gold_fact_campaign_spend_scd2": 1068,
-    "quarantine_fact_orders_scd2_rejects": 147,
-    "quarantine_fact_order_items_scd2_rejects": 480,
+    "quarantine_fact_orders_scd2_rejects": 102,
+    "quarantine_fact_order_items_scd2_rejects": 377,
     "quarantine_fact_campaign_spend_scd2_rejects": 51
   },
   "warehouse": {
     "warehouse.dim_customer": 505,
     "warehouse.dim_product": 152,
     "warehouse.dim_campaign": 42,
-    "warehouse.dim_date": 139,
+    "warehouse.dim_date": 137,
     "warehouse.dim_region": 799,
     "warehouse.dim_channel": 8,
-    "warehouse.fact_orders": 2097,
-    "warehouse.fact_order_items": 5141,
+    "warehouse.fact_orders": 2142,
+    "warehouse.fact_order_items": 5244,
     "warehouse.fact_campaign_spend": 1068,
     "warehouse.fact_web_events": 8880,
     "warehouse.fact_conversions": 1445,
     "marts.mart_customer_360": 500,
     "marts.mart_product_sales": 148,
     "marts.mart_campaign_performance": 39,
-    "marts.mart_revenue_daily": 137,
-    "marts.mart_marketing_funnel": 7784
+    "marts.mart_revenue_daily": 136,
+    "marts.mart_marketing_funnel": 7792
   }
 }

@@ -166,6 +166,26 @@ AS $$
     END;
 $$;
 
+-- Business dates are calendar days in Asia/Kolkata, the same as Gold (Spark
+-- derives order_date and event_date in SOURCE_TIMEZONE). Stored timestamps
+-- stay naive UTC; only the date derived from them uses IST.
+CREATE OR REPLACE FUNCTION warehouse.business_date(utc_ts TIMESTAMP)
+RETURNS DATE
+LANGUAGE SQL
+IMMUTABLE
+AS $$
+    SELECT ((utc_ts AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata')::DATE;
+$$;
+
+-- Today in the business time zone (for "days since" measures).
+CREATE OR REPLACE FUNCTION warehouse.business_today()
+RETURNS DATE
+LANGUAGE SQL
+STABLE
+AS $$
+    SELECT (now() AT TIME ZONE 'Asia/Kolkata')::DATE;
+$$;
+
 CREATE OR REPLACE FUNCTION warehouse.deterministic_sk(prefix TEXT, value TEXT)
 RETURNS BIGINT
 LANGUAGE SQL
@@ -524,6 +544,12 @@ COMMENT ON TABLE warehouse.fact_conversions IS
 
 -- ---------------------------------------------------------------------------
 -- Unknown dimension members
+--
+-- One convention: IDs and keys are 'UNKNOWN', display names and attribute
+-- labels are 'Unknown'. The lowercase 'unknown' left inside hashed natural
+-- keys (region_nk, channel_nk, deterministic_sk's NULL fallback, the spend
+-- natural key) is normalized key text, not a label: changing it would change
+-- existing region, channel and fact keys.
 -- ---------------------------------------------------------------------------
 
 INSERT INTO warehouse.dim_customer (
@@ -533,7 +559,7 @@ INSERT INTO warehouse.dim_customer (
     is_current, source_updated_at, scd_hash
 )
 VALUES (
-    0, 'UNKNOWN', 'Unknown Customer', NULL, NULL, NULL,
+    0, 'UNKNOWN', 'Unknown', NULL, NULL, NULL,
     'Unknown', 0, NULL, 'Unknown',
     FALSE, 'Unknown', 'Unknown', 'Unknown',
     TIMESTAMP '1900-01-01', TIMESTAMP '9999-12-31',
@@ -547,7 +573,7 @@ INSERT INTO warehouse.dim_product (
     effective_from, effective_to, is_current, source_updated_at, scd_hash
 )
 VALUES (
-    0, 'UNKNOWN', 'Unknown Product', 'Unknown', NULL,
+    0, 'UNKNOWN', 'Unknown', 'Unknown', NULL,
     0, 0, NULL,
     TIMESTAMP '1900-01-01', TIMESTAMP '9999-12-31',
     TRUE, NULL, 'UNKNOWN'
@@ -560,7 +586,7 @@ INSERT INTO warehouse.dim_campaign (
     budget, effective_from, effective_to, is_current, source_updated_at, scd_hash
 )
 VALUES (
-    0, 'UNKNOWN', 'Unknown Campaign', 'Unknown', 'Unknown',
+    0, 'UNKNOWN', 'Unknown', 'Unknown', 'Unknown',
     'Unknown', 'Unknown', NULL, NULL,
     0, TIMESTAMP '1900-01-01', TIMESTAMP '9999-12-31',
     TRUE, NULL, 'UNKNOWN'
@@ -1027,11 +1053,13 @@ BEGIN
                     date_trunc('quarter', d)::DATE AS quarter_start_date,
                     date_trunc('year', d)::DATE AS year_start_date
                 FROM (
+                    -- The same business-date derivation as the facts, so every
+                    -- fact date key has its dim_date row.
                     SELECT coalesce(
-                        warehouse.safe_date(r->>'order_date'),
-                        warehouse.safe_timestamp(r->>'order_timestamp')::DATE,
-                        warehouse.safe_timestamp(r->>'event_timestamp')::DATE,
-                        warehouse.safe_timestamp(r->>'event_time')::DATE,
+                        warehouse.business_date(warehouse.safe_timestamp(r->>'order_timestamp')),
+                        warehouse.business_date(warehouse.safe_timestamp(r->>'event_timestamp')),
+                        warehouse.business_date(warehouse.safe_timestamp(r->>'event_time')),
+                        warehouse.business_date(warehouse.safe_timestamp(r->>'order_date')),
                         warehouse.safe_date(r->>'spend_date'),
                         warehouse.safe_date(r->>'date'),
                         warehouse.safe_date(r->>'gold_processed_date')
@@ -1076,7 +1104,7 @@ BEGIN
                     coalesce(
                         warehouse.safe_timestamp(r->>'order_timestamp'),
                         warehouse.safe_timestamp(r->>'event_timestamp'),
-                        warehouse.safe_date(r->>'order_date')::TIMESTAMP
+                        warehouse.safe_timestamp(r->>'order_date')
                     ) AS order_ts,
                     coalesce(nullif(r->>'city', ''), nullif(r->>'home_city', ''), 'Unknown') AS city,
                     coalesce(nullif(r->>'state', ''), nullif(r->>'home_state', ''), 'Unknown') AS state,
@@ -1119,7 +1147,7 @@ BEGIN
                 b.order_id,
                 coalesce(dc.customer_sk, 0) AS customer_sk,
                 coalesce(dcamp.campaign_sk, 0) AS campaign_sk,
-                warehouse.date_sk(b.order_ts::DATE) AS order_date_sk,
+                warehouse.date_sk(warehouse.business_date(b.order_ts)) AS order_date_sk,
                 coalesce(dr.region_sk, 0) AS region_sk,
                 coalesce(dch.channel_sk, 0) AS channel_sk,
                 b.order_ts,
@@ -1205,7 +1233,7 @@ BEGIN
                     coalesce(
                         warehouse.safe_timestamp(r->>'order_timestamp'),
                         warehouse.safe_timestamp(r->>'event_timestamp'),
-                        warehouse.safe_date(r->>'order_date')::TIMESTAMP
+                        warehouse.safe_timestamp(r->>'order_date')
                     ) AS order_ts,
                     coalesce(nullif(r->>'city', ''), nullif(r->>'home_city', ''), 'Unknown') AS city,
                     coalesce(nullif(r->>'state', ''), nullif(r->>'home_state', ''), 'Unknown') AS state,
@@ -1240,7 +1268,8 @@ BEGIN
                 b.order_id,
                 coalesce(nullif(fo.customer_sk, 0), dc.customer_sk, 0) AS customer_sk,
                 coalesce(dp.product_sk, 0) AS product_sk,
-                coalesce(nullif(warehouse.date_sk(b.order_ts::DATE), 0), fo.order_date_sk, 0) AS order_date_sk,
+                -- An item is dated by its order, like its order_timestamp below.
+                coalesce(nullif(fo.order_date_sk, 0), warehouse.date_sk(warehouse.business_date(b.order_ts)), 0) AS order_date_sk,
                 -- An item without its own geography or channel resolves to the
                 -- unknown member (0), so take the order's instead.
                 coalesce(nullif(dr.region_sk, 0), fo.region_sk, 0) AS region_sk,
@@ -1610,7 +1639,7 @@ BEGIN
                     coalesce(nullif(r->>'state', ''), nullif(r->>'home_state', ''), 'Unknown') AS state,
                     coalesce(nullif(r->>'country', ''), 'Unknown') AS country,
                     coalesce(nullif(r->>'channel', ''), nullif(r->>'traffic_source', ''), nullif(r->>'source', ''), 'Unknown') AS channel_value,
-                    coalesce(nullif(r->>'event_type', ''), 'unknown') AS event_type,
+                    coalesce(nullif(r->>'event_type', ''), 'Unknown') AS event_type,
                     nullif(r->>'user_journey_stage', '') AS user_journey_stage,
                     nullif(r->>'device_type', '') AS device_type,
                     nullif(r->>'operating_system', '') AS operating_system,
@@ -1654,7 +1683,7 @@ BEGIN
                 coalesce(dc.customer_sk, 0) AS customer_sk,
                 coalesce(dp.product_sk, 0) AS product_sk,
                 coalesce(dcamp.campaign_sk, 0) AS campaign_sk,
-                warehouse.date_sk(b.event_ts::DATE) AS event_date_sk,
+                warehouse.date_sk(warehouse.business_date(b.event_ts)) AS event_date_sk,
                 coalesce(dr.region_sk, 0) AS region_sk,
                 coalesce(dch.channel_sk, 0) AS channel_sk,
                 b.event_ts,

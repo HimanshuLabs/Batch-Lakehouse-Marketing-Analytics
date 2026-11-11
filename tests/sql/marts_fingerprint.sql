@@ -1,5 +1,5 @@
 -- Fingerprint of every reporting mart: row count and md5 of the sorted rows.
--- days_since_last_order depends on CURRENT_DATE, so it is left out.
+-- days_since_last_order depends on today's date, so it is left out.
 
 SELECT 'mart_customer_360', count(*), md5(string_agg(t::TEXT, ',' ORDER BY t::TEXT))
 FROM (SELECT to_jsonb(x) - 'days_since_last_order' AS t FROM marts.mart_customer_360 x) j
