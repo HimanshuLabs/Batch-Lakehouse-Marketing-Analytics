@@ -15,7 +15,7 @@ import pytest
 
 GENERATOR = "data-generator/generate_data.py"
 RAW_FILES = ["customers.csv", "products.csv", "campaigns.csv", "orders.csv",
-             "order_items.csv", "ad_spend.csv", "web_events.json"]
+             "order_items.csv", "ad_spend.csv", "web_events.json", "generation_truth.json"]
 
 
 def raw_dir(root, batch_date):
@@ -96,3 +96,15 @@ def test_order_totals_equal_the_sum_of_their_lines(increment_batch):
     assert items.loc[0, "product_id"] == 999999
     assert items.loc[1, "quantity"] == -3
     assert items.loc[2, "line_amount"] == 1
+
+
+def test_legacy_complete_batch_without_truth_is_not_replaced(load_job, project_root):
+    module = load_job(GENERATOR, BATCH_DATE='2026-06-18')
+    folder = raw_dir(project_root, '2026-06-18')
+    folder.mkdir(parents=True)
+    for name in RAW_FILES:
+        if name != 'generation_truth.json':
+            (folder / name).write_text('existing raw data\n')
+    module.main()
+    assert not (folder / 'generation_truth.json').exists()
+    assert all(p.read_text() == 'existing raw data\n' for p in folder.iterdir())
