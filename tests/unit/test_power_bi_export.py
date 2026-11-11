@@ -28,8 +28,9 @@ def test_data_quality_summary_is_built_from_verified_checks(load_job):
         {"table_name": "orders", "status": "PASSED", "quarantine_row_count": "4", "unaccounted_row_count": "0"},
         {"table_name": "campaigns", "status": "FAILED", "quarantine_row_count": "6", "unaccounted_row_count": "2"},
     ]
-    pit_report = {"facts": {"fact_orders_scd2": {"conservation": {
-        "status": "PASS", "rejected_rows": 147, "unaccounted_rows": 0}}},
+    pit_report = {"facts": {"fact_orders_scd2": {
+        "conservation": {"status": "PASS", "rejected_rows": 147, "unaccounted_rows": 0},
+        "resolutions": {"campaign_sk": {"in_range": 2052, "unknown_member": 45}}}},
         "order_totals": {"status": "PASS", "checked_orders": 1900, "mismatched_orders": 0,
                          "excluded_incomplete_orders": 197, "orders_without_bronze_items": 0}}
 
@@ -46,6 +47,7 @@ def test_data_quality_summary_is_built_from_verified_checks(load_job):
         ("Silver Quarantine", "Unaccounted rows: orders", 0, "PASS"),
         ("Point-in-Time Facts", "Rejected rows: fact_orders_scd2", 147, "PASS"),
         ("Point-in-Time Facts", "Unaccounted rows: fact_orders_scd2", 0, "PASS"),
+        ("Point-in-Time Facts", "Orders with no campaign (unknown campaign member): orders", 45, "PASS"),
         ("Point-in-Time Facts", "Order totals checked: orders", 1900, "PASS"),
         ("Point-in-Time Facts", "Order totals not equal to sum of lines: orders", 0, "PASS"),
         ("Point-in-Time Facts", "Order totals excluded, incomplete: orders", 197, "PASS"),
@@ -73,7 +75,8 @@ def test_data_quality_summary_reports_the_order_totals_check(load_job):
     scd2_validation = [{"check_name": "v", "status": "PASS", "failed_row_count": 0}]
     silver_report = [{"table_name": "orders", "status": "PASSED", "quarantine_row_count": "4",
                       "unaccounted_row_count": "0"}]
-    facts = {"fact_orders_scd2": {"conservation": {"status": "PASS", "rejected_rows": 0, "unaccounted_rows": 0}}}
+    facts = {"fact_orders_scd2": {"conservation": {"status": "PASS", "rejected_rows": 0, "unaccounted_rows": 0},
+                                  "resolutions": {"campaign_sk": {"unknown_member": 0}}}}
     failed = {"status": "FAIL", "checked_orders": 10, "mismatched_orders": 2,
               "excluded_incomplete_orders": 3, "orders_without_bronze_items": 0}
 
@@ -112,3 +115,30 @@ def test_data_quality_summary_file_uses_unix_line_endings(load_job, tmp_path):
         "SCD2 Validation,check_a,0,PASS",
         "SCD2 Validation,check_b,3,FAIL",
     ]
+
+
+def test_data_quality_summary_counts_organic_orders_on_the_unknown_campaign(load_job):
+    export = load_job(EXPORT_JOB, BATCH_DATE="2026-06-18")
+    reconciliation = [{"check_name": "c", "status": "PASS", "count_difference": 0, "amount_difference": None}]
+    scd2_validation = [{"check_name": "v", "status": "PASS", "failed_row_count": 0}]
+    silver_report = [{"table_name": "orders", "status": "PASSED", "quarantine_row_count": "4",
+                      "unaccounted_row_count": "0"}]
+    conservation = {"status": "PASS", "rejected_rows": 0, "unaccounted_rows": 0}
+    order_totals = {"status": "PASS", "checked_orders": 1, "mismatched_orders": 0,
+                    "excluded_incomplete_orders": 0, "orders_without_bronze_items": 0}
+
+    report = {"facts": {"fact_orders_scd2": {"conservation": conservation,
+                                             "resolutions": {"campaign_sk": {"unknown_member": 45}}}},
+              "order_totals": order_totals}
+    rows = export.build_data_quality_summary(reconciliation, scd2_validation, silver_report, report)
+    organic = [r for r in rows if r["metric_name"] == "Orders with no campaign (unknown campaign member): orders"]
+    assert organic == [{"metric_group": "Point-in-Time Facts",
+                        "metric_name": "Orders with no campaign (unknown campaign member): orders",
+                        "metric_value": 45, "status": "PASS"}]
+
+    # A report from before organic orders were kept has no unknown_member count: stale.
+    stale = {"facts": {"fact_orders_scd2": {"conservation": conservation,
+                                            "resolutions": {"campaign_sk": {"in_range": 1, "no_key": 45}}}},
+             "order_totals": order_totals}
+    with pytest.raises(ValueError, match="unknown_member"):
+        export.build_data_quality_summary(reconciliation, scd2_validation, silver_report, stale)

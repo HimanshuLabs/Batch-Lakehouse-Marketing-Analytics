@@ -70,8 +70,8 @@ LIMIT 50;
 -- ============================================================
 
 SELECT
-    COALESCE(customer_segment, 'unknown') AS customer_segment,
-    COALESCE(loyalty_tier, 'unknown') AS loyalty_tier,
+    COALESCE(customer_segment, 'Unknown') AS customer_segment,
+    COALESCE(loyalty_tier, 'Unknown') AS loyalty_tier,
     COUNT(*) AS customer_count,
     SUM(total_orders) AS total_orders,
     SUM(total_revenue) AS total_revenue,
@@ -79,8 +79,8 @@ SELECT
     AVG(customer_lifetime_days) AS avg_customer_lifetime_days
 FROM read_parquet('data/gold/mart_customer_lifetime_value_scd2/*.parquet')
 GROUP BY
-    COALESCE(customer_segment, 'unknown'),
-    COALESCE(loyalty_tier, 'unknown')
+    COALESCE(customer_segment, 'Unknown'),
+    COALESCE(loyalty_tier, 'Unknown')
 ORDER BY total_revenue DESC;
 
 
@@ -109,16 +109,16 @@ LIMIT 50;
 -- ============================================================
 
 SELECT
-    COALESCE(category, 'unknown') AS category,
-    COALESCE(brand, 'unknown') AS brand,
+    COALESCE(category, 'Unknown') AS category,
+    COALESCE(brand, 'Unknown') AS brand,
     COUNT(*) AS product_count,
     SUM(units_sold) AS units_sold,
     SUM(total_revenue) AS total_revenue,
     AVG(avg_selling_price) AS avg_selling_price
 FROM read_parquet('data/gold/mart_product_performance_scd2/*.parquet')
 GROUP BY
-    COALESCE(category, 'unknown'),
-    COALESCE(brand, 'unknown')
+    COALESCE(category, 'Unknown'),
+    COALESCE(brand, 'Unknown')
 ORDER BY total_revenue DESC;
 
 

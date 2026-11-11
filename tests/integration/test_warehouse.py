@@ -144,6 +144,89 @@ def test_region_and_channel_keys_are_hashes_of_their_natural_keys():
     assert bad == []
 
 
+def pit_report() -> dict:
+    return json.loads((PROJECT_ROOT / "logs" / "point_in_time_fact_join_report.json").read_text(encoding="utf-8"))
+
+
+def test_organic_orders_are_on_the_unknown_campaign_not_rejected():
+    import duckdb
+
+    rejects = PROJECT_ROOT / "data" / "quarantine" / "fact_orders_scd2_rejects"
+    null_campaign_rejects = duckdb.sql(
+        f"select count(*) from read_parquet('{rejects}/**/*.parquet', hive_partitioning=false, union_by_name=true) "
+        "where reject_reason like '%campaign_id is NULL%'"
+    ).fetchone()[0] if any(rejects.rglob("*.parquet")) else 0
+    assert null_campaign_rejects == 0
+
+    organic = pit_report()["facts"]["fact_orders_scd2"]["resolutions"]["campaign_sk"]["unknown_member"]
+    assert organic > 0, "the sample data has organic orders; none reached the facts"
+    # The warehouse keeps them on the unknown campaign member (campaign_sk 0).
+    warehouse_unknown = int(sql(
+        "select count(*) from warehouse.fact_orders fo "
+        "join staging.stg_gold_fact_orders_scd2 s on s.order_id::TEXT = fo.order_id "
+        "where s.campaign_id is null and fo.campaign_sk = 0"
+    )[0][0])
+    assert warehouse_unknown == organic
+
+
+def test_unknown_members_use_one_label():
+    # The dbt singular test, run against the warehouse tables and marts.
+    query = (PROJECT_ROOT / "dbt" / "tests" / "assert_unknown_members_use_one_label.sql").read_text(encoding="utf-8")
+    for model, relation in (("dim_customer", "warehouse.dim_customer"), ("dim_product", "warehouse.dim_product"),
+                            ("dim_campaign", "warehouse.dim_campaign"),
+                            ("mart_marketing_funnel", "marts.mart_marketing_funnel")):
+        query = query.replace("{{ ref('%s') }}" % model, relation)
+    assert "{{" not in query
+    assert sql(query) == []
+
+    spellings = sql(
+        "select distinct v from ("
+        " select customer_id as v from warehouse.dim_customer where customer_sk = 0"
+        " union all select customer_name from warehouse.dim_customer where customer_sk = 0"
+        " union all select product_id from warehouse.dim_product where product_sk = 0"
+        " union all select product_name from warehouse.dim_product where product_sk = 0"
+        " union all select campaign_id from warehouse.dim_campaign where campaign_sk = 0"
+        " union all select campaign_name from warehouse.dim_campaign where campaign_sk = 0"
+        " union all select channel_name from warehouse.dim_channel where channel_sk = 0"
+        " union all select city from warehouse.dim_region where region_sk = 0"
+        " union all select campaign_name from marts.mart_marketing_funnel where campaign_id = 'UNKNOWN'"
+        ") labels"
+    )
+    # Compared as a set: ORDER BY follows the database collation.
+    assert {row[0] for row in spellings} == {"UNKNOWN", "Unknown"}
+
+
+def test_business_dates_are_ist_dates_like_gold():
+    # Gold derives order_date in Asia/Kolkata; the warehouse date key must agree
+    # for every order, including those between 00:00 and 05:30 IST, whose UTC
+    # date is the day before.
+    mismatched = sql(
+        "select fo.order_id, fo.order_date_sk, g.order_date from warehouse.fact_orders fo "
+        "join staging.stg_gold_fact_orders g on g.order_id::TEXT = fo.order_id "
+        "where fo.order_date_sk <> warehouse.date_sk(g.order_date::DATE)"
+    )
+    assert mismatched == []
+    early = int(sql(
+        "select count(*) from warehouse.fact_orders "
+        "where ((order_timestamp at time zone 'UTC') at time zone 'Asia/Kolkata')::TIME < TIME '05:30'"
+    )[0][0])
+    assert early > 0, "no order between 00:00 and 05:30 IST to check"
+    # Items, web events and conversions use the same business date.
+    assert sql(
+        "select count(*) from warehouse.fact_order_items foi join warehouse.fact_orders fo using (order_sk) "
+        "where foi.order_date_sk <> fo.order_date_sk"
+    ) == [["0"]]
+    assert sql(
+        "select count(*) from warehouse.fact_web_events "
+        "where event_date_sk <> warehouse.date_sk("
+        "((event_timestamp at time zone 'UTC') at time zone 'Asia/Kolkata')::DATE)"
+    ) == [["0"]]
+    assert sql(
+        "select count(*) from warehouse.fact_conversions c join warehouse.fact_web_events e using (event_sk) "
+        "where c.conversion_date_sk <> e.event_date_sk"
+    ) == [["0"]]
+
+
 def test_golden_counts():
     expected = json.loads(EXPECTED_COUNTS.read_text(encoding="utf-8"))
     actual = collect_counts()

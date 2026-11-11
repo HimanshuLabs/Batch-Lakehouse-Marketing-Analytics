@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List
 
-from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import Column, DataFrame, SparkSession
 from pyspark.sql import functions as F
 
 
@@ -49,15 +50,34 @@ OUTPUT_PATHS = {
     "fact_campaign_spend": GOLD_DIR / "fact_campaign_spend_scd2",
 }
 
-# Every fact key is resolved into exactly one of these. Only in_range facts
-# are valid; the others are rejected with an exact per-key reason.
+# Every fact key is resolved into exactly one of these. in_range and
+# unknown_member facts are valid; the others are rejected with an exact
+# per-key reason.
 #   in_range              a dimension version covers the fact time
-#   no_key                the fact key is NULL
+#   unknown_member        the fact key is NULL and the join maps NULL to the
+#                         unknown member (only an order's campaign: an organic
+#                         order has no campaign); the surrogate key is 'UNKNOWN'
+#   no_key                the fact key is NULL (any other join)
 #   key_not_in_dimension  the key is in no dimension version
 #   no_version_for_time   the key exists but no version covers the fact time.
 #                         Versions run from 1900-01-01 to 9999-12-31 without
 #                         gaps, so this means a corrupt dimension: the job fails.
-RESOLUTIONS = ["in_range", "no_key", "key_not_in_dimension", "no_version_for_time"]
+RESOLUTIONS = ["in_range", "unknown_member", "no_key", "key_not_in_dimension", "no_version_for_time"]
+VALID_RESOLUTIONS = ("in_range", "unknown_member")
+
+# Business dates are Asia/Kolkata calendar days, like Gold (which derives them
+# in SOURCE_TIMEZONE). The session stays UTC and timestamps stay UTC; only a
+# date derived from a timestamp goes through business_date.
+BUSINESS_TIMEZONE = os.environ.get("SOURCE_TIMEZONE", "Asia/Kolkata")
+
+
+def business_date(timestamp: Column) -> Column:
+    """The calendar day of a UTC timestamp in BUSINESS_TIMEZONE."""
+    return F.to_date(F.from_utc_timestamp(timestamp, BUSINESS_TIMEZONE))
+
+# The unknown member's key and display label, the same as the warehouse's.
+UNKNOWN_KEY = "UNKNOWN"
+UNKNOWN_LABEL = "Unknown"
 
 ORDER_NOT_IN_FACT_REASON = "order not in fact_orders_scd2"
 
@@ -131,8 +151,8 @@ def normalize_orders(df: DataFrame) -> DataFrame:
     result = add_column_from_candidates(result, "campaign_id", ["campaign"])
     result = add_column_from_candidates(result, "total_amount", ["cart_value", "discounted_price"], 0.0)
     result = add_column_from_candidates(result, "order_status", ["event_type"], "completed")
-    result = add_column_from_candidates(result, "payment_method", [], "unknown")
-    result = add_column_from_candidates(result, "region", ["state", "home_state", "city", "home_city"], "unknown")
+    result = add_column_from_candidates(result, "payment_method", [], UNKNOWN_LABEL)
+    result = add_column_from_candidates(result, "region", ["state", "home_state", "city", "home_city"], UNKNOWN_LABEL)
 
     result = result.withColumn("order_date", F.to_timestamp(F.col("order_date")))
     result = result.withColumn("total_amount", F.col("total_amount").cast("double"))
@@ -184,7 +204,7 @@ def normalize_ad_spend(df: DataFrame) -> DataFrame:
     result = add_column_from_candidates(result, "spend_id", ["event_id"])
     result = add_column_from_candidates(result, "campaign_id", ["campaign"])
     result = add_column_from_candidates(result, "spend_date", ["event_timestamp", "event_time"])
-    result = add_column_from_candidates(result, "channel", ["traffic_source"], "unknown")
+    result = add_column_from_candidates(result, "channel", ["traffic_source"], UNKNOWN_LABEL)
     result = add_column_from_candidates(result, "impressions", [], 0)
     result = add_column_from_candidates(result, "clicks", [], 0)
     result = add_column_from_candidates(result, "spend_amount", ["total_amount", "cart_value"], 0.0)
@@ -208,10 +228,12 @@ def point_in_time_join(
     dim_key: str,
     fact_timestamp: str,
     surrogate_key: str,
+    null_key_to_unknown_member: bool = False,
 ) -> DataFrame:
     # Only a version whose range covers the fact time is used; there is no
     # fallback to the current version. <surrogate_key>_resolution records
-    # how the key resolved (see RESOLUTIONS).
+    # how the key resolved (see RESOLUTIONS). With null_key_to_unknown_member
+    # a NULL fact key takes the unknown member's key instead of no_key.
     prepared_fact = fact_df.drop(surrogate_key)
 
     prepared_dim = dim_df.select(
@@ -237,6 +259,8 @@ def point_in_time_join(
         .select("f.*", F.col(f"d.{surrogate_key}").alias(surrogate_key))
     )
 
+    null_key_resolution = "unknown_member" if null_key_to_unknown_member else "no_key"
+
     return (
         historical_join.alias("f")
         .join(
@@ -246,10 +270,15 @@ def point_in_time_join(
         )
         .withColumn(
             resolution_column(surrogate_key),
-            F.when(F.col(f"f.{fact_key}").isNull(), F.lit("no_key"))
+            F.when(F.col(f"f.{fact_key}").isNull(), F.lit(null_key_resolution))
             .when(F.col(surrogate_key).isNotNull(), F.lit("in_range"))
             .when(F.col(f"k.known_{dim_key}").isNotNull(), F.lit("no_version_for_time"))
             .otherwise(F.lit("key_not_in_dimension")),
+        )
+        .withColumn(
+            surrogate_key,
+            F.when(F.col(resolution_column(surrogate_key)) == "unknown_member", F.lit(UNKNOWN_KEY))
+            .otherwise(F.col(surrogate_key)),
         )
         .drop(f"known_{dim_key}")
     )
@@ -296,13 +325,13 @@ def split_valid_and_rejected_facts(
     resolved_keys: List[tuple[str, str, str, str]],
 ) -> tuple[DataFrame, DataFrame]:
     # resolved_keys: (surrogate_key, fact_key, fact_timestamp, dim_name).
-    # Valid facts have every key in_range and keep their original schema;
-    # rejects keep the resolution columns and name every failing key.
+    # Valid facts have every key in VALID_RESOLUTIONS and keep their original
+    # schema; rejects keep the resolution columns and name every failing key.
     resolution_columns = [resolution_column(key[0]) for key in resolved_keys]
 
     all_in_range = F.lit(True)
     for column in resolution_columns:
-        all_in_range = all_in_range & (F.col(column) == "in_range")
+        all_in_range = all_in_range & F.col(column).isin(*VALID_RESOLUTIONS)
 
     valid = df.filter(all_in_range).drop(*resolution_columns)
 
@@ -497,6 +526,8 @@ def main() -> None:
             surrogate_key="customer_sk",
         )
 
+        # An organic order (no campaign) is a valid fact on the unknown
+        # campaign member, not a reject.
         fact_orders = point_in_time_join(
             fact_df=fact_orders,
             dim_df=campaigns_dim,
@@ -504,9 +535,10 @@ def main() -> None:
             dim_key="campaign_id",
             fact_timestamp="order_date",
             surrogate_key="campaign_sk",
+            null_key_to_unknown_member=True,
         )
 
-        fact_orders = fact_orders.withColumn("order_year", F.year(F.col("order_date"))).cache()
+        fact_orders = fact_orders.withColumn("order_year", F.year(business_date(F.col("order_date")))).cache()
 
         orders_resolutions = {
             "customer_sk": resolution_counts(fact_orders, "customer_sk"),
@@ -564,7 +596,7 @@ def main() -> None:
         order_items_without_order = (
             order_items_joined
             .filter(F.col("order_date").isNull())
-            .withColumn("order_year", F.year(F.col("order_date")))
+            .withColumn("order_year", F.year(business_date(F.col("order_date"))))
             .withColumn("reject_reason", F.lit(ORDER_NOT_IN_FACT_REASON))
         )
 
@@ -579,7 +611,7 @@ def main() -> None:
 
         fact_order_items = fact_order_items.withColumn(
             "order_year",
-            F.year(F.col("order_date")),
+            F.year(business_date(F.col("order_date"))),
         ).cache()
 
         order_items_resolutions = {

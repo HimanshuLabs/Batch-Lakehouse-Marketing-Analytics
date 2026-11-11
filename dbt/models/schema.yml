@@ -298,6 +298,12 @@ models:
       - name: channel_name
         tests:
           - not_null
+      - name: channel_group
+        tests:
+          # The unknown channel is 'Unknown': the one display label for unknown members.
+          - accepted_values:
+              arguments:
+                values: ['Search', 'Social', 'Email', 'Direct', 'Other', 'Unknown']
       - name: campaign_id
         tests:
           - not_null
