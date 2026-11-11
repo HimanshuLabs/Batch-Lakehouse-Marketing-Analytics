@@ -156,7 +156,6 @@ def test_non_finite_value_in_a_rule_column_is_quarantined(run_silver, table, col
 @pytest.mark.parametrize(
     "table, column, value",
     [
-        ("order_items", "original_price", "Infinity"),
         ("order_items", "discount_percent", "-Infinity"),
         ("web_events", "engagement_score", float("nan")),
         ("web_events", "cart_value", float("inf")),

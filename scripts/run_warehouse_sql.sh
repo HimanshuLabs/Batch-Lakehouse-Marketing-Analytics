@@ -4,6 +4,7 @@ set -euo pipefail
 SQL_FILE="${1:-sql/warehouse/create_schemas.sql}"
 
 RUN_MODE="${RUN_MODE:-docker}"
+P2_RUN_ID="${P2_RUN_ID:-warehouse-$(date +%s%N)-$$}"
 
 PGCONTAINER="${PGCONTAINER:-project2_postgres}"
 PGHOST="${PGHOST:-localhost}"
@@ -40,8 +41,8 @@ if [[ "$RUN_MODE" == "docker" ]]; then
   fi
 
   docker exec -i "$PGCONTAINER" \
-    psql -v ON_ERROR_STOP=1 -U "$PGUSER" -d "$PGDATABASE" \
-    < "$SQL_FILE" \
+    psql -v ON_ERROR_STOP=1 -v pipeline_run_id="${P2_RUN_ID}" -U "$PGUSER" -d "$PGDATABASE" \
+    < <(printf "SELECT set_config('p2.run_id', :'pipeline_run_id', false);\n"; cat "$SQL_FILE") \
     2>&1 | tee "$LOG_FILE"
 
 elif [[ "$RUN_MODE" == "host" ]]; then
@@ -60,7 +61,8 @@ elif [[ "$RUN_MODE" == "host" ]]; then
     --dbname "$PGDATABASE" \
     --username "$PGUSER" \
     --set ON_ERROR_STOP=1 \
-    --file "$SQL_FILE" \
+    --set pipeline_run_id="${P2_RUN_ID}" \
+    --file <(printf "SELECT set_config('p2.run_id', :'pipeline_run_id', false);\n"; cat "$SQL_FILE") \
     2>&1 | tee "$LOG_FILE"
 
 else

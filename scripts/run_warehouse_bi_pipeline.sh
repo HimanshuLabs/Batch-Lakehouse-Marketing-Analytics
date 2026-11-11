@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export P2_RUN_ID="${P2_RUN_ID:-warehouse-$(date +%s%N)-$$}"
 
 echo "==> Building warehouse facts and dimensions"
 env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/create_warehouse_tables.sql

@@ -300,6 +300,22 @@ def resolution_counts(df: DataFrame, surrogate_key: str) -> Dict[str, int]:
     return counts
 
 
+def fact_resolution_counts(df: DataFrame, surrogate_keys: List[str]) -> Dict[str, Dict[str, int]]:
+    """Resolution counts over the rows that become facts only.
+
+    resolution_counts covers every Silver row, rejects included, so it accounts
+    for each row (a corrupt dimension shows as no_version_for_time). A row is a
+    fact only when every key resolved validly, so for example an organic order
+    rejected for an unknown customer is an unknown_member in resolutions but not
+    a fact; fact_resolutions counts what reaches Gold and the warehouse.
+    """
+    all_valid = F.lit(True)
+    for surrogate_key in surrogate_keys:
+        all_valid = all_valid & F.col(resolution_column(surrogate_key)).isin(*VALID_RESOLUTIONS)
+    facts = df.filter(all_valid)
+    return {surrogate_key: resolution_counts(facts, surrogate_key) for surrogate_key in surrogate_keys}
+
+
 def write_table(df: DataFrame, output_path: Path, partition_column: str | None = None) -> None:
     writer = df.write.mode("overwrite")
 
@@ -544,6 +560,7 @@ def main() -> None:
             "customer_sk": resolution_counts(fact_orders, "customer_sk"),
             "campaign_sk": resolution_counts(fact_orders, "campaign_sk"),
         }
+        orders_fact_resolutions = fact_resolution_counts(fact_orders, ["customer_sk", "campaign_sk"])
 
         valid_fact_orders, rejected_fact_orders = split_valid_and_rejected_facts(
             fact_orders,
@@ -621,6 +638,7 @@ def main() -> None:
             },
             "product_sk": resolution_counts(fact_order_items, "product_sk"),
         }
+        order_items_fact_resolutions = fact_resolution_counts(fact_order_items, ["product_sk"])
 
         valid_fact_order_items, rejected_fact_order_items = split_valid_and_rejected_facts(
             fact_order_items,
@@ -675,6 +693,7 @@ def main() -> None:
         campaign_spend_resolutions = {
             "campaign_sk": resolution_counts(fact_campaign_spend, "campaign_sk"),
         }
+        campaign_spend_fact_resolutions = fact_resolution_counts(fact_campaign_spend, ["campaign_sk"])
 
         valid_fact_campaign_spend, rejected_fact_campaign_spend = split_valid_and_rejected_facts(
             fact_campaign_spend,
@@ -718,19 +737,19 @@ def main() -> None:
         facts = {
             "fact_orders_scd2": (
                 orders_source_path, "fact_orders", orders_validation,
-                rejected_fact_orders, orders_resolutions,
+                rejected_fact_orders, orders_resolutions, orders_fact_resolutions,
             ),
             "fact_order_items_scd2": (
                 order_items_source_path, "fact_order_items", order_items_validation,
-                rejected_fact_order_items, order_items_resolutions,
+                rejected_fact_order_items, order_items_resolutions, order_items_fact_resolutions,
             ),
             "fact_campaign_spend_scd2": (
                 ad_spend_source_path, "fact_campaign_spend", campaign_spend_validation,
-                rejected_fact_campaign_spend, campaign_spend_resolutions,
+                rejected_fact_campaign_spend, campaign_spend_resolutions, campaign_spend_fact_resolutions,
             ),
         }
 
-        for fact_name, (source_path, output_key, validation, rejected, resolutions) in facts.items():
+        for fact_name, (source_path, output_key, validation, rejected, resolutions, fact_resolutions) in facts.items():
             rejected_rows = read_written(spark, QUARANTINE_PATHS[output_key], rejected).count()
             fact_conservation = conservation(
                 silver_rows[fact_name],
@@ -748,6 +767,7 @@ def main() -> None:
                 "rejected_path": str(QUARANTINE_PATHS[output_key]),
                 "rejected_rows": rejected_rows,
                 "resolutions": resolutions,
+                "fact_resolutions": fact_resolutions,
                 "conservation": fact_conservation,
             }
 

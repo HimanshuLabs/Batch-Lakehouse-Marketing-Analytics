@@ -25,6 +25,7 @@ DEFAULT_ENV = {
         "DBT_BIN",
         f"{PROJECT_ROOT}/venv-dbt/bin/dbt",
     ),
+    "P2_RUN_ID": "{{ run_id }}",
     "BATCH_DATE": "{{ (dag_run.logical_date or dag_run.run_after) | ds }}",
 }
 

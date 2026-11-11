@@ -954,7 +954,7 @@ HAVING COUNT(*) > 1;
 
 WITH run_context AS (
     SELECT
-        to_char(clock_timestamp(), 'YYYYMMDDHH24MISSMS') AS validation_run_id,
+        NULLIF(current_setting('p2.run_id', true), '') AS validation_run_id,
         clock_timestamp() AS checked_at
 ),
 validation_counts AS (

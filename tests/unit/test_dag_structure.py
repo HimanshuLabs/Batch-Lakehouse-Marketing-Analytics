@@ -102,7 +102,8 @@ def test_the_dag_has_every_task_in_order(dag):
 
 def test_every_task_gets_one_environment_with_the_run_batch_date(dag):
     module, recorder = dag
-    assert set(module.DEFAULT_ENV) == {"PROJECT_ROOT", "PROJECT_PYTHON", "DBT_BIN", "BATCH_DATE"}
+    assert set(module.DEFAULT_ENV) == {"PROJECT_ROOT", "PROJECT_PYTHON", "DBT_BIN", "BATCH_DATE", "P2_RUN_ID"}
+    assert module.DEFAULT_ENV["P2_RUN_ID"] == "{{ run_id }}"
     assert module.DEFAULT_ENV["BATCH_DATE"] == BATCH_DATE_TEMPLATE
     without_env = [task for task, kwargs in recorder.tasks.items() if kwargs.get("env") is not module.DEFAULT_ENV]
     assert without_env == [], f"tasks without DEFAULT_ENV: {without_env}"

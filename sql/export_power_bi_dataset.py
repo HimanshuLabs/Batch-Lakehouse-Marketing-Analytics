@@ -102,13 +102,15 @@ def build_data_quality_summary(
             f"the point-in-time fact report has no conservation counts for {stale}: "
             "it predates the conservation check; rerun point_in_time_fact_joins"
         )
+    # Counted over the orders that became facts: an organic order rejected for
+    # another key (an unknown customer) is not an order on the unknown campaign.
     campaign_resolutions = (
-        pit_report["facts"].get("fact_orders_scd2", {}).get("resolutions", {}).get("campaign_sk", {})
+        pit_report["facts"].get("fact_orders_scd2", {}).get("fact_resolutions", {}).get("campaign_sk", {})
     )
     if "unknown_member" not in campaign_resolutions:
         raise ValueError(
-            "the point-in-time fact report has no unknown_member count for fact_orders_scd2 campaign_sk: "
-            "it predates organic orders on the unknown campaign; rerun point_in_time_fact_joins"
+            "the point-in-time fact report has no fact_resolutions unknown_member count for fact_orders_scd2 "
+            "campaign_sk: it predates counting organic orders among the facts; rerun point_in_time_fact_joins"
         )
     if web_event_rejects is None:
         raise ValueError("no web-event reject counts: the warehouse predates audit.fact_web_events_rejects; rebuild it")
@@ -237,15 +239,31 @@ def read_warehouse_checks() -> tuple[list[dict], list[dict], dict | None]:
         row_factory=dict_row,
     )
     with connection:
-        reconciliation = connection.execute(
-            "SELECT check_name, status, count_difference, amount_difference "
-            "FROM audit.v_latest_reconciliation_report"
-        ).fetchall()
-        scd2_validation = connection.execute(
-            "SELECT check_name, status, failed_row_count FROM audit.scd2_validation_results "
-            "WHERE validation_run_id = (SELECT validation_run_id FROM audit.scd2_validation_results "
-            "ORDER BY checked_at DESC LIMIT 1)"
-        ).fetchall()
+        run_id = os.environ.get("P2_RUN_ID")
+        reports = []
+        for table, run_column, columns in (
+            ("reconciliation_report", "reconciliation_run_id",
+             "check_name, status, count_difference, amount_difference"),
+            ("mart_validation_report", "validation_run_id",
+             "check_name, status, NULL AS count_difference, difference AS amount_difference"),
+            ("scd2_validation_results", "validation_run_id",
+             "check_name, status, failed_row_count"),
+        ):
+            # A DAG export must use that DAG run, never an older successful audit.
+            if run_id:
+                checks = connection.execute(
+                    f"SELECT {columns} FROM audit.{table} WHERE {run_column} = %s", (run_id,),
+                ).fetchall()
+            else:
+                checks = connection.execute(
+                    f"SELECT {columns} FROM audit.{table} WHERE {run_column} = "
+                    f"(SELECT {run_column} FROM audit.{table} ORDER BY checked_at DESC LIMIT 1)"
+                ).fetchall()
+            if not checks:
+                raise ValueError(f"No {table} checks for run {run_id or 'latest'}")
+            reports.append(checks)
+        reconciliation = reports[0] + reports[1]
+        scd2_validation = reports[2]
         web_event_rejects = None
         if connection.execute("SELECT to_regclass('audit.fact_web_events_rejects') IS NOT NULL AS present").fetchone()["present"]:
             web_event_rejects = dict(connection.execute(
@@ -304,6 +322,15 @@ def main() -> None:
 
     try:
         # Inside try, so a failed connect still writes a FAIL report.
+        reconciliation, scd2_validation, web_event_rejects = read_warehouse_checks()
+        rows = build_data_quality_summary(
+            reconciliation, scd2_validation, read_silver_report(BATCH_DATE), read_pit_report(),
+            web_event_rejects,
+        )
+        failures = [row for row in rows if row.get("status") != "PASS"]
+        if failures:
+            report["data_quality_summary"] = rows
+            raise ValueError(f"Data quality summary contains {len(failures)} non-PASS checks")
         con = duckdb.connect(database=":memory:")
         for name, query in EXPORTS.items():
             output_path = export_dir / f"{name}.csv"
@@ -338,11 +365,6 @@ def main() -> None:
         summary_path = export_dir / f"{DATA_QUALITY_SUMMARY}.csv"
         print(f"Exporting {DATA_QUALITY_SUMMARY} -> {summary_path}")
         try:
-            reconciliation, scd2_validation, web_event_rejects = read_warehouse_checks()
-            rows = build_data_quality_summary(
-                reconciliation, scd2_validation, read_silver_report(BATCH_DATE), read_pit_report(),
-                web_event_rejects,
-            )
             write_summary(rows, summary_path)
             report["exports"][DATA_QUALITY_SUMMARY] = {
                 "status": "PASS",

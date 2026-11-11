@@ -13,6 +13,9 @@ its lines; orders that lost an item are excluded and counted, not failed.
 8b (p2-data-v2): an organic order (NULL campaign_id) was rejected; it now
 resolves to the unknown campaign member ('UNKNOWN') and is counted as its own
 resolution. NULL customer and product keys are still rejected.
+F3 data (p2-data-v2): an organic order rejected for an unknown customer was
+counted as an order on the unknown campaign; fact_resolutions counts only the
+orders that become facts, which the warehouse and data_quality_summary report.
 """
 from __future__ import annotations
 
@@ -231,6 +234,26 @@ def test_the_job_keeps_organic_orders_on_the_unknown_campaign(spark, pit, projec
     campaign = report["facts"]["fact_orders_scd2"]["resolutions"]["campaign_sk"]
     assert (campaign["in_range"], campaign["unknown_member"], campaign["no_key"]) == (1, 1, 0)
     assert report["facts"]["fact_orders_scd2"]["rejected_rows"] == 0
+
+
+def test_organic_orders_are_counted_among_the_facts_not_among_the_rejects(spark, pit, project_root, no_stop):
+    # Order 3 is organic but its customer is not in the dimension (for example
+    # one quarantined in Silver): a reject. It must not be counted as an order on
+    # the unknown campaign, which the warehouse and data_quality_summary report.
+    write_project(spark, project_root,
+                  orders=[(1, 5, 4, "2026-06-01 10:00:00"), (2, 5, None, "2026-06-01 10:00:00"),
+                          (3, 999999, None, "2026-06-01 10:00:00")],
+                  items=[(10, 1, 4), (20, 2, 4), (30, 3, 4)])
+    pit.main()
+
+    facts = spark.read.parquet(str(project_root / "data" / "gold" / "fact_orders_scd2"))
+    organic_facts = facts.filter(F.col("campaign_sk") == "UNKNOWN").count()
+    report = json.loads((project_root / "logs" / "point_in_time_fact_join_report.json").read_text())
+    orders = report["facts"]["fact_orders_scd2"]
+    assert orders["resolutions"]["campaign_sk"]["unknown_member"] == 2, "every Silver row stays accounted for"
+    assert orders["fact_resolutions"]["campaign_sk"]["unknown_member"] == organic_facts == 1
+    assert orders["fact_resolutions"]["customer_sk"]["key_not_in_dimension"] == 0
+    assert sum(orders["fact_resolutions"]["campaign_sk"].values()) == orders["conservation"]["valid_rows"]
 
 
 def test_the_job_checks_order_totals_and_excludes_incomplete_orders(spark, pit, project_root, no_stop):
