@@ -25,13 +25,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BATCH_DATE = date.fromisoformat(os.environ.get("BATCH_DATE") or date.today().isoformat()).isoformat()
 RAW_DIR = PROJECT_ROOT / "data" / "raw" / f"batch_date={BATCH_DATE}"
 
-# All master-data dates are relative to this fixed anchor, never to the clock.
-# It is the first batch date. BATCH_DATE=2026-05-18 makes the same random draws
-# as the original generator, so customers, products, campaigns and ad_spend
-# match the original raw batch byte for byte (web events apart from the random
-# UUIDs). orders.csv and order_items.csv differ by design: every order has at
-# least one item and its cart_value is the sum of its items (see
-# generate_orders_and_items).
+# Master data dates are anchored, never based on execution time. Source IDs and
+# existing key functions stay unchanged; regenerated facts have new semantics.
 ANCHOR_DATE = date(2026, 5, 18)
 BATCH_DAY = date.fromisoformat(BATCH_DATE)
 BATCH_INDEX = (BATCH_DAY - ANCHOR_DATE).days
@@ -43,7 +38,7 @@ IS_ANCHOR_BATCH = BATCH_INDEX == 0
 ID_BLOCK = 100_000
 INT32_MAX = 2_147_483_647
 
-# The anchor batch keeps the original volumes over a 120-day window. Later
+# The anchor batch uses the original volume ceilings over a 120-day window. Later
 # batches are increments over FACT_WINDOW_DAYS with volumes scaled to the same
 # daily rate.
 FACT_WINDOW_DAYS = 14
@@ -73,8 +68,11 @@ RAW_FILES = [
     "order_items.csv",
     "ad_spend.csv",
     "web_events.json",
+    "generation_truth.json",
 ]
 
+SESSION_TIMEOUT_SECONDS = 30 * 60
+CURRENCY = "INR"
 SCHEMA_VERSION = "v1"
 SOURCE_SYSTEM = "project_1_behavioral_events"
 
@@ -245,6 +243,10 @@ def generate_campaigns(count: int = 40) -> pd.DataFrame:
         )
 
     df = pd.DataFrame(rows)
+
+    # budget is a lifetime authorization in INR, not a daily allowance. Changes
+    # replace that authorization; SCD2 versions are never additive budgets.
+    df["updated_at"] = df["start_date"] + "T00:00:00"
 
     # Dirty records
     df.loc[0, "campaign_id"] = None
@@ -443,6 +445,8 @@ def generate_web_events(
 
         events.append(event)
 
+    assign_sessions(events, campaigns)
+
     # Dirty event for quarantine testing
     events.append(
         {
@@ -511,18 +515,89 @@ def generate_web_events(
     return events
 
 
+def assign_sessions(events: list[dict], campaigns: pd.DataFrame) -> None:
+    """A visit belongs to one customer and attribution context; >30m idle ends it.
+
+    Event timestamps are action times, in source Asia/Kolkata time. Counters
+    describe only the prefix observed at that event, never the final session.
+    A purchase ends a visit. Browsing can stop without purchase or skip stages.
+    """
+    rng = random.Random(f"sessions|{BATCH_DATE}")
+    customer_fields = (
+        "user_id", "user_name", "email", "gender", "age", "membership_tier",
+        "loyalty_points", "preferred_language", "home_city", "home_state",
+        "user_segment", "is_prime_user", "country", "city",
+    )
+    context_fields = ("session_id", "campaign_id", "traffic_source", "ab_test_group",
+                      "device_type", "operating_system", "browser", "network_type",
+                      "app_version", "ip_address")
+    campaign_context = campaigns.dropna(subset=["campaign_id"]).drop_duplicates("campaign_id").set_index("campaign_id")
+    intervals: dict[int, list[tuple[datetime, datetime]]] = {}
+    offset = 0
+    while offset < len(events):
+        length = min(rng.choice([1, 2, 2, 3, 3, 4, 5, 8]), len(events) - offset)
+        visit = events[offset:offset + length]
+        # No resampling purchase outcomes from probabilities or anomaly scores.
+        purchase = next((i for i, e in enumerate(visit) if e["event_type"] == "purchase"), None)
+        if purchase is not None:
+            visit = visit[:purchase + 1]
+        first = visit[0].copy()
+        if first["campaign_id"] is None:
+            first["traffic_source"] = "organic"
+        else:
+            campaign = campaign_context.loc[first["campaign_id"]]
+            first["traffic_source"] = campaign["traffic_source"]
+            first["ab_test_group"] = campaign["ab_test_group"]
+        gaps = [0] + [rng.randint(1, 900) for _ in visit[1:]]
+        duration = sum(gaps)
+        window = 120 if IS_ANCHOR_BATCH else FACT_WINDOW_DAYS - 1
+        for _ in range(100):
+            start = random_datetime(rng, BATCH_DAY, window)
+            end = start + timedelta(seconds=duration)
+            if end.date() > BATCH_DAY:
+                continue
+            if all(start > old_end + timedelta(seconds=SESSION_TIMEOUT_SECONDS)
+                   or end < old_start - timedelta(seconds=SESSION_TIMEOUT_SECONDS)
+                   for old_start, old_end in intervals.get(first["user_id"], [])):
+                break
+        else:
+            raise ValueError("Could not place a non-overlapping customer session")
+        intervals.setdefault(first["user_id"], []).append((start, end))
+        elapsed, viewed = 0, {}
+        for event, gap in zip(visit, gaps):
+            event.update({key: first[key] for key in customer_fields + context_fields})
+            elapsed += gap
+            timestamp = (start + timedelta(seconds=elapsed)).isoformat()
+            event["event_time"] = event["event_timestamp"] = timestamp
+            event["session_duration_sec"] = elapsed
+            event["time_since_last_event_ms"] = gap * 1000
+            event["time_on_page_sec"] = min(event["time_on_page_sec"], gap)
+            if event["event_type"] == "product_view":
+                viewed[event["product_id"]] = viewed.get(event["product_id"], 0) + 1
+            event["items_viewed_in_session"] = len(viewed)
+            event["repeat_product_view_count"] = max(viewed.get(event["product_id"], 0) - 1, 0)
+            event["user_journey_stage"] = {
+                "page_view": "awareness", "product_view": "consideration", "search": "consideration",
+                "add_to_cart": "cart", "checkout": "checkout", "purchase": "purchase",
+            }[event["event_type"]]
+        offset += len(visit)
+    events.sort(key=lambda event: (event["event_timestamp"], event["event_id"]))
+
+
 def generate_orders(web_events: list[dict], rng: random.Random, count: int) -> pd.DataFrame:
     """Orders without amounts; cart_value is filled from the items later.
 
-    The random draws are the original generator's, so every later stream
-    (order items, ad spend) is unchanged. Only the duplicate-ID dirty row is
-    applied here, because the items draw their order from these IDs.
+    A purchase event can create at most one order. count is a ceiling, not a
+    reason to fabricate repeated transactions from the same event. The explicit
+    duplicate-ID quarantine fixture is still applied after sampling.
     """
     purchase_events = [event for event in web_events if event.get("event_type") == "purchase"]
 
     rows = []
-    for n in range(1, count + 1):
-        event = rng.choice(purchase_events)
+    selected = rng.sample(purchase_events, min(count, len(purchase_events)))
+    if len(selected) < 5:
+        raise ValueError("At least five purchase events are needed for order fixtures")
+    for n, event in enumerate(selected, 1):
 
         rows.append(
             {
@@ -640,29 +715,48 @@ def generate_orders_and_items(
     return orders, items
 
 
+def delivery_surge(campaign_id: int, spend_day: date) -> bool:
+    """Independent hidden simulation assignment, never a model input column."""
+    return random.Random(f"surge|{campaign_id}|{spend_day}").random() < 0.08
+
+
 def generate_ad_spend(campaigns: pd.DataFrame, rng: random.Random, window_days: int, count: int) -> pd.DataFrame:
-    valid_campaigns = campaigns.dropna(subset=["campaign_id"]).drop_duplicates("campaign_id").to_dict("records")
-
+    # One observed campaign-day charge, in INR. Only the stated lifetime
+    # period is eligible; budget revisions replace the cap, not add daily caps.
+    # Non-anchor windows are (batch_date-window_days, batch_date], so adjacent
+    # configured 14-day windows cannot bill their shared boundary twice.
+    days = window_days + 1 if IS_ANCHOR_BATCH else window_days
+    candidates = []
+    for campaign_id, versions in campaigns.dropna(subset=["campaign_id"]).groupby("campaign_id"):
+        versions = versions.sort_values("updated_at")
+        for ago in range(days):
+            spend_day = BATCH_DAY - timedelta(days=ago)
+            known = versions[versions["updated_at"] <= spend_day.isoformat() + "T00:00:00"]
+            if known.empty:
+                continue
+            campaign = known.iloc[-1].to_dict()
+            start, end = date.fromisoformat(campaign["start_date"]), date.fromisoformat(campaign["end_date"])
+            if start <= spend_day <= end:
+                candidates.append((int(campaign_id), spend_day, campaign, (end-start).days+1))
+    selected = rng.sample(candidates, min(count, len(candidates)))
+    if len(selected) < 4:
+        raise ValueError("At least four eligible campaign-days are needed for spend fixtures")
     rows = []
-
-    for n in range(1, count + 1):
-        campaign = rng.choice(valid_campaigns)
-        impressions = rng.randint(1000, 500000)
-        clicks = rng.randint(10, impressions)
-
-        rows.append(
-            {
-                "spend_id": fact_id(n),
-                "campaign_id": int(campaign["campaign_id"]),
-                "traffic_source": campaign["traffic_source"],
-                "spend_date": random_date(rng, BATCH_DAY, window_days, 0).isoformat(),
-                "impressions": impressions,
-                "clicks": clicks,
-                "spend_amount": round(rng.uniform(500, 100000), 2),
-                "schema_version": SCHEMA_VERSION,
-                "source": "marketing_ad_platform",
-            }
-        )
+    for n, (campaign_id, spend_day, campaign, period_days) in enumerate(selected, 1):
+        daily_rng = random.Random(f"delivery|{campaign_id}|{spend_day}")
+        # Overlapping distributions: surge truth is NOT a spend>budget label.
+        # Normal stochastic delivery can also overspend; neither is clipped.
+        surge = delivery_surge(campaign_id, spend_day)
+        factor = daily_rng.lognormvariate(-0.3, 0.7) * (1.8 if surge else 1.0)
+        amount = round(float(campaign["budget"]) / period_days * factor, 2)
+        impressions = daily_rng.randint(1000, 500000)
+        rows.append({
+            "spend_id": fact_id(n), "campaign_id": campaign_id,
+            "traffic_source": campaign["traffic_source"], "spend_date": spend_day.isoformat(),
+            "impressions": impressions, "clicks": daily_rng.randint(10, impressions),
+            "spend_amount": amount, "schema_version": SCHEMA_VERSION,
+            "source": "marketing_ad_platform",
+        })
 
     df = pd.DataFrame(rows)
 
@@ -702,7 +796,10 @@ def fsync_dir(path: Path) -> None:
 
 
 def raw_dir_is_complete(raw_dir: Path) -> bool:
-    return all((raw_dir / name).is_file() and (raw_dir / name).stat().st_size > 0 for name in RAW_FILES)
+    # Legacy seven-file batches remain immutable. The new truth sidecar does
+    # not authorize automatic replacement of an existing complete raw batch.
+    return all((raw_dir / name).is_file() and (raw_dir / name).stat().st_size > 0
+               for name in RAW_FILES if name != "generation_truth.json")
 
 
 def build_batch() -> dict[str, object]:
@@ -711,8 +808,8 @@ def build_batch() -> dict[str, object]:
     campaigns = generate_campaigns()
 
     if IS_ANCHOR_BATCH:
-        # Batch 0 continues the master stream, exactly as the original
-        # generator did, so it reproduces the original raw batch.
+        # Batch 0 continues the fixed master stream; session and spend
+        # semantics are applied deterministically below.
         change_rng = fact_rng = random
         fact_faker = fake
         window_days = 120
@@ -739,7 +836,29 @@ def build_batch() -> dict[str, object]:
     orders, order_items = generate_orders_and_items(
         web_events, products, fact_rng, fill_rng, counts["orders"], counts["order_items"]
     )
-    ad_spend = generate_ad_spend(campaigns, fact_rng, window_days, counts["ad_spend"])
+    ad_spend = generate_ad_spend(campaigns, random.Random(f"spend|{BATCH_DATE}"), window_days, counts["ad_spend"])
+    truth = [{"kind": "contract", "generator_version": "session_budget_v1", "currency": CURRENCY,
+              "budget_grain": "campaign lifetime authorization, latest known revision replaces prior cap",
+              "budget_period": "start_date through end_date inclusive, Asia/Kolkata",
+              "spend_grain": "observed campaign-day; sampled days are not a complete billing ledger",
+              "session_timeout_seconds": SESSION_TIMEOUT_SECONDS,
+              "session_counters": "observed prefix, not final duration or future events",
+              "labels_are_model_inputs": False}]
+    for row_index, row in ad_spend.iterrows():
+        if row_index >= 4:
+            truth.append({"kind": "delivery_scenario", "spend_id": int(row["spend_id"]),
+                          "delivery_surge": delivery_surge(int(row["campaign_id"]), date.fromisoformat(row["spend_date"]))})
+    for table, fixtures in {
+        "customers.csv": {0: "invalid_email", 1: "missing_city", 2: "negative_age", 500: "duplicate_customer"},
+        "products.csv": {0: "missing_category", 1: "nonpositive_price", 2: "invalid_discount", 150: "duplicate_product"},
+        "campaigns.csv": {0: "missing_id", 1: "invalid_channel", 2: "invalid_period"},
+        "orders.csv": {0: "duplicate_order_id", 2: "negative_total", 3: "missing_customer", 4: "invalid_timestamp"},
+        "order_items.csv": {0: "missing_product", 1: "negative_quantity", 2: "line_amount_mismatch"},
+        "ad_spend.csv": {0: "negative_spend", 1: "clicks_exceed_impressions", 2: "missing_campaign", 3: "missing_date"},
+        "web_events.json": {len(web_events)-1: "invalid_event"},
+    }.items():
+        truth.extend({"kind": "quality_fixture", "table": table, "row_index": index, "reason": reason}
+                     for index, reason in fixtures.items())
 
     return {
         "customers.csv": customers,
@@ -749,11 +868,12 @@ def build_batch() -> dict[str, object]:
         "order_items.csv": order_items,
         "ad_spend.csv": ad_spend,
         "web_events.json": web_events,
+        "generation_truth.json": truth,
     }
 
 
 def write_batch(raw_dir: Path, outputs: dict[str, object]) -> None:
-    # Write all seven files into a hidden sibling folder, then rename it into
+    # Write all source files and the separate simulation truth into a hidden sibling folder, then rename it into
     # place, so a batch folder only ever appears complete.
     # Temp folders left by earlier interrupted runs of this batch are never
     # renamed into place, so they are safe to remove.
