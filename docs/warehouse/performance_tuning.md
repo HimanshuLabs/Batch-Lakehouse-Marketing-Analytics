@@ -27,13 +27,13 @@ Observed local row counts:
 
 | Table | Row Count |
 |---|---:|
-| `warehouse.dim_campaign` | 40 |
-| `warehouse.dim_customer` | 501 |
-| `warehouse.dim_date` | 123 |
-| `warehouse.dim_product` | 149 |
-| `warehouse.fact_campaign_spend` | 951 |
-| `warehouse.fact_order_items` | 4,584 |
-| `warehouse.fact_orders` | 1,869 |
+| `warehouse.dim_campaign` | 43 |
+| `warehouse.dim_customer` | 508 |
+| `warehouse.dim_date` | 151 |
+| `warehouse.dim_product` | 154 |
+| `warehouse.fact_campaign_spend` | 1,182 |
+| `warehouse.fact_order_items` | 5,810 |
+| `warehouse.fact_orders` | 2,373 |
 
 Because these tables are small, PostgreSQL may choose sequential scans even when useful indexes exist. That is normal optimizer behavior. A sequential scan over a tiny table can be cheaper than walking an index and then fetching heap pages.
 
@@ -83,9 +83,9 @@ Observed local behavior:
 
 - PostgreSQL used sequential scans on the small local tables.
 - This is acceptable because:
-  - `warehouse.fact_orders` has only 1,869 rows,
-  - `warehouse.dim_date` has only 123 rows,
-  - `warehouse.dim_customer` has only 501 rows.
+  - `warehouse.fact_orders` has only 2,373 rows,
+  - `warehouse.dim_date` has only 151 rows,
+  - `warehouse.dim_customer` has only 508 rows.
 
 The query is still index-eligible through:
 

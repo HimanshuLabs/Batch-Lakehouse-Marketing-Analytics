@@ -316,7 +316,7 @@ docs/warehouse/runbook.md
 
 ## 10. dbt Analytics Engineering Layer
 
-The dbt layer organizes warehouse models, marts, tests, docs, lineage, and dashboard exposures: 21 models and 65 tests.
+The dbt layer organizes warehouse models, marts, tests, docs, lineage, and dashboard exposures: 21 models and 67 tests.
 
 Main dbt areas:
 
@@ -809,8 +809,6 @@ cat exports/power_bi/export_manifest.json
 Deliberate trade-offs for a portfolio project built on synthetic data:
 
 - **Public dashboard files.** Power BI Online reads five synthetic CSVs from S3 through public, read-only object URLs (no listing, no write access). The bucket policy does not enforce TLS, which is acceptable for synthetic data; a production setup would serve the files privately, for example through CloudFront with origin access control.
-- **Orders without a campaign.** Organic orders (no campaign) are quarantined by the point-in-time join rather than mapped to an "unknown campaign" member (45 orders in the sample data). The change is deliberately deferred so the downstream ML model's training inputs stay stable, and is planned alongside that model's next version.
-- **Business dates in UTC.** Spark parses source timestamps as Asia/Kolkata, but the warehouse derives date keys and mart dates in UTC, so orders between 00:00 and 05:30 IST fall on the previous day. Moving business dates to IST is planned with the same model update.
 - **Reproducibility scope.** Direct dependencies are pinned; transitive dependencies of the dev tools are not.
 - **Screenshots** show the dashboard layout; the current figures are in `exports/power_bi/`.
 
