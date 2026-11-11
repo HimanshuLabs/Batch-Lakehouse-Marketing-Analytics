@@ -177,15 +177,17 @@ def test_a_line_amount_that_is_not_quantity_times_price_is_quarantined(spark, lo
     # Every row is 5 x 13673.69 = 68368.45.
     line_amounts = {
         "1000": "68368.45",   # exact: valid
-        "1001": "68368.455",  # 0.005 off, rounding to cents: valid
+        "1001": "68368.455",  # not whole cents: quarantined as such (Part G)
         "1002": "68368.47",   # 0.02 off: quarantined
         "1003": "1",          # the generator's dirty line_amount: quarantined
+        "1004": "68368.46",   # one cent off: quarantined (Part G: exact, not within 0.01)
     }
     silver = load_job(SILVER_JOB, BATCH_DATE=BATCH_DATE)
     write_bronze("order_items", [{"order_item_id": key, "line_amount": value} for key, value in line_amounts.items()])
     valid, invalid = silver.clean_order_items(silver.create_spark_session())
 
     reasons = {row["order_item_id"]: row["quarantine_reason"] for row in invalid.collect()}
-    assert {row["order_item_id"] for row in valid.collect()} == {1000, 1001}
-    reason = "Invalid order item record: line_amount differs from quantity x discounted_price by more than 0.01"
-    assert reasons == {1002: reason, 1003: reason}
+    assert {row["order_item_id"] for row in valid.collect()} == {1000}
+    reason = "Invalid order item record: line_amount is not quantity x discounted_price"
+    assert reasons == {1001: "Invalid order item record: line_amount has more than 2 decimal places",
+                       1002: reason, 1003: reason, 1004: reason}

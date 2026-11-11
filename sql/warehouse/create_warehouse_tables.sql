@@ -766,7 +766,7 @@ BEGIN
     END;
 
     IF source_table IS NULL THEN
-        RAISE NOTICE 'No customer dimension staging table found.';
+        RAISE EXCEPTION 'Missing staging table: no customer dimension staging table found; load Gold into staging first.';
     ELSE
         EXECUTE format($sql$
             CREATE TEMP TABLE dimension_input ON COMMIT DROP AS
@@ -889,7 +889,7 @@ BEGIN
     END;
 
     IF source_table IS NULL THEN
-        RAISE NOTICE 'No product dimension staging table found.';
+        RAISE EXCEPTION 'Missing staging table: no product dimension staging table found; load Gold into staging first.';
     ELSE
         EXECUTE format($sql$
             CREATE TEMP TABLE dimension_input ON COMMIT DROP AS
@@ -998,7 +998,7 @@ BEGIN
     END;
 
     IF source_table IS NULL THEN
-        RAISE NOTICE 'No campaign dimension staging table found.';
+        RAISE EXCEPTION 'Missing staging table: no campaign dimension staging table found; load Gold into staging first.';
     ELSE
         EXECUTE format($sql$
             CREATE TEMP TABLE dimension_input ON COMMIT DROP AS
@@ -1186,7 +1186,7 @@ BEGIN
     END;
 
     IF source_table IS NULL THEN
-        RAISE NOTICE 'No orders fact staging table found.';
+        RAISE EXCEPTION 'Missing staging table: no orders fact staging table found; load Gold into staging first.';
     ELSE
         EXECUTE format($sql$
             WITH src AS (
@@ -1316,7 +1316,7 @@ BEGIN
     END;
 
     IF source_table IS NULL THEN
-        RAISE NOTICE 'No order-items fact staging table found.';
+        RAISE EXCEPTION 'Missing staging table: no order-items fact staging table found; load Gold into staging first.';
     ELSE
         EXECUTE format($sql$
             WITH src AS (
@@ -1495,7 +1495,7 @@ BEGIN
     END;
 
     IF source_table IS NULL THEN
-        RAISE NOTICE 'No campaign-spend/ad-spend fact staging table found.';
+        RAISE EXCEPTION 'Missing staging table: no campaign-spend/ad-spend fact staging table found; load Gold into staging first.';
     ELSE
         EXECUTE format($sql$
             WITH src AS (
@@ -1599,7 +1599,7 @@ BEGIN
     END;
 
     IF source_table IS NULL THEN
-        RAISE NOTICE 'No web-events fact staging table found.';
+        RAISE EXCEPTION 'Missing staging table: no web-events fact staging table found; load Gold into staging first.';
     ELSE
         DROP TABLE IF EXISTS pg_temp.web_events_resolved;
 

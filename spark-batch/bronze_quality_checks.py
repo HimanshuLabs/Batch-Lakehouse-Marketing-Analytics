@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import os
 from datetime import date
 from pathlib import Path
@@ -76,13 +77,18 @@ def create_spark_session() -> SparkSession:
 
 
 def count_raw_file_lines(path: Path, has_header: bool) -> int:
+    """Rows in a raw file: CSV records for a CSV with a header (a quoted field
+    can span lines, like Bronze reads it), lines for JSON lines."""
     if not path.exists():
         raise FileNotFoundError(f"Missing raw file: {path}")
 
-    with path.open("r", encoding="utf-8") as file:
-        line_count = sum(1 for _ in file)
+    if has_header:
+        with path.open("r", encoding="utf-8", newline="") as file:
+            record_count = sum(1 for _ in csv.reader(file))
+        return record_count - 1
 
-    return line_count - 1 if has_header else line_count
+    with path.open("r", encoding="utf-8") as file:
+        return sum(1 for _ in file)
 
 
 def validate_table(
