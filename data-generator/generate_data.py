@@ -109,6 +109,18 @@ COUNTRIES = ["India"]
 # draws above changes and a row has the same value in every batch.
 ORDER_STATUSES = ["completed", "cancelled", "returned"]
 ORDER_STATUS_WEIGHTS = [0.88, 0.07, 0.05]
+# The life of an order. It is placed at order_timestamp. A cancelled order is
+# cancelled within hours; a returned order comes back days later, with a full
+# or a partial refund of its net value. Until that happens the source shows the
+# order as completed: a batch delivers what was true at the end of its day, and
+# the batch in which the cancellation or return falls delivers the order again
+# with its new status, status_timestamp, refund_amount and a later updated_at.
+CANCEL_AFTER_SECONDS = (5 * 60, 6 * 3600)
+RETURN_AFTER_SECONDS = (2 * 86400, 20 * 86400)
+FULL_REFUND_SHARE = 0.7
+PARTIAL_REFUND = (0.3, 0.9)
+# Fact IDs from this number up in a batch's ID block are the appended dirty fixtures.
+FIXTURE_ID_START = ID_BLOCK - 100
 TAX_RATE = 0.18                      # GST on the net order value
 FREE_SHIPPING_THRESHOLD = 4999.00   # INR: orders from this net value ship free
 SHIPPING_FEE = 99.00
@@ -819,6 +831,66 @@ def order_charges(net: float) -> tuple[float, float, float]:
     return float(tax), float(shipping), float((net_value + tax + shipping).quantize(cents, rounding=ROUND_HALF_UP))
 
 
+def order_lifecycle(order_id: int, order_timestamp: str, net: float) -> tuple[str, datetime, float]:
+    """(final status, when it took effect, refund amount) of an order, from its own streams."""
+    placed = datetime.fromisoformat(order_timestamp)
+    status = random.Random(f"order_status|{order_id}").choices(ORDER_STATUSES, ORDER_STATUS_WEIGHTS)[0]
+    rng = random.Random(f"order_lifecycle|{order_id}")
+    if status == "cancelled":
+        return status, placed + timedelta(seconds=rng.randint(*CANCEL_AFTER_SECONDS)), 0.0
+    if status == "returned":
+        returned_at = placed + timedelta(seconds=rng.randint(*RETURN_AFTER_SECONDS))
+        share = 1.0 if rng.random() < FULL_REFUND_SHARE else rng.uniform(*PARTIAL_REFUND)
+        refund = (Decimal(str(net)) * Decimal(str(round(share, 4)))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        return status, returned_at, float(min(refund, Decimal(str(net))))
+    return status, placed, 0.0
+
+
+def order_state(order_id: int, order_timestamp: str, net: float, as_of: date) -> tuple[str, str, float]:
+    """(order_status, status_timestamp, refund_amount) as the source knows them at the end of as_of."""
+    status, effective, refund = order_lifecycle(order_id, order_timestamp, net)
+    if effective.date() > as_of:
+        # Not cancelled or returned yet: the order is still a completed sale.
+        return "completed", order_timestamp, 0.0
+    return status, effective.isoformat(), refund
+
+
+def redelivered_orders() -> pd.DataFrame | None:
+    """Orders of earlier batches whose cancellation or return falls in this batch.
+
+    The earlier batch delivered them as completed. A real order system sends
+    the order again when its status changes: the same row with its new
+    order_status, status_timestamp, refund_amount and updated_at. An order is
+    re-delivered once, by the first batch on or after the day of the change,
+    so the earlier raw batches on disk decide which batch that is.
+    """
+    earlier = sorted(
+        (date.fromisoformat(folder.name.split("=", 1)[1]), folder)
+        for folder in RAW_DIR.parent.glob("batch_date=*")
+        if folder.name.split("=", 1)[1] < BATCH_DATE and raw_dir_is_complete(folder)
+    )
+    updates = []
+    for position, (batch_day, folder) in enumerate(earlier):
+        later_batches = [day for day, _ in earlier[position + 1:]]
+        orders = pd.read_csv(folder / "orders.csv")
+        if "status_timestamp" not in orders.columns:
+            continue   # a batch written before orders had a lifecycle
+        block_start = (batch_day - ANCHOR_DATE).days * ID_BLOCK
+        # The batch's own orders: not its dirty rows (0, 2, 3, 4 and the appended
+        # fixtures), and not orders that it re-delivered itself.
+        own = orders[(orders.index > 4) & orders["order_id"].between(block_start + 1, block_start + FIXTURE_ID_START - 1)]
+        for row in own.to_dict("records"):
+            status, effective, refund = order_lifecycle(int(row["order_id"]), row["order_timestamp"], float(row["cart_value"]))
+            changed_on = effective.date()
+            if status == "completed" or changed_on <= batch_day or changed_on > BATCH_DAY:
+                continue
+            if any(changed_on <= day for day in later_batches):
+                continue   # an earlier batch than this one has already re-delivered it
+            updates.append({**row, "order_status": status, "status_timestamp": effective.isoformat(),
+                            "refund_amount": refund, "updated_at": effective.isoformat()})
+    return pd.DataFrame(updates) if updates else None
+
+
 def add_order_status_and_charges(orders: pd.DataFrame) -> pd.DataFrame:
     """order_status, tax_amount, shipping_amount and total_amount, inserted after cart_value.
 
@@ -836,6 +908,14 @@ def add_order_status_and_charges(orders: pd.DataFrame) -> pd.DataFrame:
     orders.insert(position + 1, "shipping_amount", [shipping for _, shipping, _ in charges])
     orders.insert(position + 2, "total_amount", [total for _, _, total in charges])
     orders.insert(orders.columns.get_loc("payment_method"), "order_status", status)
+    # What the source knows at the end of this batch's day (see the lifecycle note above).
+    known = [order_state(int(order_id), timestamp, float(net), BATCH_DAY)
+             for order_id, timestamp, net in zip(orders["order_id"], orders["order_timestamp"], orders["cart_value"])]
+    orders["order_status"] = [state[0] for state in known]
+    position = orders.columns.get_loc("order_status") + 1
+    orders.insert(position, "status_timestamp", [state[1] for state in known])
+    orders.insert(position + 1, "refund_amount", [state[2] for state in known])
+    orders["updated_at"] = orders["status_timestamp"]
     return orders
 
 
@@ -866,6 +946,11 @@ def generate_orders_and_items(
     orders.loc[2, "cart_value"] = -500
     orders.loc[3, "user_id"] = 999999
     orders.loc[4, "order_timestamp"] = "not-a-date"
+
+    # Orders of earlier batches that were cancelled or returned since: delivered again.
+    updates = redelivered_orders()
+    if updates is not None:
+        orders = pd.concat([orders, updates[orders.columns]], ignore_index=True)
 
     # Dirty order item records (their orders' totals stay the clean sum)
     items.loc[0, "product_id"] = 999999
@@ -994,6 +1079,16 @@ def add_attribute_fixtures(outputs: dict[str, pd.DataFrame]) -> dict[str, dict[i
     add("orders.csv", 5, "invalid_order_status", order_id=fact_id(ID_BLOCK - 1), order_status="shipped")
     add("orders.csv", 6, "negative_tax", order_id=fact_id(ID_BLOCK - 2), tax_amount=-1.0)
     add("orders.csv", 7, "negative_shipping", order_id=fact_id(ID_BLOCK - 3), shipping_amount=-99.0)
+    # Impossible lifecycles: a return before the order, a refund above the
+    # order's net value, and a refund on an order that was not returned.
+    orders = outputs["orders.csv"]
+    add("orders.csv", 9, "return_before_order", order_id=fact_id(ID_BLOCK - 5), order_status="returned",
+        status_timestamp=(datetime.fromisoformat(orders.loc[9, "order_timestamp"]) - timedelta(days=1)).isoformat(),
+        refund_amount=float(orders.loc[9, "cart_value"]))
+    add("orders.csv", 10, "refund_above_net", order_id=fact_id(ID_BLOCK - 6), order_status="returned",
+        status_timestamp=orders.loc[10, "order_timestamp"], refund_amount=round(float(orders.loc[10, "cart_value"]) + 1, 2))
+    add("orders.csv", 11, "refund_on_non_returned_order", order_id=fact_id(ID_BLOCK - 7), order_status="completed",
+        status_timestamp=orders.loc[11, "order_timestamp"], refund_amount=10.0)
     add("orders.csv", 8, "total_amount_mismatch", order_id=fact_id(ID_BLOCK - 4),
         total_amount=round(float(outputs["orders.csv"].loc[8, "total_amount"]) + 10, 2))
     # Ad spend: every dirty row is an extra row, so each real campaign-day keeps
@@ -1078,7 +1173,7 @@ def build_batch() -> dict[str, object]:
         web_events, products, fact_rng, fill_rng, counts["orders"], counts["order_items"]
     )
     ad_spend = generate_ad_spend(campaigns, random.Random(f"spend|{BATCH_DATE}"), window_days, counts["ad_spend"])
-    truth = [{"kind": "contract", "generator_version": "session_budget_v3", "currency": CURRENCY,
+    truth = [{"kind": "contract", "generator_version": "session_budget_v4", "currency": CURRENCY,
               "budget_grain": "campaign lifetime authorization, latest known revision replaces prior cap",
               "budget_period": "start_date through end_date inclusive, Asia/Kolkata",
               "spend_grain": "observed campaign-day-region; every region of a sampled campaign-day is present; "

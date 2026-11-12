@@ -39,6 +39,7 @@ END $$;
 CREATE SCHEMA IF NOT EXISTS marts;
 CREATE SCHEMA IF NOT EXISTS audit;
 
+DROP TABLE IF EXISTS marts.mart_customer_daily_snapshot, marts.mart_product_daily_snapshot, marts.mart_campaign_daily_snapshot CASCADE;
 DROP VIEW IF EXISTS marts.mart_marketing_funnel CASCADE;
 DROP VIEW IF EXISTS marts.mart_revenue_daily CASCADE;
 DROP VIEW IF EXISTS marts.mart_product_sales CASCADE;
@@ -77,25 +78,28 @@ WITH current_customers AS (
 orders_by_customer AS (
     SELECT
         dc.customer_id,
-        -- Only a completed order is a sale: counts, revenue, lifetime value and
-        -- order value are those of completed orders. Cancelled and returned
-        -- orders are shown beside them.
-        COUNT(DISTINCT fo.order_id) FILTER (WHERE fo.order_status = 'completed') AS total_order_count,
-        COALESCE(SUM(fo.gross_amount) FILTER (WHERE fo.order_status = 'completed'), 0) AS gross_revenue,
-        COALESCE(SUM(fo.discount_amount) FILTER (WHERE fo.order_status = 'completed'), 0) AS total_discount_amount,
-        COALESCE(SUM(fo.net_revenue) FILTER (WHERE fo.order_status = 'completed'), 0) AS lifetime_value,
-        COALESCE(AVG(fo.net_revenue) FILTER (WHERE fo.order_status = 'completed'), 0) AS average_order_value,
-        MIN(fo.order_timestamp) FILTER (WHERE fo.order_status = 'completed') AS first_order_timestamp,
-        MAX(fo.order_timestamp) FILTER (WHERE fo.order_status = 'completed') AS last_order_timestamp,
+        -- A sale is every order that was not cancelled, recognised when it is
+        -- placed. A returned order stays a sale and its refund is subtracted:
+        -- lifetime_value = net_sales - refund_amount (net revenue after refunds).
+        -- Cancelled and returned orders are also counted in columns of their own.
+        COUNT(DISTINCT fo.order_id) FILTER (WHERE fo.order_status <> 'cancelled') AS total_order_count,
+        COALESCE(SUM(fo.gross_amount) FILTER (WHERE fo.order_status <> 'cancelled'), 0) AS gross_revenue,
+        COALESCE(SUM(fo.discount_amount) FILTER (WHERE fo.order_status <> 'cancelled'), 0) AS total_discount_amount,
+        COALESCE(SUM(fo.net_revenue) FILTER (WHERE fo.order_status <> 'cancelled'), 0) - COALESCE(SUM(fo.refund_amount), 0) AS lifetime_value,
+        COALESCE(SUM(fo.net_revenue) FILTER (WHERE fo.order_status <> 'cancelled'), 0) AS net_sales,
+        COALESCE(SUM(fo.refund_amount), 0) AS refund_amount,
+        COALESCE(AVG(fo.net_revenue) FILTER (WHERE fo.order_status <> 'cancelled'), 0) AS average_order_value,
+        MIN(fo.order_timestamp) FILTER (WHERE fo.order_status <> 'cancelled') AS first_order_timestamp,
+        MAX(fo.order_timestamp) FILTER (WHERE fo.order_status <> 'cancelled') AS last_order_timestamp,
         COUNT(DISTINCT fo.order_id) FILTER (WHERE fo.order_status = 'cancelled') AS cancelled_order_count,
         COALESCE(SUM(fo.net_revenue) FILTER (WHERE fo.order_status = 'cancelled'), 0) AS cancelled_amount,
         COUNT(DISTINCT fo.order_id) FILTER (WHERE fo.order_status = 'returned') AS returned_order_count,
         COALESCE(SUM(fo.net_revenue) FILTER (WHERE fo.order_status = 'returned'), 0) AS returned_amount,
         -- 1 = the third of the buying customers with the highest lifetime value.
         NTILE(3) OVER (
-            PARTITION BY (COALESCE(SUM(fo.net_revenue) FILTER (WHERE fo.order_status = 'completed'), 0) > 0
+            PARTITION BY (COALESCE(SUM(fo.net_revenue) FILTER (WHERE fo.order_status <> 'cancelled'), 0) - COALESCE(SUM(fo.refund_amount), 0) > 0
                           AND dc.customer_id NOT IN ('UNKNOWN', 'INVALID'))
-            ORDER BY COALESCE(SUM(fo.net_revenue) FILTER (WHERE fo.order_status = 'completed'), 0) DESC, dc.customer_id
+            ORDER BY COALESCE(SUM(fo.net_revenue) FILTER (WHERE fo.order_status <> 'cancelled'), 0) - COALESCE(SUM(fo.refund_amount), 0) DESC, dc.customer_id
         ) AS value_third
     FROM warehouse.fact_orders fo
     JOIN warehouse.dim_customer dc
@@ -112,7 +116,7 @@ items_by_customer AS (
     -- Items of completed orders only.
     JOIN warehouse.fact_orders fo
         ON fo.order_sk = foi.order_sk
-       AND fo.order_status = 'completed'
+       AND fo.order_status <> 'cancelled'
     JOIN warehouse.dim_customer dc
         ON foi.customer_sk = dc.customer_sk
     LEFT JOIN warehouse.dim_product dp
@@ -167,6 +171,8 @@ SELECT
     ROUND(COALESCE(o.gross_revenue, 0), 2) AS gross_revenue,
     ROUND(COALESCE(o.total_discount_amount, 0), 2) AS total_discount_amount,
     ROUND(COALESCE(o.lifetime_value, 0), 2) AS lifetime_value,
+    ROUND(COALESCE(o.net_sales, 0), 2) AS net_sales,
+    ROUND(COALESCE(o.refund_amount, 0), 2) AS refund_amount,
     ROUND(COALESCE(o.average_order_value, 0), 2) AS average_order_value,
 
     COALESCE(o.cancelled_order_count, 0)::BIGINT AS cancelled_order_count,
@@ -274,10 +280,12 @@ orders_by_campaign AS (
     SELECT
         dc.campaign_id,
         -- Completed orders only (see mart_customer_360).
-        COUNT(DISTINCT fo.order_id) FILTER (WHERE fo.order_status = 'completed') AS order_count,
-        COUNT(DISTINCT fo.customer_id) FILTER (WHERE fo.order_status = 'completed') AS purchasing_customer_count,
-        COALESCE(SUM(fo.net_revenue) FILTER (WHERE fo.order_status = 'completed'), 0) AS warehouse_attributed_revenue,
-        COALESCE(AVG(fo.net_revenue) FILTER (WHERE fo.order_status = 'completed'), 0) AS average_order_value,
+        COUNT(DISTINCT fo.order_id) FILTER (WHERE fo.order_status <> 'cancelled') AS order_count,
+        COUNT(DISTINCT fo.customer_id) FILTER (WHERE fo.order_status <> 'cancelled') AS purchasing_customer_count,
+        COALESCE(SUM(fo.net_revenue) FILTER (WHERE fo.order_status <> 'cancelled'), 0) - COALESCE(SUM(fo.refund_amount), 0) AS warehouse_attributed_revenue,
+        COALESCE(SUM(fo.net_revenue) FILTER (WHERE fo.order_status <> 'cancelled'), 0) AS net_sales,
+        COALESCE(SUM(fo.refund_amount), 0) AS refund_amount,
+        COALESCE(AVG(fo.net_revenue) FILTER (WHERE fo.order_status <> 'cancelled'), 0) AS average_order_value,
         COUNT(DISTINCT fo.order_id) FILTER (WHERE fo.order_status = 'cancelled') AS cancelled_order_count,
         COALESCE(SUM(fo.net_revenue) FILTER (WHERE fo.order_status = 'cancelled'), 0) AS cancelled_amount,
         COUNT(DISTINCT fo.order_id) FILTER (WHERE fo.order_status = 'returned') AS returned_order_count,
@@ -349,6 +357,8 @@ SELECT
     COALESCE(c.warehouse_conversion_count, 0)::BIGINT AS warehouse_conversion_count,
 
     ROUND(COALESCE(o.warehouse_attributed_revenue, 0), 2) AS attributed_revenue,
+    ROUND(COALESCE(o.net_sales, 0), 2) AS net_sales,
+    ROUND(COALESCE(o.refund_amount, 0), 2) AS refund_amount,
     ROUND(COALESCE(s.platform_attributed_revenue, 0), 2) AS platform_attributed_revenue,
     ROUND(COALESCE(c.warehouse_conversion_value, 0), 2) AS warehouse_conversion_value,
     ROUND(COALESCE(o.average_order_value, 0), 2) AS average_order_value,
@@ -450,13 +460,15 @@ sales_by_product AS (
     SELECT
         dp.product_id,
         -- An item is sold when its order is completed.
-        COUNT(DISTINCT foi.order_id) FILTER (WHERE fo.order_status = 'completed') AS order_count,
-        COUNT(DISTINCT foi.customer_id) FILTER (WHERE fo.order_status = 'completed') AS purchasing_customer_count,
-        COALESCE(SUM(foi.quantity) FILTER (WHERE fo.order_status = 'completed'), 0) AS units_sold,
-        COALESCE(SUM(foi.line_revenue) FILTER (WHERE fo.order_status = 'completed'), 0) AS product_revenue,
-        COALESCE(AVG(foi.unit_price) FILTER (WHERE fo.order_status = 'completed'), 0) AS average_selling_price,
-        MIN(foi.order_timestamp) FILTER (WHERE fo.order_status = 'completed') AS first_sold_timestamp,
-        MAX(foi.order_timestamp) FILTER (WHERE fo.order_status = 'completed') AS last_sold_timestamp,
+        COUNT(DISTINCT foi.order_id) FILTER (WHERE fo.order_status <> 'cancelled') AS order_count,
+        COUNT(DISTINCT foi.customer_id) FILTER (WHERE fo.order_status <> 'cancelled') AS purchasing_customer_count,
+        COALESCE(SUM(foi.quantity) FILTER (WHERE fo.order_status <> 'cancelled'), 0) AS units_sold,
+        COALESCE(SUM(foi.line_revenue) FILTER (WHERE fo.order_status <> 'cancelled'), 0) - COALESCE(SUM(foi.refund_amount), 0) AS product_revenue,
+        COALESCE(SUM(foi.line_revenue) FILTER (WHERE fo.order_status <> 'cancelled'), 0) AS net_sales,
+        COALESCE(SUM(foi.refund_amount), 0) AS refund_amount,
+        COALESCE(AVG(foi.unit_price) FILTER (WHERE fo.order_status <> 'cancelled'), 0) AS average_selling_price,
+        MIN(foi.order_timestamp) FILTER (WHERE fo.order_status <> 'cancelled') AS first_sold_timestamp,
+        MAX(foi.order_timestamp) FILTER (WHERE fo.order_status <> 'cancelled') AS last_sold_timestamp,
         COALESCE(SUM(foi.quantity) FILTER (WHERE fo.order_status = 'cancelled'), 0) AS cancelled_units,
         COALESCE(SUM(foi.quantity) FILTER (WHERE fo.order_status = 'returned'), 0) AS returned_units,
         COALESCE(SUM(foi.line_revenue) FILTER (WHERE fo.order_status = 'returned'), 0) AS returned_amount
@@ -517,6 +529,8 @@ product_base AS (
         COALESCE(s.purchasing_customer_count, 0)::BIGINT AS purchasing_customer_count,
         COALESCE(s.units_sold, 0)::BIGINT AS units_sold,
         ROUND(COALESCE(s.product_revenue, 0), 2) AS product_revenue,
+        ROUND(COALESCE(s.net_sales, 0), 2) AS net_sales,
+        ROUND(COALESCE(s.refund_amount, 0), 2) AS refund_amount,
         ROUND(COALESCE(s.average_selling_price, 0), 2) AS average_selling_price,
         s.first_sold_timestamp,
         s.last_sold_timestamp,
@@ -563,6 +577,8 @@ SELECT
     purchasing_customer_count,
     units_sold,
     product_revenue,
+    net_sales,
+    refund_amount,
     average_selling_price,
     first_sold_timestamp,
     last_sold_timestamp,
@@ -616,9 +632,11 @@ WITH orders_enriched AS (
         fo.order_date_sk,
         fo.order_timestamp,
         fo.order_status,
-        -- Only a completed order is a sale; the revenue columns below count
-        -- completed orders, and cancelled and returned orders have their own.
-        (fo.order_status = 'completed') AS sold,
+        -- A sale is every order that was not cancelled, recognised on its order
+        -- date; cancelled orders and returns have columns of their own.
+        (fo.order_status <> 'cancelled') AS sold,
+        FALSE AS is_return,
+        0::NUMERIC AS refund_amount,
         fo.gross_amount,
         fo.discount_amount,
         fo.net_revenue,
@@ -626,12 +644,38 @@ WITH orders_enriched AS (
         fo.shipping_amount,
         fo.total_amount,
         fo.item_count,
-        -- The customer's n-th completed order (numbered within the status).
+        -- The customer's n-th sale (cancelled orders are numbered apart).
         ROW_NUMBER() OVER (
-            PARTITION BY fo.customer_id, fo.order_status
+            PARTITION BY fo.customer_id, (fo.order_status <> 'cancelled')
             ORDER BY fo.order_timestamp NULLS LAST, fo.order_sk
         ) AS customer_order_number
     FROM warehouse.fact_orders fo
+
+    UNION ALL
+
+    -- A return is recognised on the business date it happened: its own row,
+    -- which counts in none of the sales measures.
+    SELECT
+        fo.order_sk,
+        fo.order_id,
+        fo.customer_sk,
+        fo.customer_id,
+        warehouse.date_sk(warehouse.business_date(fo.status_timestamp)) AS order_date_sk,
+        fo.status_timestamp,
+        fo.order_status,
+        FALSE AS sold,
+        TRUE AS is_return,
+        fo.refund_amount,
+        fo.gross_amount,
+        fo.discount_amount,
+        fo.net_revenue,
+        fo.tax_amount,
+        fo.shipping_amount,
+        fo.total_amount,
+        fo.item_count,
+        NULL::BIGINT AS customer_order_number
+    FROM warehouse.fact_orders fo
+    WHERE fo.order_status = 'returned'
 )
 SELECT
     dd.full_date AS revenue_date,
@@ -659,8 +703,12 @@ SELECT
 
     COUNT(DISTINCT oe.order_id) FILTER (WHERE oe.order_status = 'cancelled') AS cancelled_order_count,
     ROUND(COALESCE(SUM(oe.net_revenue) FILTER (WHERE oe.order_status = 'cancelled'), 0), 2) AS cancelled_amount,
-    COUNT(DISTINCT oe.order_id) FILTER (WHERE oe.order_status = 'returned') AS returned_order_count,
-    ROUND(COALESCE(SUM(oe.net_revenue) FILTER (WHERE oe.order_status = 'returned'), 0), 2) AS returned_amount,
+    -- Returns and refunds on the date of the return (sales above are on the order date).
+    COUNT(DISTINCT oe.order_id) FILTER (WHERE oe.is_return) AS returned_order_count,
+    ROUND(COALESCE(SUM(oe.net_revenue) FILTER (WHERE oe.is_return), 0), 2) AS returned_amount,
+    ROUND(COALESCE(SUM(oe.refund_amount) FILTER (WHERE oe.is_return), 0), 2) AS refund_amount,
+    ROUND(COALESCE(SUM(oe.net_revenue) FILTER (WHERE oe.sold), 0)
+          - COALESCE(SUM(oe.refund_amount) FILTER (WHERE oe.is_return), 0), 2) AS net_revenue_after_refunds,
 
     ROUND(
         CASE
@@ -864,6 +912,159 @@ COMMENT ON COLUMN marts.mart_marketing_funnel.funnel_conversion_rate_pct IS
 'Purchase sessions divided by total sessions for a date/channel/campaign group.';
 
 -- =============================================================================
+-- Daily snapshot marts: leak-free history for consumers
+-- =============================================================================
+-- One row per customer, per product and per campaign for every business date
+-- from the entity's first activity to the last date in the data. A row holds
+-- the columns of the corresponding lifetime mart (mart_customer_360,
+-- mart_product_sales, mart_campaign_performance) as they would have been at
+-- the end of that date: computed only from the orders placed up to it, each
+-- order's status as of it (an order returned later is still a completed sale),
+-- the refunds up to it, the spend and the web events up to it, and the
+-- dimension versions in force on it. Nothing after snapshot_date reaches a
+-- row, so a model can be trained on the snapshot of one date and tested on
+-- what happened after it.
+--
+-- How: for each date the lifetime mart's own query is run against as-of
+-- copies of the facts and dimensions (temporary tables with the warehouse
+-- tables' names, holding only what was known that day). The measures are therefore defined once, in the lifetime
+-- mart, and the snapshot of the last date is the lifetime mart itself (the
+-- mart validation checks that). Business dates are Asia/Kolkata dates, like
+-- the fact date keys.
+
+CREATE TABLE marts.mart_customer_daily_snapshot AS
+SELECT NULL::DATE AS snapshot_date, m.* FROM marts.mart_customer_360 m WITH NO DATA;
+CREATE TABLE marts.mart_product_daily_snapshot AS
+SELECT NULL::DATE AS snapshot_date, m.* FROM marts.mart_product_sales m WITH NO DATA;
+CREATE TABLE marts.mart_campaign_daily_snapshot AS
+SELECT NULL::DATE AS snapshot_date, m.* FROM marts.mart_campaign_performance m WITH NO DATA;
+
+DO $$
+DECLARE
+    as_of RECORD;
+    relation TEXT;
+    column_list TEXT;
+    customer_columns TEXT;
+    day_end TIMESTAMPTZ;
+    customer_query TEXT := pg_get_viewdef('marts.mart_customer_360'::regclass);
+    product_query TEXT := pg_get_viewdef('marts.mart_product_sales'::regclass);
+    campaign_query TEXT := pg_get_viewdef('marts.mart_campaign_performance'::regclass);
+    -- The warehouse relations the lifetime marts read, and their as-of copies.
+    relations CONSTANT TEXT[] := ARRAY['fact_orders', 'fact_order_items', 'fact_web_events', 'fact_campaign_spend',
+                                       'fact_conversions', 'dim_customer', 'dim_product', 'dim_campaign'];
+BEGIN
+    FOREACH relation IN ARRAY relations LOOP
+        EXECUTE format('CREATE TEMP TABLE %1$I (LIKE warehouse.%1$I) ON COMMIT DROP', relation);
+        customer_query := regexp_replace(customer_query, '\mwarehouse\.' || relation || '\M', 'pg_temp.' || relation, 'g');
+        product_query := regexp_replace(product_query, '\mwarehouse\.' || relation || '\M', 'pg_temp.' || relation, 'g');
+        campaign_query := regexp_replace(campaign_query, '\mwarehouse\.' || relation || '\M', 'pg_temp.' || relation, 'g');
+    END LOOP;
+    customer_query := rtrim(customer_query, E'; \n');
+    product_query := rtrim(product_query, E'; \n');
+    campaign_query := rtrim(campaign_query, E'; \n');
+
+    -- Recency is counted to the snapshot date itself (the lifetime mart counts
+    -- it to the latest order date in the data).
+    SELECT string_agg(
+               CASE column_name
+                   WHEN 'days_since_last_order' THEN '($1 - warehouse.business_date(m.last_order_timestamp))'
+                   ELSE 'm.' || quote_ident(column_name)
+               END, ', ' ORDER BY ordinal_position)
+    INTO customer_columns
+    FROM information_schema.columns WHERE table_schema = 'marts' AND table_name = 'mart_customer_360';
+
+    FOR as_of IN
+        SELECT full_date, date_sk FROM warehouse.dim_date WHERE date_sk <> 0 ORDER BY full_date
+    LOOP
+        -- The first instant after the business day (Asia/Kolkata).
+        day_end := ((as_of.full_date + 1)::TEXT || ' 00:00:00 Asia/Kolkata')::TIMESTAMPTZ;
+
+        TRUNCATE pg_temp.fact_orders, pg_temp.fact_order_items, pg_temp.fact_web_events, pg_temp.fact_campaign_spend,
+                 pg_temp.fact_conversions, pg_temp.dim_customer, pg_temp.dim_product, pg_temp.dim_campaign;
+
+        -- Orders placed up to the date, with the status they had at its end: a
+        -- cancellation or a return that happened later has not happened yet.
+        SELECT string_agg(
+                   CASE column_name
+                       WHEN 'order_status' THEN format('CASE WHEN o.status_timestamp >= %L THEN ''completed'' ELSE o.order_status END', day_end)
+                       WHEN 'status_timestamp' THEN format('CASE WHEN o.status_timestamp >= %L THEN o.order_timestamp ELSE o.status_timestamp END', day_end)
+                       WHEN 'refund_amount' THEN format('CASE WHEN o.status_timestamp >= %L THEN 0 ELSE o.refund_amount END', day_end)
+                       ELSE 'o.' || quote_ident(column_name)
+                   END, ', ' ORDER BY ordinal_position)
+        INTO column_list
+        FROM information_schema.columns WHERE table_schema = 'warehouse' AND table_name = 'fact_orders';
+        EXECUTE format('INSERT INTO pg_temp.fact_orders SELECT %s FROM warehouse.fact_orders o WHERE o.order_date_sk BETWEEN 1 AND %s',
+                       column_list, as_of.date_sk);
+
+        -- Their items, with the refund share only once the return has happened.
+        SELECT string_agg(
+                   CASE column_name
+                       WHEN 'refund_amount' THEN 'CASE WHEN o.refund_amount = 0 THEN 0 ELSE i.refund_amount END'
+                       ELSE 'i.' || quote_ident(column_name)
+                   END, ', ' ORDER BY ordinal_position)
+        INTO column_list
+        FROM information_schema.columns WHERE table_schema = 'warehouse' AND table_name = 'fact_order_items';
+        EXECUTE format('INSERT INTO pg_temp.fact_order_items SELECT %s FROM warehouse.fact_order_items i '
+                       'JOIN pg_temp.fact_orders o ON o.order_sk = i.order_sk', column_list);
+
+        EXECUTE format('INSERT INTO pg_temp.fact_web_events SELECT * FROM warehouse.fact_web_events WHERE event_date_sk BETWEEN 1 AND %s', as_of.date_sk);
+        EXECUTE format('INSERT INTO pg_temp.fact_conversions SELECT * FROM warehouse.fact_conversions WHERE conversion_date_sk BETWEEN 1 AND %s', as_of.date_sk);
+        EXECUTE format('INSERT INTO pg_temp.fact_campaign_spend SELECT * FROM warehouse.fact_campaign_spend WHERE spend_date_sk BETWEEN 1 AND %s', as_of.date_sk);
+
+        -- The dimension versions that existed by the end of the date; the one
+        -- in force then is the current one.
+        FOREACH relation IN ARRAY ARRAY['dim_customer', 'dim_product', 'dim_campaign'] LOOP
+            SELECT string_agg(
+                       CASE column_name
+                           WHEN 'is_current' THEN format('(d.effective_to >= %L)', day_end)
+                           ELSE 'd.' || quote_ident(column_name)
+                       END, ', ' ORDER BY ordinal_position)
+            INTO column_list
+            FROM information_schema.columns WHERE table_schema = 'warehouse' AND table_name = relation;
+            EXECUTE format('INSERT INTO pg_temp.%1$I SELECT %2$s FROM warehouse.%1$s d WHERE d.effective_from < %3$L',
+                           relation, column_list, day_end);
+        END LOOP;
+
+        -- The lifetime marts' own queries on that day's knowledge; a row exists
+        -- from the entity's first activity on.
+        EXECUTE format('INSERT INTO marts.mart_customer_daily_snapshot SELECT $1, %s FROM (%s) m '
+                       'WHERE m.total_order_count + m.cancelled_order_count + m.web_event_count > 0',
+                       customer_columns, customer_query)
+        USING as_of.full_date;
+        EXECUTE format('INSERT INTO marts.mart_product_daily_snapshot SELECT %L::DATE, m.* FROM (%s) m '
+                       'WHERE m.order_count + m.cancelled_units + m.product_web_event_count > 0',
+                       as_of.full_date, product_query);
+        EXECUTE format('INSERT INTO marts.mart_campaign_daily_snapshot SELECT %L::DATE, m.* FROM (%s) m '
+                       'WHERE m.order_count + m.cancelled_order_count + m.web_event_count + m.warehouse_conversion_count '
+                       '+ m.impressions > 0 OR m.total_spend > 0',
+                       as_of.full_date, campaign_query);
+    END LOOP;
+
+    -- The as-of copies carry the warehouse tables' names (the lifetime marts'
+    -- queries read them as pg_temp.<table>): gone before anything else runs.
+    FOREACH relation IN ARRAY relations LOOP
+        EXECUTE format('DROP TABLE pg_temp.%I', relation);
+    END LOOP;
+END $$;
+
+ALTER TABLE marts.mart_customer_daily_snapshot
+    ALTER COLUMN snapshot_date SET NOT NULL, ALTER COLUMN customer_id SET NOT NULL,
+    ADD PRIMARY KEY (customer_id, snapshot_date);
+ALTER TABLE marts.mart_product_daily_snapshot
+    ALTER COLUMN snapshot_date SET NOT NULL, ALTER COLUMN product_id SET NOT NULL,
+    ADD PRIMARY KEY (product_id, snapshot_date);
+ALTER TABLE marts.mart_campaign_daily_snapshot
+    ALTER COLUMN snapshot_date SET NOT NULL, ALTER COLUMN campaign_id SET NOT NULL,
+    ADD PRIMARY KEY (campaign_id, snapshot_date);
+
+COMMENT ON TABLE marts.mart_customer_daily_snapshot IS
+'One row per customer and business date from the customer''s first activity: the columns of mart_customer_360 as of the end of snapshot_date, computed only from what was known then (orders, order statuses, refunds, web events and dimension versions up to that date).';
+COMMENT ON TABLE marts.mart_product_daily_snapshot IS
+'One row per product and business date from the product''s first activity: the columns of mart_product_sales as of the end of snapshot_date, computed only from what was known then.';
+COMMENT ON TABLE marts.mart_campaign_daily_snapshot IS
+'One row per campaign and business date from the campaign''s first activity: the columns of mart_campaign_performance as of the end of snapshot_date, computed only from what was known then (spend, orders, refunds, web events and the budget in force up to that date).';
+
+-- =============================================================================
 -- Mart Validation Audit
 -- =============================================================================
 
@@ -959,12 +1160,12 @@ SELECT
     ABS(src.source_amount - tgt.target_amount),
     0.01,
     CASE WHEN ABS(src.source_amount - tgt.target_amount) <= 0.01 THEN 'PASS' ELSE 'FAIL' END,
-    'Validates total daily mart net revenue equals the net revenue of the completed orders in warehouse fact_orders.'
+    'Validates total daily mart net revenue equals the net sales of the orders that were not cancelled in warehouse fact_orders (refunds are a column of their own).'
 FROM mart_validation_context mvc
 CROSS JOIN (
     SELECT COALESCE(SUM(fo.net_revenue), 0)::NUMERIC AS source_amount
     FROM warehouse.fact_orders fo
-    WHERE fo.order_status = 'completed'
+    WHERE fo.order_status <> 'cancelled'
 ) src
 CROSS JOIN (
     SELECT COALESCE(SUM(net_revenue), 0)::NUMERIC AS target_amount
@@ -998,14 +1199,14 @@ SELECT
     ABS(src.source_amount - tgt.target_amount),
     0.01,
     CASE WHEN ABS(src.source_amount - tgt.target_amount) <= 0.01 THEN 'PASS' ELSE 'FAIL' END,
-    'Validates product mart revenue (every member row) equals the line revenue of the completed orders in warehouse fact_order_items.'
+    'Validates product mart revenue (every member row) equals the line revenue of the orders that were not cancelled in warehouse fact_order_items, less the item refunds.'
 FROM mart_validation_context mvc
 CROSS JOIN (
-    SELECT COALESCE(SUM(foi.line_revenue), 0)::NUMERIC AS source_amount
+    SELECT (COALESCE(SUM(foi.line_revenue) FILTER (WHERE fo.order_status <> 'cancelled'), 0)
+            - COALESCE(SUM(foi.refund_amount), 0))::NUMERIC AS source_amount
     FROM warehouse.fact_order_items foi
     JOIN warehouse.fact_orders fo
         ON fo.order_sk = foi.order_sk
-       AND fo.order_status = 'completed'
 ) src
 CROSS JOIN (
     SELECT COALESCE(SUM(product_revenue), 0)::NUMERIC AS target_amount
@@ -1077,10 +1278,10 @@ SELECT
     ABS(src.source_amount - tgt.target_amount),
     0.01,
     CASE WHEN ABS(src.source_amount - tgt.target_amount) <= 0.01 THEN 'PASS' ELSE 'FAIL' END,
-    'Validates customer mart lifetime value (every member row) equals the net revenue of the completed orders.'
+    'Validates customer mart lifetime value (every member row) equals the net sales of the orders that were not cancelled, less refunds.'
 FROM mart_validation_context mvc
 CROSS JOIN (
-    SELECT COALESCE(SUM(net_revenue), 0)::NUMERIC AS source_amount FROM warehouse.fact_orders WHERE order_status = 'completed'
+    SELECT (COALESCE(SUM(net_revenue) FILTER (WHERE order_status <> 'cancelled'), 0) - COALESCE(SUM(refund_amount), 0))::NUMERIC AS source_amount FROM warehouse.fact_orders
 ) src
 CROSS JOIN (
     SELECT COALESCE(SUM(lifetime_value), 0)::NUMERIC AS target_amount FROM marts.mart_customer_360
@@ -1113,10 +1314,10 @@ SELECT
     ABS(src.source_amount - tgt.target_amount),
     0.01,
     CASE WHEN ABS(src.source_amount - tgt.target_amount) <= 0.01 THEN 'PASS' ELSE 'FAIL' END,
-    'Validates customer mart units (every member row) equal the units of the completed orders.'
+    'Validates customer mart units (every member row) equal the units of the orders that were not cancelled.'
 FROM mart_validation_context mvc
 CROSS JOIN (
-    SELECT COALESCE(SUM(foi.quantity), 0)::NUMERIC AS source_amount FROM warehouse.fact_order_items foi JOIN warehouse.fact_orders fo ON fo.order_sk = foi.order_sk AND fo.order_status = 'completed'
+    SELECT COALESCE(SUM(foi.quantity), 0)::NUMERIC AS source_amount FROM warehouse.fact_order_items foi JOIN warehouse.fact_orders fo ON fo.order_sk = foi.order_sk AND fo.order_status <> 'cancelled'
 ) src
 CROSS JOIN (
     SELECT COALESCE(SUM(total_units_purchased), 0)::NUMERIC AS target_amount FROM marts.mart_customer_360
@@ -1149,10 +1350,10 @@ SELECT
     ABS(src.source_amount - tgt.target_amount),
     0.01,
     CASE WHEN ABS(src.source_amount - tgt.target_amount) <= 0.01 THEN 'PASS' ELSE 'FAIL' END,
-    'Validates campaign mart attributed revenue (every member row) equals the net revenue of the completed orders.'
+    'Validates campaign mart attributed revenue (every member row) equals the net sales of the orders that were not cancelled, less refunds.'
 FROM mart_validation_context mvc
 CROSS JOIN (
-    SELECT COALESCE(SUM(net_revenue), 0)::NUMERIC AS source_amount FROM warehouse.fact_orders WHERE order_status = 'completed'
+    SELECT (COALESCE(SUM(net_revenue) FILTER (WHERE order_status <> 'cancelled'), 0) - COALESCE(SUM(refund_amount), 0))::NUMERIC AS source_amount FROM warehouse.fact_orders
 ) src
 CROSS JOIN (
     SELECT COALESCE(SUM(attributed_revenue), 0)::NUMERIC AS target_amount FROM marts.mart_campaign_performance
@@ -1185,10 +1386,10 @@ SELECT
     ABS(src.source_amount - tgt.target_amount),
     0.01,
     CASE WHEN ABS(src.source_amount - tgt.target_amount) <= 0.01 THEN 'PASS' ELSE 'FAIL' END,
-    'Validates product mart units sold (every member row) equal the units of the completed orders.'
+    'Validates product mart units sold (every member row) equal the units of the orders that were not cancelled.'
 FROM mart_validation_context mvc
 CROSS JOIN (
-    SELECT COALESCE(SUM(foi.quantity), 0)::NUMERIC AS source_amount FROM warehouse.fact_order_items foi JOIN warehouse.fact_orders fo ON fo.order_sk = foi.order_sk AND fo.order_status = 'completed'
+    SELECT COALESCE(SUM(foi.quantity), 0)::NUMERIC AS source_amount FROM warehouse.fact_order_items foi JOIN warehouse.fact_orders fo ON fo.order_sk = foi.order_sk AND fo.order_status <> 'cancelled'
 ) src
 CROSS JOIN (
     SELECT COALESCE(SUM(units_sold), 0)::NUMERIC AS target_amount FROM marts.mart_product_sales
@@ -1229,6 +1430,290 @@ CROSS JOIN (
 CROSS JOIN (
     SELECT (COALESCE(SUM(platform_attributed_revenue), 0) + COALESCE(SUM(ad_platform_conversions), 0))::NUMERIC AS target_amount FROM marts.mart_campaign_performance
 ) tgt;
+
+-- 4f. Validates the refunds in the daily mart (on their return dates) equal the refunds in warehouse fact_orders, exactly.
+INSERT INTO audit.mart_validation_report (
+    validation_run_id,
+    check_name,
+    check_category,
+    source_object,
+    target_object,
+    metric_name,
+    source_value,
+    target_value,
+    difference,
+    tolerance,
+    status,
+    details
+)
+SELECT
+    mvc.validation_run_id,
+    'daily_refunds_match_fact_orders',
+    'reconciliation',
+    'warehouse.fact_orders',
+    'marts.mart_revenue_daily',
+    'refund_amount',
+    src.source_amount,
+    tgt.target_amount,
+    ABS(src.source_amount - tgt.target_amount),
+    0,
+    CASE WHEN src.source_amount = tgt.target_amount THEN 'PASS' ELSE 'FAIL' END,
+    'Validates the refunds in the daily mart (on their return dates) equal the refunds in warehouse fact_orders, exactly.'
+FROM mart_validation_context mvc
+CROSS JOIN (
+    SELECT COALESCE(SUM(refund_amount), 0)::NUMERIC AS source_amount FROM warehouse.fact_orders
+) src
+CROSS JOIN (
+    SELECT COALESCE(SUM(refund_amount), 0)::NUMERIC AS target_amount FROM marts.mart_revenue_daily
+) tgt;
+
+-- 4g. Validates the refunds in the customer mart equal the refunds in warehouse fact_orders, exactly.
+INSERT INTO audit.mart_validation_report (
+    validation_run_id,
+    check_name,
+    check_category,
+    source_object,
+    target_object,
+    metric_name,
+    source_value,
+    target_value,
+    difference,
+    tolerance,
+    status,
+    details
+)
+SELECT
+    mvc.validation_run_id,
+    'customer_refunds_match_fact_orders',
+    'reconciliation',
+    'warehouse.fact_orders',
+    'marts.mart_customer_360',
+    'refund_amount',
+    src.source_amount,
+    tgt.target_amount,
+    ABS(src.source_amount - tgt.target_amount),
+    0,
+    CASE WHEN src.source_amount = tgt.target_amount THEN 'PASS' ELSE 'FAIL' END,
+    'Validates the refunds in the customer mart equal the refunds in warehouse fact_orders, exactly.'
+FROM mart_validation_context mvc
+CROSS JOIN (
+    SELECT COALESCE(SUM(refund_amount), 0)::NUMERIC AS source_amount FROM warehouse.fact_orders
+) src
+CROSS JOIN (
+    SELECT COALESCE(SUM(refund_amount), 0)::NUMERIC AS target_amount FROM marts.mart_customer_360
+) tgt;
+
+-- 4h. Validates the refunds in the campaign mart equal the refunds in warehouse fact_orders, exactly.
+INSERT INTO audit.mart_validation_report (
+    validation_run_id,
+    check_name,
+    check_category,
+    source_object,
+    target_object,
+    metric_name,
+    source_value,
+    target_value,
+    difference,
+    tolerance,
+    status,
+    details
+)
+SELECT
+    mvc.validation_run_id,
+    'campaign_refunds_match_fact_orders',
+    'reconciliation',
+    'warehouse.fact_orders',
+    'marts.mart_campaign_performance',
+    'refund_amount',
+    src.source_amount,
+    tgt.target_amount,
+    ABS(src.source_amount - tgt.target_amount),
+    0,
+    CASE WHEN src.source_amount = tgt.target_amount THEN 'PASS' ELSE 'FAIL' END,
+    'Validates the refunds in the campaign mart equal the refunds in warehouse fact_orders, exactly.'
+FROM mart_validation_context mvc
+CROSS JOIN (
+    SELECT COALESCE(SUM(refund_amount), 0)::NUMERIC AS source_amount FROM warehouse.fact_orders
+) src
+CROSS JOIN (
+    SELECT COALESCE(SUM(refund_amount), 0)::NUMERIC AS target_amount FROM marts.mart_campaign_performance
+) tgt;
+
+-- 4i. Validates the refunds in the product mart equal the item refunds in warehouse fact_order_items, exactly.
+INSERT INTO audit.mart_validation_report (
+    validation_run_id,
+    check_name,
+    check_category,
+    source_object,
+    target_object,
+    metric_name,
+    source_value,
+    target_value,
+    difference,
+    tolerance,
+    status,
+    details
+)
+SELECT
+    mvc.validation_run_id,
+    'product_refunds_match_fact_order_items',
+    'reconciliation',
+    'warehouse.fact_order_items',
+    'marts.mart_product_sales',
+    'refund_amount',
+    src.source_amount,
+    tgt.target_amount,
+    ABS(src.source_amount - tgt.target_amount),
+    0,
+    CASE WHEN src.source_amount = tgt.target_amount THEN 'PASS' ELSE 'FAIL' END,
+    'Validates the refunds in the product mart equal the item refunds in warehouse fact_order_items, exactly.'
+FROM mart_validation_context mvc
+CROSS JOIN (
+    SELECT COALESCE(SUM(refund_amount), 0)::NUMERIC AS source_amount FROM warehouse.fact_order_items
+) src
+CROSS JOIN (
+    SELECT COALESCE(SUM(refund_amount), 0)::NUMERIC AS target_amount FROM marts.mart_product_sales
+) tgt;
+
+-- 4j. The last date's snapshot is the lifetime mart.
+INSERT INTO audit.mart_validation_report (
+    validation_run_id,
+    check_name,
+    check_category,
+    source_object,
+    target_object,
+    metric_name,
+    source_value,
+    target_value,
+    difference,
+    tolerance,
+    status,
+    details
+)
+SELECT
+    mvc.validation_run_id,
+    'customer_snapshot_last_date_matches_lifetime_mart',
+    'reconciliation',
+    'marts.mart_customer_360',
+    'marts.mart_customer_daily_snapshot',
+    'differing_rows',
+    0,
+    diff.differing_rows,
+    diff.differing_rows,
+    0,
+    CASE WHEN diff.differing_rows = 0 THEN 'PASS' ELSE 'FAIL' END,
+    'Validates that the snapshot of the last business date equals mart_customer_360 column for column, for every customer_id that has any activity, and that each (customer_id, snapshot_date) appears once.'
+FROM mart_validation_context mvc
+CROSS JOIN (
+    SELECT (
+        (SELECT COUNT(*) FROM marts.mart_customer_daily_snapshot s
+         WHERE s.snapshot_date = (SELECT MAX(snapshot_date) FROM marts.mart_customer_daily_snapshot)
+           -- days_since_last_order is counted to snapshot_date in the snapshot
+           -- and to the latest order date in the lifetime mart: compared apart.
+           AND (to_jsonb(s) - 'snapshot_date' - 'days_since_last_order')
+               NOT IN (SELECT to_jsonb(m) - 'days_since_last_order' FROM marts.mart_customer_360 m))
+      + (SELECT COUNT(*) FROM marts.mart_customer_daily_snapshot s
+         WHERE s.days_since_last_order IS DISTINCT FROM s.snapshot_date - warehouse.business_date(s.last_order_timestamp))
+      + (SELECT COUNT(*) FROM marts.mart_customer_360 m
+         WHERE (m.total_order_count + m.cancelled_order_count + m.web_event_count > 0)
+           AND NOT EXISTS (SELECT 1 FROM marts.mart_customer_daily_snapshot s
+                           WHERE s.customer_id = m.customer_id
+                             AND s.snapshot_date = (SELECT MAX(snapshot_date) FROM marts.mart_customer_daily_snapshot)))
+      + (SELECT COUNT(*) FROM (SELECT customer_id, COUNT(*) AS days, MAX(snapshot_date) - MIN(snapshot_date) + 1 AS span
+                               FROM marts.mart_customer_daily_snapshot GROUP BY customer_id) continuous
+         WHERE continuous.days <> continuous.span)
+    )::NUMERIC AS differing_rows
+) diff;
+
+-- 4k. The last date's snapshot is the lifetime mart.
+INSERT INTO audit.mart_validation_report (
+    validation_run_id,
+    check_name,
+    check_category,
+    source_object,
+    target_object,
+    metric_name,
+    source_value,
+    target_value,
+    difference,
+    tolerance,
+    status,
+    details
+)
+SELECT
+    mvc.validation_run_id,
+    'product_snapshot_last_date_matches_lifetime_mart',
+    'reconciliation',
+    'marts.mart_product_sales',
+    'marts.mart_product_daily_snapshot',
+    'differing_rows',
+    0,
+    diff.differing_rows,
+    diff.differing_rows,
+    0,
+    CASE WHEN diff.differing_rows = 0 THEN 'PASS' ELSE 'FAIL' END,
+    'Validates that the snapshot of the last business date equals mart_product_sales column for column, for every product_id that has any activity, and that each (product_id, snapshot_date) appears once.'
+FROM mart_validation_context mvc
+CROSS JOIN (
+    SELECT (
+        (SELECT COUNT(*) FROM marts.mart_product_daily_snapshot s
+         WHERE s.snapshot_date = (SELECT MAX(snapshot_date) FROM marts.mart_product_daily_snapshot)
+           AND (to_jsonb(s) - 'snapshot_date') NOT IN (SELECT to_jsonb(m) FROM marts.mart_product_sales m))
+      + (SELECT COUNT(*) FROM marts.mart_product_sales m
+         WHERE (m.order_count + m.cancelled_units + m.product_web_event_count > 0)
+           AND NOT EXISTS (SELECT 1 FROM marts.mart_product_daily_snapshot s
+                           WHERE s.product_id = m.product_id
+                             AND s.snapshot_date = (SELECT MAX(snapshot_date) FROM marts.mart_product_daily_snapshot)))
+      + (SELECT COUNT(*) FROM (SELECT product_id, COUNT(*) AS days, MAX(snapshot_date) - MIN(snapshot_date) + 1 AS span
+                               FROM marts.mart_product_daily_snapshot GROUP BY product_id) continuous
+         WHERE continuous.days <> continuous.span)
+    )::NUMERIC AS differing_rows
+) diff;
+
+-- 4l. The last date's snapshot is the lifetime mart.
+INSERT INTO audit.mart_validation_report (
+    validation_run_id,
+    check_name,
+    check_category,
+    source_object,
+    target_object,
+    metric_name,
+    source_value,
+    target_value,
+    difference,
+    tolerance,
+    status,
+    details
+)
+SELECT
+    mvc.validation_run_id,
+    'campaign_snapshot_last_date_matches_lifetime_mart',
+    'reconciliation',
+    'marts.mart_campaign_performance',
+    'marts.mart_campaign_daily_snapshot',
+    'differing_rows',
+    0,
+    diff.differing_rows,
+    diff.differing_rows,
+    0,
+    CASE WHEN diff.differing_rows = 0 THEN 'PASS' ELSE 'FAIL' END,
+    'Validates that the snapshot of the last business date equals mart_campaign_performance column for column, for every campaign_id that has any activity, and that each (campaign_id, snapshot_date) appears once.'
+FROM mart_validation_context mvc
+CROSS JOIN (
+    SELECT (
+        (SELECT COUNT(*) FROM marts.mart_campaign_daily_snapshot s
+         WHERE s.snapshot_date = (SELECT MAX(snapshot_date) FROM marts.mart_campaign_daily_snapshot)
+           AND (to_jsonb(s) - 'snapshot_date') NOT IN (SELECT to_jsonb(m) FROM marts.mart_campaign_performance m))
+      + (SELECT COUNT(*) FROM marts.mart_campaign_performance m
+         WHERE (m.order_count + m.cancelled_order_count + m.web_event_count + m.warehouse_conversion_count + m.impressions > 0 OR m.total_spend > 0)
+           AND NOT EXISTS (SELECT 1 FROM marts.mart_campaign_daily_snapshot s
+                           WHERE s.campaign_id = m.campaign_id
+                             AND s.snapshot_date = (SELECT MAX(snapshot_date) FROM marts.mart_campaign_daily_snapshot)))
+      + (SELECT COUNT(*) FROM (SELECT campaign_id, COUNT(*) AS days, MAX(snapshot_date) - MIN(snapshot_date) + 1 AS span
+                               FROM marts.mart_campaign_daily_snapshot GROUP BY campaign_id) continuous
+         WHERE continuous.days <> continuous.span)
+    )::NUMERIC AS differing_rows
+) diff;
 
 -- 5. Customer 360 has no negative core metrics.
 INSERT INTO audit.mart_validation_report (

@@ -526,7 +526,7 @@ Ad spend and return on ad spend by channel
 ===============================================================================
 Source:
 - warehouse.fact_campaign_spend (one row per campaign, day and region)
-- warehouse.fact_orders (completed orders only are revenue)
+- warehouse.fact_orders (revenue: orders that were not cancelled, less refunds)
 
 platform_roas is what the ad platform reports for its own spend;
 warehouse_roas is the completed order revenue of the channel's campaigns over
@@ -550,11 +550,11 @@ WITH spend AS (
 revenue AS (
     SELECT
         ch.channel_name,
-        SUM(fo.net_revenue) AS completed_revenue
+        SUM(fo.net_revenue) - SUM(fo.refund_amount) AS completed_revenue
     FROM warehouse.fact_orders fo
     JOIN warehouse.dim_channel ch
         ON fo.channel_sk = ch.channel_sk
-    WHERE fo.order_status = 'completed'
+    WHERE fo.order_status <> 'cancelled'
     GROUP BY ch.channel_name
 )
 SELECT
@@ -579,7 +579,7 @@ Source:
 - warehouse.fact_campaign_spend and warehouse.dim_region (the state the ad
   platform reports the spend for)
 - warehouse.fact_orders and warehouse.dim_region (the state the order was
-  placed from; completed orders only)
+  placed from; orders that were not cancelled, less refunds)
 ===============================================================================
 */
 
@@ -598,11 +598,11 @@ WITH spend AS (
 revenue AS (
     SELECT
         dr.state,
-        SUM(fo.net_revenue) AS completed_revenue
+        SUM(fo.net_revenue) - SUM(fo.refund_amount) AS completed_revenue
     FROM warehouse.fact_orders fo
     JOIN warehouse.dim_region dr
         ON fo.region_sk = dr.region_sk
-    WHERE fo.order_status = 'completed'
+    WHERE fo.order_status <> 'cancelled'
     GROUP BY dr.state
 )
 SELECT

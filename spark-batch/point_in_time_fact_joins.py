@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List
 
-from pyspark.sql import Column, DataFrame, SparkSession
+from pyspark.sql import Column, DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
 
 
@@ -334,6 +334,35 @@ def fact_resolution_counts(df: DataFrame, surrogate_keys: List[str]) -> Dict[str
         all_valid = all_valid & F.col(resolution_column(surrogate_key)).isin(*VALID_RESOLUTIONS)
     facts = df.filter(all_valid)
     return {surrogate_key: resolution_counts(facts, surrogate_key) for surrogate_key in surrogate_keys}
+
+
+def allocate_order_refunds(items: DataFrame, orders: DataFrame) -> DataFrame:
+    """refund_amount per item: the order's refund split over its items by line_amount.
+
+    A refund is an amount on the order. Product revenue after refunds needs it
+    per item, so it is split in whole paise in proportion to each line; the
+    largest line (then the lowest order_item_id) takes what rounding leaves, so
+    the items of an order sum to exactly the order's refund. An order that was
+    not returned has no refund, and neither have its items.
+    """
+    order_refunds = orders.select(
+        "order_id", F.round(F.coalesce(F.col("refund_amount"), F.lit(0.0)) * 100).cast("long").alias("_refund")
+    ).dropDuplicates(["order_id"])
+    order_window = Window.partitionBy("order_id")
+    with_refund = (
+        items.drop("refund_amount").join(order_refunds, "order_id", "left")
+        .withColumn("_refund", F.coalesce(F.col("_refund"), F.lit(0).cast("long")))
+        .withColumn("_line", F.round(F.col("line_amount") * 100).cast("long"))
+        .withColumn("_total", F.sum("_line").over(order_window))
+        .withColumn("_share", F.when(F.col("_total") > 0, F.expr("(_refund * _line) div _total")).otherwise(F.lit(0).cast("long")))
+        .withColumn("_first", F.row_number().over(order_window.orderBy(F.col("_line").desc(), F.col("order_item_id").asc())) == 1)
+        .withColumn("_left", F.col("_refund") - F.sum("_share").over(order_window))
+    )
+    return (
+        with_refund
+        .withColumn("refund_amount", (F.col("_share") + F.when(F.col("_first"), F.col("_left")).otherwise(0)) / 100.0)
+        .drop("_refund", "_line", "_total", "_share", "_first", "_left")
+    )
 
 
 def write_table(df: DataFrame, output_path: Path, partition_column: str | None = None) -> None:
@@ -674,6 +703,7 @@ def main() -> None:
             order_items_without_order,
             allowMissingColumns=True,
         )
+        valid_fact_order_items = allocate_order_refunds(valid_fact_order_items, valid_fact_orders)
 
         write_table(
             valid_fact_order_items,

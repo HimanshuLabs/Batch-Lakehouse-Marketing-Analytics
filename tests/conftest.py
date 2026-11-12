@@ -230,9 +230,10 @@ BRONZE_TEMPLATES: dict[str, dict] = {
     },
     "orders": {
         "order_id": "3100027", "user_id": "352", "campaign_id": "26.0", "order_timestamp": "2026-06-11T08:48:11",
-        "order_status": "completed", "payment_method": "UPI", "cart_value": "138901.11", "tax_amount": "25002.20",
+        "order_status": "completed", "status_timestamp": "2026-06-11T08:48:11", "refund_amount": "0.0",
+        "payment_method": "UPI", "cart_value": "138901.11", "tax_amount": "25002.20",
         "shipping_amount": "0.0", "total_amount": "163903.31", "fraud_score": "0.3686", "country": "India",
-        "city": "Cuttack", "state": "Odisha", "schema_version": "v1", "source": "orders_from_purchase_events",
+        "city": "Cuttack", "state": "Odisha", "updated_at": "2026-06-11T08:48:11", "schema_version": "v1", "source": "orders_from_purchase_events",
     },
     "order_items": {
         "order_item_id": "3100012", "order_id": "3100227", "product_id": "4", "product_name": "Bluetooth Speaker",

@@ -141,7 +141,7 @@ INTEGER_COLUMNS = {
 MONEY_COLUMNS = {
     "products": ["original_price", "discounted_price"],
     "campaigns": ["budget"],
-    "orders": ["cart_value", "tax_amount", "shipping_amount", "total_amount"],
+    "orders": ["cart_value", "tax_amount", "shipping_amount", "total_amount", "refund_amount"],
     "order_items": ["original_price", "discounted_price", "line_amount"],
     "ad_spend": ["spend_amount", "attributed_revenue", "campaign_day_spend"],
     "web_events": ["original_price", "discounted_price", "cart_value"],
@@ -595,6 +595,9 @@ def clean_orders(spark: SparkSession) -> tuple[DataFrame, DataFrame]:
         .withColumn("campaign_id", safe_int("campaign_id"))
         .withColumn("order_timestamp", safe_timestamp("order_timestamp"))
         .withColumn("order_status", lower(trim(col("order_status"))))
+        .withColumn("status_timestamp", safe_timestamp("status_timestamp"))
+        .withColumn("refund_amount", safe_double("refund_amount"))
+        .withColumn("updated_at", safe_timestamp("updated_at"))
         .withColumn("payment_method", trim(col("payment_method")))
         .withColumn("cart_value", safe_double("cart_value"))
         .withColumn("tax_amount", safe_double("tax_amount"))
@@ -635,15 +638,31 @@ def clean_orders(spark: SparkSession) -> tuple[DataFrame, DataFrame]:
             != expr(_source_decimal(RAW_PREFIX + "cart_value")) + expr(_source_decimal(RAW_PREFIX + "tax_amount"))
             + expr(_source_decimal(RAW_PREFIX + "shipping_amount"))),
          ORDER_TOTAL_MISMATCH_REASON),
+        # The order's lifecycle: its status took effect at status_timestamp, never
+        # before the order was placed; only a returned order has a refund, and a
+        # refund is more than nothing and at most the order's net value.
+        (col("status_timestamp").isNull() | col("updated_at").isNull(),
+         "Invalid order record: status_timestamp or updated_at is missing"),
+        (col("status_timestamp") < col("order_timestamp"),
+         "Invalid order record: status_timestamp is before order_timestamp"),
+        (not_finite("refund_amount") | (col("refund_amount") < 0), "Invalid order record: refund_amount is missing or negative"),
+        ((col("order_status") != "returned") & (col("refund_amount") != 0),
+         "Invalid order record: refund_amount on an order that was not returned"),
+        ((col("order_status") == "returned") & (col("refund_amount") <= 0),
+         "Invalid order record: a returned order has no refund_amount"),
+        (expr(_source_decimal(RAW_PREFIX + "refund_amount")) > expr(_source_decimal(RAW_PREFIX + "cart_value")),
+         "Invalid order record: refund_amount is more than the order's net value"),
     ], invalid)
 
-    valid, invalid = split_rules(valid, [(
-        after_batch_day("order_timestamp"),
-        "Invalid order record: order_timestamp is after the end of the batch day",
-    )], invalid)
+    valid, invalid = split_rules(valid, [
+        (after_batch_day("order_timestamp"), "Invalid order record: order_timestamp is after the end of the batch day"),
+        (after_batch_day("status_timestamp"), "Invalid order record: status_timestamp is after the end of the batch day"),
+    ], invalid)
     valid, invalid = drop_source_text(valid), drop_source_text(invalid)
 
-    valid = deduplicate_latest(valid, ["order_id"], "order_timestamp")
+    # The source delivers an order again when it is cancelled or returned: the
+    # latest version (by updated_at, then the latest batch) is the order.
+    valid = deduplicate_latest(valid, ["order_id"], "updated_at")
     valid = add_silver_metadata(valid, "silver_orders")
     invalid = add_silver_metadata(invalid, "quarantine_orders")
 

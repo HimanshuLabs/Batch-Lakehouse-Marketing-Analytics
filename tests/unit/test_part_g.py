@@ -143,8 +143,8 @@ def test_records_after_the_end_of_their_batch_day_are_quarantined(silver, write_
     # The batch day is 2026-06-18 (ingestion_date) in Asia/Kolkata: it ends at
     # 2026-06-19 00:00 IST.
     write_bronze("orders", [
-        {"order_id": "1", "order_timestamp": "2026-06-18T23:59:59"},
-        {"order_id": "2", "order_timestamp": "2026-06-19T00:00:00"},
+        {"order_id": "1", "order_timestamp": "2026-06-18T23:59:59", "status_timestamp": "2026-06-18T23:59:59"},
+        {"order_id": "2", "order_timestamp": "2026-06-19T00:00:00", "status_timestamp": "2026-06-19T00:00:00"},
     ])
     write_bronze("order_items", [{"order_item_id": "10", "order_id": "1"}, {"order_item_id": "20", "order_id": "2"}])
     write_bronze("web_events", [

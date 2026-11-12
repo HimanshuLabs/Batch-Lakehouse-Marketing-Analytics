@@ -9,7 +9,7 @@ Verified on 2026-11-10 with run `manual__rerun2_2026-06-18` (BATCH_DATE 2026-06-
 - warehouse reconciliation was 14 of 14 PASS;
 - `power_bi_export` succeeded, with every `data_quality_summary.csv` row PASS.
 
-Those are the numbers of that run. The project now has 21 dbt models and 74 dbt tests; dbt reports `PASS=22` for `dbt run` and `PASS=75` for `dbt test`, because it also counts the `on-run-end` hook that grants `p2_reader` USAGE on the dbt schemas. Reconciliation now has 27 checks, and the DAG has 20 tasks (section below).
+Those are the numbers of that run. The project now has 24 dbt models and 80 dbt tests; dbt reports `PASS=25` for `dbt run` and `PASS=81` for `dbt test`, because it also counts the `on-run-end` hook that grants `p2_reader` USAGE on the dbt schemas. Reconciliation now has 27 checks, and the DAG has 20 tasks (section below).
 
 ---
 
@@ -209,7 +209,7 @@ For a batch date whose raw files already exist, `generate_data` logs `Raw data f
 airflow tasks states-for-dag-run batch_lakehouse_marketing_analytics "$RUN_ID"
 
 docker exec project2_postgres psql -U project2 -d marketing_analytics -c "
-SELECT status, COUNT(*) FROM audit.v_latest_reconciliation_report GROUP BY status;"   # PASS | 27
+SELECT status, COUNT(*) FROM audit.v_latest_reconciliation_report GROUP BY status;"   # PASS | 29
 
 python -c "import csv; print([r for r in csv.DictReader(open('data/bi_exports/data_quality_summary.csv', newline='')) if r['status'] != 'PASS'])"   # prints []
 ```

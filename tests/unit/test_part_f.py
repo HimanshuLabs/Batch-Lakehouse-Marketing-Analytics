@@ -97,7 +97,7 @@ def test_revenue_check_detects_unknown_date_loss(pg):
     pg.execute(warehouse_sql())
     pg.execute("INSERT INTO warehouse.fact_orders(order_sk,order_id,customer_sk,campaign_sk,order_date_sk,"
                "region_sk,channel_sk,net_revenue,customer_id,campaign_id,record_hash,order_status,tax_amount,shipping_amount,"
-               "total_amount) VALUES (1,'one',0,0,0,0,0,25,'UNKNOWN','UNKNOWN','h1','completed',0,0,25)")
+               "total_amount,status_timestamp,refund_amount) VALUES (1,'one',0,0,0,0,0,25,'UNKNOWN','UNKNOWN','h1','completed',0,0,25,'2026-06-17 10:00',0)")
     pg.execute(marts_sql())
     assert pg.execute("SELECT source_value,target_value,status FROM audit.mart_validation_report "
                       "WHERE check_name='daily_revenue_matches_fact_orders'").fetchone() == (25, 0, 'FAIL')
@@ -110,9 +110,9 @@ def test_recency_uses_latest_business_order_date(pg):
                "(3,'no orders','2026-01-01','9999-12-31',true)")
     pg.execute("INSERT INTO warehouse.fact_orders(order_sk,order_id,customer_sk,campaign_sk,order_date_sk,"
                "region_sk,channel_sk,order_timestamp,customer_id,campaign_id,record_hash,order_status,tax_amount,"
-               "shipping_amount,total_amount) VALUES "
-               "(1,'one',1,0,0,0,0,'2026-06-17 18:29:59','one','UNKNOWN','h1','completed',0,0,0),"
-               "(2,'two',2,0,0,0,0,'2026-06-17 18:30:00','two','UNKNOWN','h2','completed',0,0,0)")
+               "shipping_amount,total_amount,status_timestamp,refund_amount) VALUES "
+               "(1,'one',1,0,0,0,0,'2026-06-17 18:29:59','one','UNKNOWN','h1','completed',0,0,0,'2026-06-17 18:29:59',0),"
+               "(2,'two',2,0,0,0,0,'2026-06-17 18:30:00','two','UNKNOWN','h2','completed',0,0,0,'2026-06-17 18:30:00',0)")
     pg.execute(marts_sql())
     for today in ('2026-06-18', '2030-01-01'):
         pg.execute(f"CREATE OR REPLACE FUNCTION warehouse.business_today() RETURNS DATE LANGUAGE SQL STABLE "
