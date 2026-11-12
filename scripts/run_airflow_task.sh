@@ -101,6 +101,34 @@ case "${TASK_NAME}" in
     run_python_file "sql/run_scd2_duckdb_analytics.py"
     ;;
 
+  create_postgresql_schemas)
+    # Makes sure the schemas and the read-only role exist; drops nothing.
+    env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/create_schemas.sql
+    ;;
+
+  load_gold_scd2_to_staging)
+    # Loads staging_next; build_warehouse publishes it as staging.
+    if [[ -f scripts/load_gold_to_postgres_staging.py ]]; then
+      run_python_file "scripts/load_gold_to_postgres_staging.py"
+    else
+      env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/load_gold_to_staging.sql
+    fi
+    ;;
+
+  build_warehouse)
+    # One transaction (several files to run_warehouse_sql.sh): a new generation
+    # of the warehouse, marts and audit schemas, visible to readers only when
+    # all of it is built and every check has passed. A failing check rolls
+    # the build back, fails the task and is written to
+    # logs/warehouse/failed_build_<timestamp>.json.
+    env -u PGPORT bash scripts/run_warehouse_sql.sh \
+      sql/warehouse/begin_generation.sql \
+      sql/warehouse/create_warehouse_tables.sql \
+      sql/warehouse/scd2_validation_queries.sql \
+      sql/warehouse/create_marts.sql \
+      sql/warehouse/reconciliation_report.sql
+    ;;
+
   dbt_run)
     if [[ ! -x "${DBT_BIN}" ]]; then
       echo "dbt binary not found or not executable: ${DBT_BIN}"

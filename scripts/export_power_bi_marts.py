@@ -110,6 +110,18 @@ def validate_table_name(table_name: str) -> None:
         raise ValueError(f"Unsafe or unsupported table name: {table_name}")
 
 
+def csv_value(value: Any) -> Any:
+    """A mart value as the CSV shows it.
+
+    Mart timestamps are TIMESTAMPTZ. The files keep the format the dashboards
+    were built on: the UTC wall time without an offset (2026-06-14 12:05:53),
+    whatever time zone the database session uses.
+    """
+    if isinstance(value, datetime) and value.tzinfo is not None:
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
+
+
 def export_mart(cursor, mart: MartExport, export_dir: Path, allow_empty: bool) -> dict[str, Any]:
     validate_table_name(mart.table_name)
 
@@ -136,7 +148,7 @@ def export_mart(cursor, mart: MartExport, export_dir: Path, allow_empty: bool) -
             writer.writerow(column_names)
 
             for row in cursor:
-                writer.writerow(row)
+                writer.writerow([csv_value(value) for value in row])
                 row_count += 1
 
         manifest_record["row_count"] = row_count

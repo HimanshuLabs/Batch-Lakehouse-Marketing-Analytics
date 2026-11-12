@@ -133,8 +133,8 @@ def test_gate_rejects_failures_and_stale_success(pg, table, column, stale):
     else:
         pg.execute(f"UPDATE audit.{table} SET status='FAIL' WHERE {column}='part-f-test'")
     sql = (CODE_ROOT / 'sql/warehouse/reconciliation_report.sql').read_text()
-    gate = sql.partition('-- Persist diagnostic FAIL rows')[2]
-    gate = gate[gate.find('DO $$'):] if gate else 'SELECT 1'
+    gate = sql.partition('-- Quality gate, before the commit')[2]
+    gate = gate[gate.find('DO $$'):gate.find('COMMIT;')] if gate else 'SELECT 1'
     with pytest.raises(psycopg.errors.RaiseException, match='Quality gate failed'):
         pg.execute(gate)
 
@@ -154,7 +154,11 @@ def test_ordinary_dimension_collision_fails_on_primary_key(pg, dimension, source
         pg.execute(sql)
 
 
-def test_reconciliation_task_failure_persists_and_reaches_summary(pg, load_job, tmp_path):
+def test_reconciliation_task_failure_is_rolled_back_reported_and_reaches_summary(pg, load_job, tmp_path):
+    # Until H2 a failed reconciliation was committed (and so published) before
+    # the task failed. It is now rolled back; the failing checks are in the
+    # task log and in logs/warehouse/failed_build_<timestamp>.json.
+    import json
     import subprocess
     pg.execute(warehouse_sql())
     pg.execute("CREATE TABLE audit.scd2_validation_results (validation_run_id text,status text); "
@@ -171,12 +175,30 @@ def test_reconciliation_task_failure_persists_and_reaches_summary(pg, load_job, 
     assert result.returncode != 0, result.stdout
     assert 'Quality gate failed' in result.stdout
     assert 'Warehouse SQL completed successfully' not in result.stdout
-    from psycopg.rows import dict_row
-    with pg.cursor(row_factory=dict_row) as cur:
-        cur.execute('SELECT * FROM audit.reconciliation_report')
-        reconciliation = cur.fetchall()
-    assert any(row['status'] == 'FAIL' for row in reconciliation)
+    assert pg.execute("SELECT to_regclass('audit.reconciliation_report')").fetchone()[0] is None, \
+        'the failed reconciliation was committed'
+    reports = list((tmp_path / 'logs' / 'warehouse').glob('failed_build_*.json'))
+    assert len(reports) == 1, result.stdout[-2000:]
+    report = json.loads(reports[0].read_text(encoding='utf-8'))
+    assert report['run_id'] == 'part-f-test' and report['failing_check_count'] == len(report['failing_checks']) >= 1
+    # (The gate lists every report's failures; this test built only the reconciliation.)
+    failing = [check for check in report['failing_checks'] if check['report'] == 'audit.reconciliation_report']
+    assert failing
+    for check in failing:
+        assert check['status'] == 'FAIL'
+        assert check['expected'] != check['actual'] and check['details']
+        assert f"FAILED CHECK audit.reconciliation_report | {check['check_name']} |" in result.stdout
+    # The export's summary shows a failed check as FAIL (it takes report rows).
+    reconciliation = [{'check_name': check['check_name'], 'status': check['status'],
+                       'source_count': check['expected'], 'target_count': check['actual'],
+                       'count_difference': check['difference'], 'source_amount': None, 'target_amount': None,
+                       'amount_difference': None, 'details': check['details']} for check in failing]
     export = load_job('sql/export_power_bi_dataset.py')
+    # The passing checks are gone with the rollback; the summary requires this one.
+    if export.WEB_EVENT_CONSERVATION_CHECK not in {check['check_name'] for check in reconciliation}:
+        reconciliation.append({'check_name': export.WEB_EVENT_CONSERVATION_CHECK, 'status': 'PASS', 'source_count': 0,
+                               'target_count': 0, 'count_difference': 0, 'source_amount': None, 'target_amount': None,
+                               'amount_difference': None, 'details': None})
     rows = export.build_data_quality_summary(
         reconciliation, [{'check_name': 'scd', 'failed_row_count': 0, 'status': 'PASS'}],
         [{'table_name': 'items', 'status': 'PASSED', 'quarantine_row_count': 0, 'unaccounted_row_count': 0}],

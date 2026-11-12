@@ -2,17 +2,15 @@
 set -euo pipefail
 export P2_RUN_ID="${P2_RUN_ID:-warehouse-$(date +%s%N)-$$}"
 
-echo "==> Building warehouse facts and dimensions"
-env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/create_warehouse_tables.sql
-
-echo "==> Building SCD2 validation views and results"
-env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/scd2_validation_queries.sql
-
-echo "==> Building BI-ready marts"
-env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/create_marts.sql
-
-echo "==> Running warehouse reconciliation"
-env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/reconciliation_report.sql
+# The warehouse is rebuilt as one transaction (sql/warehouse/begin_generation.sql):
+# readers see the old warehouse until it commits, then the new one.
+echo "==> Building the warehouse: facts and dimensions, SCD2 validation, marts, reconciliation"
+env -u PGPORT bash scripts/run_warehouse_sql.sh \
+  sql/warehouse/begin_generation.sql \
+  sql/warehouse/create_warehouse_tables.sql \
+  sql/warehouse/scd2_validation_queries.sql \
+  sql/warehouse/create_marts.sql \
+  sql/warehouse/reconciliation_report.sql
 
 echo "==> Final mart validation status"
 docker exec project2_postgres psql -U project2 -d marketing_analytics -c "

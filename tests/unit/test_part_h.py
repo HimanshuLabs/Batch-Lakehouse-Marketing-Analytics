@@ -150,7 +150,7 @@ def test_every_fact_table_has_natural_ids_and_lineage_columns():
         ddl = re.search(rf"CREATE TABLE warehouse\.{table} \((.*?)\n\);", code, re.S).group(1)
         for column in ids:
             assert re.search(rf"\b{column} TEXT NOT NULL,", ddl), (table, column)
-        assert "source_updated_at TIMESTAMP," in ddl and "record_hash TEXT," in ddl, table
+        assert "source_updated_at TIMESTAMPTZ," in ddl and "record_hash TEXT," in ddl, table
         assert f"ALTER TABLE warehouse.{table} ALTER COLUMN record_hash SET NOT NULL;" in code
 
 
@@ -325,7 +325,7 @@ def test_every_dag_task_runs_under_the_run_lock(load_job, monkeypatch):
         monkeypatch.delenv(name, raising=False)
     recorder = stub_airflow(monkeypatch)
     load_job(DAG_FILE)
-    assert len(recorder.tasks) == 23
+    assert len(recorder.tasks) == 20
     for task, kwargs in recorder.tasks.items():
         flag = "--last " if task == "power_bi_export" else ""
         assert re.match(rf'"\$PROJECT_PYTHON" "\S+/scripts/pipeline_lock\.py" {flag}{task} -- bash -c ',

@@ -33,7 +33,7 @@ CREATE TABLE audit.scd2_validation_results (
     status TEXT NOT NULL CHECK (status IN ('PASS', 'FAIL')),
     severity TEXT NOT NULL DEFAULT 'ERROR',
     details TEXT,
-    checked_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    checked_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 COMMENT ON TABLE audit.scd2_validation_results IS
@@ -616,8 +616,8 @@ SELECT
 FROM warehouse.fact_campaign_spend fcs
 JOIN warehouse.dim_campaign dca ON fcs.campaign_sk = dca.campaign_sk
 WHERE fcs.spend_date IS NULL
-   OR fcs.spend_date::TIMESTAMP < dca.effective_from
-   OR fcs.spend_date::TIMESTAMP >= dca.effective_to
+   OR (fcs.spend_date::TIMESTAMP AT TIME ZONE 'UTC') < dca.effective_from
+   OR (fcs.spend_date::TIMESTAMP AT TIME ZONE 'UTC') >= dca.effective_to
 
 UNION ALL
 
@@ -723,7 +723,7 @@ SELECT
     'warehouse.fact_campaign_spend.campaign_sk',
     fcs.campaign_spend_nk,
     s.campaign_id::BIGINT::TEXT,
-    fcs.spend_date::TIMESTAMP
+    (fcs.spend_date::TIMESTAMP AT TIME ZONE 'UTC')
 FROM warehouse.fact_campaign_spend fcs
 JOIN staging.stg_gold_fact_campaign_spend_scd2 s ON s.spend_id::TEXT = fcs.campaign_spend_nk
 WHERE fcs.campaign_sk = 0

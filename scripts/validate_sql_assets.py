@@ -8,6 +8,7 @@ import sys
 REQUIRED_FILES = {
     "sql/warehouse/create_schemas.sql": ["create schema"],
     "sql/warehouse/load_gold_to_staging.sql": ["staging"],
+    "sql/warehouse/begin_generation.sql": ["alter schema"],
     "sql/warehouse/create_warehouse_tables.sql": ["warehouse"],
     "sql/warehouse/create_marts.sql": ["marts"],
     "sql/warehouse/create_indexes.sql": ["create index"],

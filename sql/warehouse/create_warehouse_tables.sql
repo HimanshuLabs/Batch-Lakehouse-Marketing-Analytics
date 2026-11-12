@@ -123,7 +123,7 @@ END;
 $$;
 
 CREATE OR REPLACE FUNCTION warehouse.safe_timestamp(value TEXT)
-RETURNS TIMESTAMP
+RETURNS TIMESTAMPTZ
 LANGUAGE plpgsql
 IMMUTABLE
 SET timezone = 'UTC'
@@ -133,7 +133,7 @@ BEGIN
         RETURN NULL;
     END IF;
 
-    RETURN btrim(value)::TIMESTAMPTZ AT TIME ZONE 'UTC';
+    RETURN btrim(value)::TIMESTAMPTZ;
 EXCEPTION WHEN OTHERS THEN
     RETURN NULL;
 END;
@@ -168,13 +168,14 @@ $$;
 
 -- Business dates are calendar days in Asia/Kolkata, the same as Gold (Spark
 -- derives order_date and event_date in SOURCE_TIMEZONE). Stored timestamps
--- stay naive UTC; only the date derived from them uses IST.
-CREATE OR REPLACE FUNCTION warehouse.business_date(utc_ts TIMESTAMP)
+-- are instants (TIMESTAMPTZ, shown in UTC); only the date derived from them
+-- uses IST.
+CREATE OR REPLACE FUNCTION warehouse.business_date(ts TIMESTAMPTZ)
 RETURNS DATE
 LANGUAGE SQL
 IMMUTABLE
 AS $$
-    SELECT ((utc_ts AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata')::DATE;
+    SELECT (ts AT TIME ZONE 'Asia/Kolkata')::DATE;
 $$;
 
 -- Today in the business time zone (for "days since" measures).
@@ -270,12 +271,12 @@ CREATE TABLE warehouse.dim_customer (
     home_city TEXT,
     home_state TEXT,
     country TEXT,
-    effective_from TIMESTAMP NOT NULL DEFAULT TIMESTAMP '1900-01-01 00:00:00',
-    effective_to TIMESTAMP NOT NULL DEFAULT TIMESTAMP '9999-12-31 00:00:00',
+    effective_from TIMESTAMPTZ NOT NULL DEFAULT TIMESTAMPTZ '1900-01-01 00:00:00+00',
+    effective_to TIMESTAMPTZ NOT NULL DEFAULT TIMESTAMPTZ '9999-12-31 00:00:00+00',
     is_current BOOLEAN NOT NULL DEFAULT TRUE,
-    source_updated_at TIMESTAMP,
+    source_updated_at TIMESTAMPTZ,
     scd_hash TEXT,
-    warehouse_loaded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    warehouse_loaded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_dim_customer_natural_version UNIQUE (customer_id, effective_from),
     CONSTRAINT chk_dim_customer_effective_range CHECK (effective_to > effective_from),
     CONSTRAINT chk_dim_customer_age CHECK (age IS NULL OR age BETWEEN 0 AND 120)
@@ -296,12 +297,12 @@ CREATE TABLE warehouse.dim_product (
     original_price NUMERIC(18, 2),
     current_price NUMERIC(18, 2),
     inventory_remaining INTEGER,
-    effective_from TIMESTAMP NOT NULL DEFAULT TIMESTAMP '1900-01-01 00:00:00',
-    effective_to TIMESTAMP NOT NULL DEFAULT TIMESTAMP '9999-12-31 00:00:00',
+    effective_from TIMESTAMPTZ NOT NULL DEFAULT TIMESTAMPTZ '1900-01-01 00:00:00+00',
+    effective_to TIMESTAMPTZ NOT NULL DEFAULT TIMESTAMPTZ '9999-12-31 00:00:00+00',
     is_current BOOLEAN NOT NULL DEFAULT TRUE,
-    source_updated_at TIMESTAMP,
+    source_updated_at TIMESTAMPTZ,
     scd_hash TEXT,
-    warehouse_loaded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    warehouse_loaded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_dim_product_natural_version UNIQUE (product_id, effective_from),
     CONSTRAINT chk_dim_product_effective_range CHECK (effective_to > effective_from),
     CONSTRAINT chk_dim_product_prices CHECK (
@@ -328,12 +329,12 @@ CREATE TABLE warehouse.dim_campaign (
     campaign_start_date DATE,
     campaign_end_date DATE,
     budget NUMERIC(18, 2),
-    effective_from TIMESTAMP NOT NULL DEFAULT TIMESTAMP '1900-01-01 00:00:00',
-    effective_to TIMESTAMP NOT NULL DEFAULT TIMESTAMP '9999-12-31 00:00:00',
+    effective_from TIMESTAMPTZ NOT NULL DEFAULT TIMESTAMPTZ '1900-01-01 00:00:00+00',
+    effective_to TIMESTAMPTZ NOT NULL DEFAULT TIMESTAMPTZ '9999-12-31 00:00:00+00',
     is_current BOOLEAN NOT NULL DEFAULT TRUE,
-    source_updated_at TIMESTAMP,
+    source_updated_at TIMESTAMPTZ,
     scd_hash TEXT,
-    warehouse_loaded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    warehouse_loaded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_dim_campaign_natural_version UNIQUE (campaign_id, effective_from),
     CONSTRAINT chk_dim_campaign_effective_range CHECK (effective_to > effective_from),
     CONSTRAINT chk_dim_campaign_budget CHECK (budget IS NULL OR budget >= 0)
@@ -372,7 +373,7 @@ CREATE TABLE warehouse.dim_region (
     country TEXT NOT NULL DEFAULT 'Unknown',
     state TEXT NOT NULL DEFAULT 'Unknown',
     city TEXT NOT NULL DEFAULT 'Unknown',
-    warehouse_loaded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    warehouse_loaded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 COMMENT ON TABLE warehouse.dim_region IS
@@ -384,7 +385,7 @@ CREATE TABLE warehouse.dim_channel (
     channel_nk TEXT NOT NULL UNIQUE,
     channel_name TEXT NOT NULL,
     channel_group TEXT,
-    warehouse_loaded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    warehouse_loaded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 COMMENT ON TABLE warehouse.dim_channel IS
@@ -407,7 +408,7 @@ CREATE TABLE warehouse.fact_orders (
     order_date_sk INTEGER NOT NULL REFERENCES warehouse.dim_date(date_sk),
     region_sk BIGINT NOT NULL REFERENCES warehouse.dim_region(region_sk),
     channel_sk BIGINT NOT NULL REFERENCES warehouse.dim_channel(channel_sk),
-    order_timestamp TIMESTAMP,
+    order_timestamp TIMESTAMPTZ,
     order_status TEXT NOT NULL DEFAULT 'completed',
     payment_method TEXT,
     item_count INTEGER NOT NULL DEFAULT 0,
@@ -420,9 +421,9 @@ CREATE TABLE warehouse.fact_orders (
     -- The batch date (Asia/Kolkata day) of the Bronze batch that last delivered
     -- the row, and an md5 of the row's business columns. Both come from the
     -- data only, so a rebuild never changes them.
-    source_updated_at TIMESTAMP,
+    source_updated_at TIMESTAMPTZ,
     record_hash TEXT,
-    warehouse_loaded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    warehouse_loaded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT chk_fact_orders_amounts CHECK (
         gross_amount >= 0
         AND discount_amount >= 0
@@ -449,7 +450,7 @@ CREATE TABLE warehouse.fact_order_items (
     order_date_sk INTEGER NOT NULL REFERENCES warehouse.dim_date(date_sk),
     region_sk BIGINT NOT NULL REFERENCES warehouse.dim_region(region_sk),
     channel_sk BIGINT NOT NULL REFERENCES warehouse.dim_channel(channel_sk),
-    order_timestamp TIMESTAMP,
+    order_timestamp TIMESTAMPTZ,
     quantity INTEGER NOT NULL DEFAULT 1,
     unit_price NUMERIC(18, 2) NOT NULL DEFAULT 0,
     discount_percent NUMERIC(9, 4) NOT NULL DEFAULT 0,
@@ -461,9 +462,9 @@ CREATE TABLE warehouse.fact_order_items (
     -- The batch date (Asia/Kolkata day) of the Bronze batch that last delivered
     -- the row, and an md5 of the row's business columns. Both come from the
     -- data only, so a rebuild never changes them.
-    source_updated_at TIMESTAMP,
+    source_updated_at TIMESTAMPTZ,
     record_hash TEXT,
-    warehouse_loaded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    warehouse_loaded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT chk_fact_order_items_metrics CHECK (
         quantity >= 0
         AND unit_price >= 0
@@ -496,9 +497,9 @@ CREATE TABLE warehouse.fact_campaign_spend (
     -- The batch date (Asia/Kolkata day) of the Bronze batch that last delivered
     -- the row, and an md5 of the row's business columns. Both come from the
     -- data only, so a rebuild never changes them.
-    source_updated_at TIMESTAMP,
+    source_updated_at TIMESTAMPTZ,
     record_hash TEXT,
-    warehouse_loaded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    warehouse_loaded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT chk_fact_campaign_spend_metrics CHECK (
         spend_amount >= 0
         AND impressions >= 0
@@ -526,7 +527,7 @@ CREATE TABLE warehouse.fact_web_events (
     event_date_sk INTEGER NOT NULL REFERENCES warehouse.dim_date(date_sk),
     region_sk BIGINT NOT NULL REFERENCES warehouse.dim_region(region_sk),
     channel_sk BIGINT NOT NULL REFERENCES warehouse.dim_channel(channel_sk),
-    event_timestamp TIMESTAMP,
+    event_timestamp TIMESTAMPTZ,
     event_type TEXT NOT NULL,
     user_journey_stage TEXT,
     device_type TEXT,
@@ -549,9 +550,9 @@ CREATE TABLE warehouse.fact_web_events (
     -- The batch date (Asia/Kolkata day) of the Bronze batch that last delivered
     -- the row, and an md5 of the row's business columns. Both come from the
     -- data only, so a rebuild never changes them.
-    source_updated_at TIMESTAMP,
+    source_updated_at TIMESTAMPTZ,
     record_hash TEXT,
-    warehouse_loaded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    warehouse_loaded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 COMMENT ON TABLE warehouse.fact_web_events IS
@@ -568,11 +569,11 @@ CREATE TABLE audit.fact_web_events_rejects (
     customer_id TEXT NOT NULL,
     product_id TEXT NOT NULL,
     campaign_id TEXT NOT NULL,
-    event_timestamp TIMESTAMP,
+    event_timestamp TIMESTAMPTZ,
     event_type TEXT NOT NULL,
     event_value NUMERIC(18, 2) NOT NULL DEFAULT 0,
     reject_reason TEXT NOT NULL,
-    warehouse_loaded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    warehouse_loaded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 COMMENT ON TABLE audit.fact_web_events_rejects IS
@@ -594,15 +595,15 @@ CREATE TABLE warehouse.fact_conversions (
     conversion_date_sk INTEGER NOT NULL REFERENCES warehouse.dim_date(date_sk),
     region_sk BIGINT NOT NULL REFERENCES warehouse.dim_region(region_sk),
     channel_sk BIGINT NOT NULL REFERENCES warehouse.dim_channel(channel_sk),
-    conversion_timestamp TIMESTAMP,
+    conversion_timestamp TIMESTAMPTZ,
     conversion_type TEXT NOT NULL,
     conversion_value NUMERIC(18, 2) NOT NULL DEFAULT 0,
     -- The batch date (Asia/Kolkata day) of the Bronze batch that last delivered
     -- the row, and an md5 of the row's business columns. Both come from the
     -- data only, so a rebuild never changes them.
-    source_updated_at TIMESTAMP,
+    source_updated_at TIMESTAMPTZ,
     record_hash TEXT,
-    warehouse_loaded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    warehouse_loaded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT chk_fact_conversions_value CHECK (conversion_value >= 0)
 );
 
@@ -629,7 +630,7 @@ VALUES (
     0, 'UNKNOWN', 'Unknown', NULL, NULL, NULL,
     'Unknown', NULL, NULL, 'Unknown',
     NULL, 'Unknown', 'Unknown', 'Unknown',
-    TIMESTAMP '1900-01-01', TIMESTAMP '9999-12-31',
+    TIMESTAMPTZ '1900-01-01 00:00:00+00', TIMESTAMPTZ '9999-12-31 00:00:00+00',
     TRUE, NULL, 'UNKNOWN'
 )
 ON CONFLICT (customer_sk) DO NOTHING;
@@ -642,7 +643,7 @@ INSERT INTO warehouse.dim_product (
 VALUES (
     0, 'UNKNOWN', 'Unknown', 'Unknown', NULL,
     0, 0, NULL,
-    TIMESTAMP '1900-01-01', TIMESTAMP '9999-12-31',
+    TIMESTAMPTZ '1900-01-01 00:00:00+00', TIMESTAMPTZ '9999-12-31 00:00:00+00',
     TRUE, NULL, 'UNKNOWN'
 )
 ON CONFLICT (product_sk) DO NOTHING;
@@ -655,7 +656,7 @@ INSERT INTO warehouse.dim_campaign (
 VALUES (
     0, 'UNKNOWN', 'Unknown', 'Unknown',
     'Unknown', 'Unknown', 'Unknown', 'Unknown', NULL, NULL,
-    0, TIMESTAMP '1900-01-01', TIMESTAMP '9999-12-31',
+    0, TIMESTAMPTZ '1900-01-01 00:00:00+00', TIMESTAMPTZ '9999-12-31 00:00:00+00',
     TRUE, NULL, 'UNKNOWN'
 )
 ON CONFLICT (campaign_sk) DO NOTHING;
@@ -834,11 +835,11 @@ BEGIN
                     coalesce(nullif(r->>'country', ''), 'Unknown') AS country,
                     coalesce(
                         warehouse.safe_timestamp(coalesce(r->>'effective_from', r->>'valid_from', r->>'start_date')),
-                        TIMESTAMP '1900-01-01'
+                        TIMESTAMPTZ '1900-01-01 00:00:00+00'
                     ) AS effective_from,
                     coalesce(
                         warehouse.safe_timestamp(coalesce(r->>'effective_to', r->>'valid_to', r->>'end_date')),
-                        TIMESTAMP '9999-12-31'
+                        TIMESTAMPTZ '9999-12-31 00:00:00+00'
                     ) AS effective_to,
                     coalesce(warehouse.safe_bool(r->>'is_current'), true) AS is_current,
                     warehouse.safe_timestamp(coalesce(r->>'source_updated_at', r->>'effective_from', r->>'updated_at')) AS source_updated_at,
@@ -848,7 +849,7 @@ BEGIN
                         coalesce(warehouse.safe_timestamp(coalesce(
                             nullif(r->>'source_updated_at', ''), nullif(r->>'effective_from', ''),
                             nullif(r->>'valid_from', '')
-                        )), TIMESTAMP '1900-01-01')
+                        )), TIMESTAMPTZ '1900-01-01 00:00:00+00')
                     ) AS dimension_identity,
                     md5(r::TEXT) AS row_fingerprint
                 FROM src
@@ -880,7 +881,7 @@ BEGIN
                 CASE
                     WHEN effective_to <= effective_from THEN
                         CASE
-                            WHEN is_current THEN TIMESTAMP '9999-12-31 00:00:00'
+                            WHEN is_current THEN TIMESTAMPTZ '9999-12-31 00:00:00+00'
                             ELSE effective_from + INTERVAL '1 microsecond'
                         END
                     ELSE effective_to
@@ -951,11 +952,11 @@ BEGIN
                     warehouse.safe_int(r->>'inventory_remaining') AS inventory_remaining,
                     coalesce(
                         warehouse.safe_timestamp(coalesce(r->>'effective_from', r->>'valid_from', r->>'start_date')),
-                        TIMESTAMP '1900-01-01'
+                        TIMESTAMPTZ '1900-01-01 00:00:00+00'
                     ) AS effective_from,
                     coalesce(
                         warehouse.safe_timestamp(coalesce(r->>'effective_to', r->>'valid_to', r->>'end_date')),
-                        TIMESTAMP '9999-12-31'
+                        TIMESTAMPTZ '9999-12-31 00:00:00+00'
                     ) AS effective_to,
                     coalesce(warehouse.safe_bool(r->>'is_current'), true) AS is_current,
                     warehouse.safe_timestamp(coalesce(r->>'source_updated_at', r->>'effective_from', r->>'updated_at')) AS source_updated_at,
@@ -965,7 +966,7 @@ BEGIN
                         coalesce(warehouse.safe_timestamp(coalesce(
                             nullif(r->>'source_updated_at', ''), nullif(r->>'effective_from', ''),
                             nullif(r->>'valid_from', '')
-                        )), TIMESTAMP '1900-01-01')
+                        )), TIMESTAMPTZ '1900-01-01 00:00:00+00')
                     ) AS dimension_identity,
                     md5(r::TEXT) AS row_fingerprint
                 FROM src
@@ -995,7 +996,7 @@ BEGIN
                 CASE
                     WHEN effective_to <= effective_from THEN
                         CASE
-                            WHEN is_current THEN TIMESTAMP '9999-12-31 00:00:00'
+                            WHEN is_current THEN TIMESTAMPTZ '9999-12-31 00:00:00+00'
                             ELSE effective_from + INTERVAL '1 microsecond'
                         END
                     ELSE effective_to
@@ -1063,11 +1064,11 @@ BEGIN
                     coalesce(warehouse.safe_numeric(r->>'budget'), warehouse.safe_numeric(r->>'campaign_budget')) AS budget,
                     coalesce(
                         warehouse.safe_timestamp(coalesce(r->>'effective_from', r->>'valid_from', r->>'start_date')),
-                        TIMESTAMP '1900-01-01'
+                        TIMESTAMPTZ '1900-01-01 00:00:00+00'
                     ) AS effective_from,
                     coalesce(
                         warehouse.safe_timestamp(coalesce(r->>'effective_to', r->>'valid_to', r->>'end_date')),
-                        TIMESTAMP '9999-12-31'
+                        TIMESTAMPTZ '9999-12-31 00:00:00+00'
                     ) AS effective_to,
                     coalesce(warehouse.safe_bool(r->>'is_current'), true) AS is_current,
                     warehouse.safe_timestamp(coalesce(r->>'source_updated_at', r->>'effective_from', r->>'updated_at')) AS source_updated_at,
@@ -1077,7 +1078,7 @@ BEGIN
                         coalesce(warehouse.safe_timestamp(coalesce(
                             nullif(r->>'source_updated_at', ''), nullif(r->>'effective_from', ''),
                             nullif(r->>'valid_from', '')
-                        )), TIMESTAMP '1900-01-01')
+                        )), TIMESTAMPTZ '1900-01-01 00:00:00+00')
                     ) AS dimension_identity,
                     md5(r::TEXT) AS row_fingerprint
                 FROM src
@@ -1108,7 +1109,7 @@ BEGIN
                 CASE
                     WHEN effective_to <= effective_from THEN
                         CASE
-                            WHEN is_current THEN TIMESTAMP '9999-12-31 00:00:00'
+                            WHEN is_current THEN TIMESTAMPTZ '9999-12-31 00:00:00+00'
                             ELSE effective_from + INTERVAL '1 microsecond'
                         END
                     ELSE effective_to
@@ -1266,7 +1267,7 @@ BEGIN
                         0
                     ) AS net_revenue,
                     coalesce(nullif(r->>'record_hash', ''), nullif(r->>'source_record_hash', ''), md5(r::TEXT)) AS source_record_hash,
-                    warehouse.safe_date(r->>'ingestion_date')::TIMESTAMP AS source_updated_at,
+                    (warehouse.safe_date(r->>'ingestion_date')::TIMESTAMP AT TIME ZONE 'UTC') AS source_updated_at,
                     md5(r::TEXT) AS row_fingerprint
                 FROM src
             )
@@ -1400,7 +1401,7 @@ BEGIN
                         warehouse.safe_numeric(r->>'line_total'),
                         0
                     ) AS source_line_revenue,
-                    warehouse.safe_date(r->>'ingestion_date')::TIMESTAMP AS source_updated_at,
+                    (warehouse.safe_date(r->>'ingestion_date')::TIMESTAMP AT TIME ZONE 'UTC') AS source_updated_at,
                     md5(r::TEXT) AS row_fingerprint
                 FROM src
             )
@@ -1579,7 +1580,7 @@ BEGIN
                     coalesce(warehouse.safe_bigint(r->>'clicks'), 0) AS clicks,
                     coalesce(warehouse.safe_bigint(r->>'conversions'), 0) AS conversions,
                     coalesce(warehouse.safe_numeric(r->>'attributed_revenue'), warehouse.safe_numeric(r->>'revenue'), 0) AS attributed_revenue,
-                    warehouse.safe_date(r->>'ingestion_date')::TIMESTAMP AS source_updated_at,
+                    (warehouse.safe_date(r->>'ingestion_date')::TIMESTAMP AT TIME ZONE 'UTC') AS source_updated_at,
                     md5(r::TEXT) AS row_fingerprint
                 FROM src
             )
@@ -1608,8 +1609,8 @@ BEGIN
                 SELECT campaign_sk
                 FROM warehouse.dim_campaign dc
                 WHERE dc.campaign_id = b.campaign_id
-                  AND b.spend_date::TIMESTAMP >= dc.effective_from
-                  AND b.spend_date::TIMESTAMP < dc.effective_to
+                  AND (b.spend_date::TIMESTAMP AT TIME ZONE 'UTC') >= dc.effective_from
+                  AND (b.spend_date::TIMESTAMP AT TIME ZONE 'UTC') < dc.effective_to
                 ORDER BY dc.effective_from DESC, dc.campaign_sk
                 LIMIT 1
             ) dc ON TRUE
@@ -1705,7 +1706,7 @@ BEGIN
                     warehouse.safe_numeric(r->>'fraud_score') AS fraud_score,
                     nullif(r->>'schema_version', '') AS schema_version,
                     coalesce(nullif(r->>'source', ''), nullif(r->>'source_system', '')) AS source_system,
-                    warehouse.safe_date(r->>'ingestion_date')::TIMESTAMP AS source_updated_at,
+                    (warehouse.safe_date(r->>'ingestion_date')::TIMESTAMP AT TIME ZONE 'UTC') AS source_updated_at,
                     md5(r::TEXT) AS row_fingerprint
                 FROM src
             ),
@@ -1928,12 +1929,12 @@ ON CONFLICT (conversion_nk) DO UPDATE SET
 -- ---------------------------------------------------------------------------
 
 UPDATE warehouse.fact_orders SET record_hash = md5(array_to_string(ARRAY[
-    order_id, customer_id, campaign_id, order_timestamp::TEXT, order_status, payment_method, item_count::TEXT,
+    order_id, customer_id, campaign_id, (order_timestamp AT TIME ZONE 'UTC')::TEXT, order_status, payment_method, item_count::TEXT,
     gross_amount::TEXT, discount_amount::TEXT, tax_amount::TEXT, shipping_amount::TEXT, net_revenue::TEXT
 ], '|', '<NULL>'));
 
 UPDATE warehouse.fact_order_items SET record_hash = md5(array_to_string(ARRAY[
-    order_item_nk, order_id, customer_id, product_id, order_timestamp::TEXT, quantity::TEXT, unit_price::TEXT,
+    order_item_nk, order_id, customer_id, product_id, (order_timestamp AT TIME ZONE 'UTC')::TEXT, quantity::TEXT, unit_price::TEXT,
     discount_percent::TEXT, gross_amount::TEXT, discount_amount::TEXT, line_revenue::TEXT
 ], '|', '<NULL>'));
 
@@ -1943,7 +1944,7 @@ UPDATE warehouse.fact_campaign_spend SET record_hash = md5(array_to_string(ARRAY
 ], '|', '<NULL>'));
 
 UPDATE warehouse.fact_web_events SET record_hash = md5(array_to_string(ARRAY[
-    event_id, session_id, customer_id, product_id, campaign_id, event_timestamp::TEXT, event_type,
+    event_id, session_id, customer_id, product_id, campaign_id, (event_timestamp AT TIME ZONE 'UTC')::TEXT, event_type,
     user_journey_stage, device_type, operating_system, browser, network_type, traffic_source, search_query,
     time_on_page_sec::TEXT, scroll_depth_percent::TEXT, engagement_score::TEXT, purchase_probability::TEXT,
     cart_abandonment_probability::TEXT, event_value::TEXT, api_latency_ms::TEXT, page_load_time_ms::TEXT,
@@ -1951,7 +1952,7 @@ UPDATE warehouse.fact_web_events SET record_hash = md5(array_to_string(ARRAY[
 ], '|', '<NULL>'));
 
 UPDATE warehouse.fact_conversions SET record_hash = md5(array_to_string(ARRAY[
-    conversion_nk, event_id, customer_id, product_id, campaign_id, conversion_timestamp::TEXT, conversion_type,
+    conversion_nk, event_id, customer_id, product_id, campaign_id, (conversion_timestamp AT TIME ZONE 'UTC')::TEXT, conversion_type,
     conversion_value::TEXT
 ], '|', '<NULL>'));
 

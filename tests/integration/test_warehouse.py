@@ -210,7 +210,7 @@ def test_business_dates_are_ist_dates_like_gold():
     assert mismatched == []
     early = int(sql(
         "select count(*) from warehouse.fact_orders "
-        "where ((order_timestamp at time zone 'UTC') at time zone 'Asia/Kolkata')::TIME < TIME '05:30'"
+        "where (order_timestamp at time zone 'Asia/Kolkata')::TIME < TIME '05:30'"
     )[0][0])
     assert early > 0, "no order between 00:00 and 05:30 IST to check"
     # Items, web events and conversions use the same business date.
@@ -221,7 +221,7 @@ def test_business_dates_are_ist_dates_like_gold():
     assert sql(
         "select count(*) from warehouse.fact_web_events "
         "where event_date_sk <> warehouse.date_sk("
-        "((event_timestamp at time zone 'UTC') at time zone 'Asia/Kolkata')::DATE)"
+        "(event_timestamp at time zone 'Asia/Kolkata')::DATE)"
     ) == [["0"]]
     assert sql(
         "select count(*) from warehouse.fact_conversions c join warehouse.fact_web_events e using (event_sk) "
@@ -504,6 +504,35 @@ def test_the_reader_role_reads_but_cannot_write_or_see_staging():
                       "delete from warehouse.fact_orders", "create table marts.mine (x int)"):
         result = as_reader(forbidden)
         assert result.returncode != 0 and "permission denied" in result.stderr, (forbidden, result.stderr)
+
+
+def test_every_warehouse_mart_and_audit_timestamp_is_an_instant():
+    # H2: TIMESTAMPTZ everywhere a consumer reads; business dates stay IST dates.
+    assert sql(
+        "select table_schema || '.' || table_name || '.' || column_name from information_schema.columns "
+        "where table_schema in ('warehouse', 'marts', 'audit') and data_type = 'timestamp without time zone'"
+    ) == []
+    typed = dict(sql(
+        "select table_schema || '.' || table_name || '.' || column_name, data_type from information_schema.columns "
+        "where (table_schema, table_name, column_name) in (('warehouse', 'fact_orders', 'order_timestamp'), "
+        "('warehouse', 'fact_web_events', 'event_timestamp'), ('warehouse', 'dim_customer', 'effective_from'), "
+        "('warehouse', 'fact_orders', 'source_updated_at'), ('marts', 'mart_customer_360', 'last_order_timestamp'), "
+        "('marts', 'mart_product_sales', 'first_sold_timestamp'), ('warehouse', 'fact_orders', 'order_date_sk'))"
+    ))
+    assert typed.pop("warehouse.fact_orders.order_date_sk") == "integer"
+    assert len(typed) == 6 and set(typed.values()) == {"timestamp with time zone"}, typed
+    # Readers get UTC whatever their client's zone: it is the database's setting.
+    assert sql("show timezone") == [["UTC"]]
+    # source_updated_at is midnight UTC of the batch date.
+    assert sql("select distinct (source_updated_at at time zone 'UTC')::time::text from warehouse.fact_orders") == [["00:00:00"]]
+
+
+def test_no_schema_of_an_unpublished_or_stale_generation_is_left_behind():
+    # staging_next is published by the build; at most the generation retired by
+    # the last build (and one that dbt views still read) remains.
+    names = [row[0] for row in sql("select nspname from pg_namespace where nspname ~ '_next$|_retired_' order by 1")]
+    assert "staging_next" not in names
+    assert len({name.rsplit("_", 1)[1] for name in names}) <= 2, names
 
 
 def test_point_in_time_rows_carry_their_own_batch_date():
