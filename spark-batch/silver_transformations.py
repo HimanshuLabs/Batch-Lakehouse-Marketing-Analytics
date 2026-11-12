@@ -67,6 +67,7 @@ FREE_TEXT_COLUMNS = {"search_query"}
 # original_price is normalized first, then its NULL price rule quarantines it.
 #   web_events:  cart_value, engagement_score, purchase_probability,
 #                cart_abandonment_probability
+ORDER_TOTAL_MISMATCH_REASON = "Invalid order record: total_amount is not cart_value + tax_amount + shipping_amount"
 LINE_AMOUNT_MISMATCH_REASON = "Invalid order item record: line_amount is not quantity x discounted_price"
 
 NON_RULE_DOUBLE_COLUMNS = {
@@ -126,7 +127,8 @@ INTEGER_COLUMNS = {
     "campaigns": {"campaign_id": "int"},
     "orders": {"order_id": "int", "user_id": "int", "campaign_id": "int"},
     "order_items": {"order_item_id": "int", "order_id": "int", "product_id": "int", "quantity": "int"},
-    "ad_spend": {"spend_id": "int", "campaign_id": "int", "impressions": "long", "clicks": "long"},
+    "ad_spend": {"spend_id": "int", "campaign_id": "int", "impressions": "long", "clicks": "long",
+                 "conversions": "long"},
     "web_events": {
         "user_id": "int", "age": "int", "loyalty_points": "int", "product_id": "int", "quantity": "int",
         "inventory_remaining": "int", "time_on_page_sec": "int", "scroll_depth_percent": "int",
@@ -139,11 +141,16 @@ INTEGER_COLUMNS = {
 MONEY_COLUMNS = {
     "products": ["original_price", "discounted_price"],
     "campaigns": ["budget"],
-    "orders": ["cart_value"],
+    "orders": ["cart_value", "tax_amount", "shipping_amount", "total_amount"],
     "order_items": ["original_price", "discounted_price", "line_amount"],
-    "ad_spend": ["spend_amount"],
+    "ad_spend": ["spend_amount", "attributed_revenue", "campaign_day_spend"],
     "web_events": ["original_price", "discounted_price", "cart_value"],
 }
+
+# The values the source may send for its coded attributes.
+ORDER_STATUSES = ["completed", "cancelled", "returned"]
+PRODUCT_STATUSES = ["active", "discontinued"]
+CAMPAIGN_TYPES = ["awareness", "consideration", "conversion", "retention"]
 
 INTEGER_RANGES = {"int": (-(2 ** 31), 2 ** 31 - 1), "long": (-(2 ** 63), 2 ** 63 - 1)}
 
@@ -474,6 +481,8 @@ def clean_products(spark: SparkSession) -> tuple[DataFrame, DataFrame, DataFrame
         .withColumn("product_id", safe_int("product_id"))
         .withColumn("product_name", trim(col("product_name")))
         .withColumn("category", trim(col("category")))
+        .withColumn("brand", trim(col("brand")))
+        .withColumn("product_status", lower(trim(col("product_status"))))
         .withColumn("original_price", safe_double("original_price"))
         .withColumn("discount_percent", safe_double("discount_percent"))
         .withColumn("discounted_price", safe_double("discounted_price"))
@@ -498,10 +507,12 @@ def clean_products(spark: SparkSession) -> tuple[DataFrame, DataFrame, DataFrame
     )
 
     valid, invalid = split_rules(cleaned, exact_value_rules("products", "product"))
-    valid, invalid = split_rules(valid, [(
-        invalid_condition,
-        "Invalid product record: bad id/category/price/discount/inventory",
-    )], invalid)
+    valid, invalid = split_rules(valid, [
+        (invalid_condition, "Invalid product record: bad id/category/price/discount/inventory"),
+        (col("brand").isNull(), "Invalid product record: brand is missing"),
+        (col("product_status").isNull() | (~col("product_status").isin(PRODUCT_STATUSES)),
+         "Invalid product record: product_status must be active or discontinued"),
+    ], invalid)
 
     valid, invalid = quarantine_missing_updated_at(valid, invalid, "product")
 
@@ -525,6 +536,7 @@ def clean_campaigns(spark: SparkSession) -> tuple[DataFrame, DataFrame, DataFram
         .withColumn("campaign_id", safe_int("campaign_id"))
         .withColumn("campaign_name", trim(col("campaign_name")))
         .withColumn("traffic_source", lower(trim(col("traffic_source"))))
+        .withColumn("campaign_type", lower(trim(col("campaign_type"))))
         .withColumn("ab_test_group", trim(col("ab_test_group")))
         .withColumn("target_segment", trim(col("target_segment")))
         .withColumn("budget", safe_double("budget"))
@@ -553,10 +565,11 @@ def clean_campaigns(spark: SparkSession) -> tuple[DataFrame, DataFrame, DataFram
     )
 
     valid, invalid = split_rules(cleaned, exact_value_rules("campaigns", "campaign"))
-    valid, invalid = split_rules(valid, [(
-        invalid_condition,
-        "Invalid campaign record: bad id/source/budget/status/date range",
-    )], invalid)
+    valid, invalid = split_rules(valid, [
+        (invalid_condition, "Invalid campaign record: bad id/source/budget/status/date range"),
+        (col("campaign_type").isNull() | (~col("campaign_type").isin(CAMPAIGN_TYPES)),
+         "Invalid campaign record: campaign_type must be awareness, consideration, conversion or retention"),
+    ], invalid)
 
     valid, invalid = quarantine_missing_updated_at(valid, invalid, "campaign")
 
@@ -581,14 +594,19 @@ def clean_orders(spark: SparkSession) -> tuple[DataFrame, DataFrame]:
         .withColumn("user_id", safe_int("user_id"))
         .withColumn("campaign_id", safe_int("campaign_id"))
         .withColumn("order_timestamp", safe_timestamp("order_timestamp"))
+        .withColumn("order_status", lower(trim(col("order_status"))))
         .withColumn("payment_method", trim(col("payment_method")))
         .withColumn("cart_value", safe_double("cart_value"))
+        .withColumn("tax_amount", safe_double("tax_amount"))
+        .withColumn("shipping_amount", safe_double("shipping_amount"))
+        .withColumn("total_amount", safe_double("total_amount"))
         .withColumn("fraud_score", safe_double("fraud_score"))
         .withColumn("country", trim(col("country")))
         .withColumn("city", trim(col("city")))
+        .withColumn("state", trim(col("state")))
     )
 
-    # NULL allowed: campaign_id (no attributed campaign), country, city.
+    # NULL allowed: campaign_id (no attributed campaign), country, state, city.
     invalid_condition = (
         col("order_id").isNull()
         | col("user_id").isNull()
@@ -602,10 +620,22 @@ def clean_orders(spark: SparkSession) -> tuple[DataFrame, DataFrame]:
     )
 
     valid, invalid = split_rules(cleaned, exact_value_rules("orders", "order"))
-    valid, invalid = split_rules(valid, [(
-        invalid_condition,
-        "Invalid order record: bad id/timestamp/payment/cart/fraud score",
-    )], invalid)
+    # cart_value is the net value (the sum of the lines). What the customer was
+    # charged is total_amount = cart_value + tax_amount + shipping_amount, to the
+    # cent: every amount is whole cents (MONEY_COLUMNS).
+    valid, invalid = split_rules(valid, [
+        (invalid_condition, "Invalid order record: bad id/timestamp/payment/cart/fraud score"),
+        (col("order_status").isNull() | (~col("order_status").isin(ORDER_STATUSES)),
+         "Invalid order record: order_status must be completed, cancelled or returned"),
+        (not_finite("tax_amount") | (col("tax_amount") < 0), "Invalid order record: tax_amount is missing or negative"),
+        (not_finite("shipping_amount") | (col("shipping_amount") < 0),
+         "Invalid order record: shipping_amount is missing or negative"),
+        (not_finite("total_amount")
+         | (expr(_source_decimal(RAW_PREFIX + "total_amount"))
+            != expr(_source_decimal(RAW_PREFIX + "cart_value")) + expr(_source_decimal(RAW_PREFIX + "tax_amount"))
+            + expr(_source_decimal(RAW_PREFIX + "shipping_amount"))),
+         ORDER_TOTAL_MISMATCH_REASON),
+    ], invalid)
 
     valid, invalid = split_rules(valid, [(
         after_batch_day("order_timestamp"),
@@ -721,9 +751,14 @@ def clean_ad_spend(spark: SparkSession) -> tuple[DataFrame, DataFrame]:
         .withColumn("campaign_id", safe_int("campaign_id"))
         .withColumn("traffic_source", lower(trim(col("traffic_source"))))
         .withColumn("spend_date", safe_date("spend_date"))
+        .withColumn("country", trim(col("country")))
+        .withColumn("state", trim(col("state")))
         .withColumn("impressions", safe_long("impressions"))
         .withColumn("clicks", safe_long("clicks"))
+        .withColumn("conversions", safe_long("conversions"))
+        .withColumn("attributed_revenue", safe_double("attributed_revenue"))
         .withColumn("spend_amount", safe_double("spend_amount"))
+        .withColumn("campaign_day_spend", safe_double("campaign_day_spend"))
     )
 
     # NULL allowed: traffic_source.
@@ -741,10 +776,20 @@ def clean_ad_spend(spark: SparkSession) -> tuple[DataFrame, DataFrame]:
     )
 
     valid, invalid = split_rules(cleaned, exact_value_rules("ad_spend", "ad spend"))
-    valid, invalid = split_rules(valid, [(
-        invalid_condition,
-        "Invalid ad spend record: bad id/date/impressions/clicks/spend",
-    )], invalid)
+    # What the ad platform reports for the day: it cannot convert more often
+    # than it was clicked, and attributed revenue is never negative.
+    valid, invalid = split_rules(valid, [
+        (invalid_condition, "Invalid ad spend record: bad id/date/impressions/clicks/spend"),
+        (col("conversions").isNull() | (col("conversions") < 0) | (col("conversions") > col("clicks")),
+         "Invalid ad spend record: conversions are missing, negative or more than the clicks"),
+        (not_finite("attributed_revenue") | (col("attributed_revenue") < 0),
+         "Invalid ad spend record: attributed_revenue is missing or negative"),
+        # The feed's grain is campaign, day and region: every row names its
+        # region, and carries the platform's total for the campaign-day.
+        (col("state").isNull() | col("country").isNull(), "Invalid ad spend record: region (country, state) is missing"),
+        (not_finite("campaign_day_spend") | (col("campaign_day_spend") < col("spend_amount")),
+         "Invalid ad spend record: campaign_day_spend is missing or less than the row's spend"),
+    ], invalid)
 
     valid, invalid = drop_source_text(valid), drop_source_text(invalid)
 

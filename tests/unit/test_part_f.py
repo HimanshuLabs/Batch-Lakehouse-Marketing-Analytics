@@ -4,7 +4,7 @@ import os
 import sys
 
 import pytest
-from conftest import CODE_ROOT, MINIMAL_STAGING_SQL
+from conftest import CODE_ROOT, MINIMAL_STAGING_SQL, begin_build, build_step, require_sandbox_database, reset_sandbox
 
 
 @pytest.mark.parametrize('price,reason', [
@@ -30,7 +30,7 @@ def test_export_rejects_quality_before_writing(load_job, monkeypatch, tmp_path, 
     export = load_job('sql/export_power_bi_dataset.py', BATCH_DATE='2026-06-18')
     rows = [{'metric_group': 'Warehouse Reconciliation', 'metric_name': 'injected',
              'metric_value': 1, 'status': status}]
-    monkeypatch.setattr(export, 'read_warehouse_checks', lambda: ([], [], {}))
+    monkeypatch.setattr(export, 'read_warehouse_checks', lambda: ([], []))
     monkeypatch.setattr(export, 'read_silver_report', lambda _: [])
     monkeypatch.setattr(export, 'read_pit_report', lambda: {})
     monkeypatch.setattr(export, 'build_data_quality_summary', lambda *a: rows)
@@ -47,24 +47,25 @@ def test_export_rejects_quality_before_writing(load_job, monkeypatch, tmp_path, 
 
 @pytest.fixture
 def pg():
-    if os.environ.get('P2_F_SANDBOX') != '1':
-        pytest.skip('requires dedicated Part F PostgreSQL sandbox on localhost:5546')
+    require_sandbox_database()
     import psycopg
     # Deliberately no configurable/default real-warehouse connection.
     with psycopg.connect(host='127.0.0.1', port=5546, user='project2', password='project2',
                           dbname='marketing_analytics', autocommit=True) as conn:
-        conn.execute('DROP SCHEMA IF EXISTS marts CASCADE; DROP SCHEMA IF EXISTS warehouse CASCADE; '
-                     'DROP SCHEMA IF EXISTS audit CASCADE; DROP SCHEMA IF EXISTS staging CASCADE; '
+        reset_sandbox(conn)
+        conn.execute(''
                      "CREATE SCHEMA staging; SELECT set_config('p2.run_id', 'part-f-test', false)")
         yield conn
 
 
 def warehouse_sql():
-    return MINIMAL_STAGING_SQL + (CODE_ROOT / 'sql/warehouse/create_warehouse_tables.sql').read_text()
+    # The build files run only inside the build transaction, which stays open
+    # for the test's own statements and is rolled back when the test ends.
+    return begin_build() + MINIMAL_STAGING_SQL + build_step('create_warehouse_tables')
 
 
 def marts_sql():
-    return (CODE_ROOT / 'sql/warehouse/create_marts.sql').read_text()
+    return build_step('create_marts')
 
 
 @pytest.mark.parametrize('dimension', ['customer', 'product', 'campaign'])
@@ -89,13 +90,14 @@ def test_duplicate_dimension_rows_are_not_collisions(pg, dimension):
     pg.execute(f'CREATE TABLE staging.stg_gold_dim_{dimension}s_scd2 ({dimension}_id text, effective_from timestamp)')
     pg.execute(f"INSERT INTO staging.stg_gold_dim_{dimension}s_scd2 VALUES ('a', '2026-01-01'), ('a', '2026-01-01')")
     pg.execute(warehouse_sql())
-    assert pg.execute(f'SELECT count(*) FROM warehouse.dim_{dimension} WHERE {dimension}_sk <> 0').fetchone()[0] == 1
+    assert pg.execute(f'SELECT count(*) FROM warehouse.dim_{dimension} WHERE {dimension}_sk NOT IN (0, -1)').fetchone()[0] == 1
 
 
 def test_revenue_check_detects_unknown_date_loss(pg):
     pg.execute(warehouse_sql())
     pg.execute("INSERT INTO warehouse.fact_orders(order_sk,order_id,customer_sk,campaign_sk,order_date_sk,"
-               "region_sk,channel_sk,net_revenue,customer_id,campaign_id,record_hash) VALUES (1,'one',0,0,0,0,0,25,'UNKNOWN','UNKNOWN','h1')")
+               "region_sk,channel_sk,net_revenue,customer_id,campaign_id,record_hash,order_status,tax_amount,shipping_amount,"
+               "total_amount) VALUES (1,'one',0,0,0,0,0,25,'UNKNOWN','UNKNOWN','h1','completed',0,0,25)")
     pg.execute(marts_sql())
     assert pg.execute("SELECT source_value,target_value,status FROM audit.mart_validation_report "
                       "WHERE check_name='daily_revenue_matches_fact_orders'").fetchone() == (25, 0, 'FAIL')
@@ -107,14 +109,16 @@ def test_recency_uses_latest_business_order_date(pg):
                "VALUES (1,'one','2026-01-01','9999-12-31',true),(2,'two','2026-01-01','9999-12-31',true),"
                "(3,'no orders','2026-01-01','9999-12-31',true)")
     pg.execute("INSERT INTO warehouse.fact_orders(order_sk,order_id,customer_sk,campaign_sk,order_date_sk,"
-               "region_sk,channel_sk,order_timestamp,customer_id,campaign_id,record_hash) VALUES "
-               "(1,'one',1,0,0,0,0,'2026-06-17 18:29:59','one','UNKNOWN','h1'),"
-               "(2,'two',2,0,0,0,0,'2026-06-17 18:30:00','two','UNKNOWN','h2')")
+               "region_sk,channel_sk,order_timestamp,customer_id,campaign_id,record_hash,order_status,tax_amount,"
+               "shipping_amount,total_amount) VALUES "
+               "(1,'one',1,0,0,0,0,'2026-06-17 18:29:59','one','UNKNOWN','h1','completed',0,0,0),"
+               "(2,'two',2,0,0,0,0,'2026-06-17 18:30:00','two','UNKNOWN','h2','completed',0,0,0)")
     pg.execute(marts_sql())
     for today in ('2026-06-18', '2030-01-01'):
         pg.execute(f"CREATE OR REPLACE FUNCTION warehouse.business_today() RETURNS DATE LANGUAGE SQL STABLE "
                    f"AS $$ SELECT DATE '{today}' $$")
-        assert pg.execute('SELECT customer_id,days_since_last_order FROM marts.mart_customer_360 ORDER BY customer_id').fetchall() == [
+        assert pg.execute("SELECT customer_id,days_since_last_order FROM marts.mart_customer_360 "
+                          "WHERE member_type = 'known' ORDER BY customer_id").fetchall() == [
             ('no orders', None), ('one', 1), ('two', 0)]
 
 
@@ -160,16 +164,16 @@ def test_reconciliation_task_failure_is_rolled_back_reported_and_reaches_summary
     # task log and in logs/warehouse/failed_build_<timestamp>.json.
     import json
     import subprocess
-    pg.execute(warehouse_sql())
-    pg.execute("CREATE TABLE audit.scd2_validation_results (validation_run_id text,status text); "
-               "INSERT INTO audit.scd2_validation_results VALUES ('part-f-test','PASS'); "
-               "CREATE TABLE IF NOT EXISTS staging.stg_gold_fact_web_events (event_id text)")
-    pg.execute(marts_sql())
-    # A staging order that never reached the warehouse is a genuine failed
-    # source-vs-target check (missing staging tables now fail the build itself).
-    pg.execute("INSERT INTO staging.stg_gold_fact_orders_scd2 (order_id) VALUES ('never-loaded')")
-    result = subprocess.run(['bash', str(CODE_ROOT / 'scripts/run_warehouse_sql.sh'),
-                             str(CODE_ROOT / 'sql/warehouse/reconciliation_report.sql')],
+    from test_part_h import STAGING_ROWS
+    # The whole build, with one loaded order removed before the reconciliation
+    # (tests/sql/inject_reconciliation_fail.sql): a genuine failed
+    # source-vs-target check. The build files run only as one build.
+    pg.execute(STAGING_ROWS)
+    warehouse = CODE_ROOT / 'sql/warehouse'
+    files = [warehouse / 'begin_generation.sql', warehouse / 'create_warehouse_tables.sql',
+             warehouse / 'scd2_validation_queries.sql', warehouse / 'create_marts.sql',
+             CODE_ROOT / 'tests/sql/inject_reconciliation_fail.sql', warehouse / 'reconciliation_report.sql']
+    result = subprocess.run(['bash', str(CODE_ROOT / 'scripts/run_warehouse_sql.sh'), *map(str, files)],
                             cwd=tmp_path, env={**os.environ, 'PGCONTAINER': 'p2-part-f-sandbox',
                             'P2_RUN_ID': 'part-f-test', 'RUN_MODE': 'docker'}, capture_output=True, text=True)
     assert result.returncode != 0, result.stdout
@@ -194,20 +198,21 @@ def test_reconciliation_task_failure_is_rolled_back_reported_and_reaches_summary
                        'count_difference': check['difference'], 'source_amount': None, 'target_amount': None,
                        'amount_difference': None, 'details': check['details']} for check in failing]
     export = load_job('sql/export_power_bi_dataset.py')
-    # The passing checks are gone with the rollback; the summary requires this one.
-    if export.WEB_EVENT_CONSERVATION_CHECK not in {check['check_name'] for check in reconciliation}:
-        reconciliation.append({'check_name': export.WEB_EVENT_CONSERVATION_CHECK, 'status': 'PASS', 'source_count': 0,
-                               'target_count': 0, 'count_difference': 0, 'source_amount': None, 'target_amount': None,
-                               'amount_difference': None, 'details': None})
+    # The passing checks are gone with the rollback; the summary requires
+    # these (every web event loaded, and the seven invalid-reference counts).
+    from test_power_bi_export import invalid_reference_checks
+    failed_names = {check['check_name'] for check in reconciliation}
+    required = [{'check_name': export.WEB_EVENT_CONSERVATION_CHECK, 'status': 'PASS', 'target_count': 0,
+                 'count_difference': 0, 'amount_difference': None}] + invalid_reference_checks()
+    reconciliation += [check for check in required if check['check_name'] not in failed_names]
     rows = export.build_data_quality_summary(
         reconciliation, [{'check_name': 'scd', 'failed_row_count': 0, 'status': 'PASS'}],
         [{'table_name': 'items', 'status': 'PASSED', 'quarantine_row_count': 0, 'unaccounted_row_count': 0}],
         {'facts': {'fact_orders_scd2': {
             'conservation': {'status': 'PASS', 'rejected_rows': 0, 'unaccounted_rows': 0},
-            'fact_resolutions': {'campaign_sk': {'unknown_member': 0}}}},
+            'fact_resolutions': {'campaign_sk': {'unknown_member': 0, 'invalid_reference': 0}}}},
          'order_totals': {'status': 'PASS', 'checked_orders': 0, 'mismatched_orders': 0,
-                          'excluded_incomplete_orders': 0, 'orders_without_bronze_items': 0}},
-        {'rejected_rows': 0, 'customer': 0, 'product': 0, 'campaign': 0})
+                          'excluded_incomplete_orders': 0, 'orders_without_bronze_items': 0}})
     summary = {row['metric_name']: row['status'] for row in rows}
-    for check in reconciliation:
-        assert summary[check['check_name']] == check['status']
+    for check in failing:
+        assert summary[check['check_name']] == check['status'] == 'FAIL'

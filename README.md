@@ -28,7 +28,7 @@ This project demonstrates practical Data Engineering and Analytics Engineering c
 | Historical correctness | SCD Type 2 customer/product/campaign dimensions and point-in-time fact joins |
 | Reproducibility | Deterministic, incremental batches; reruns of a batch leave the lake and the warehouse unchanged |
 | BI readiness | Revenue, campaign, product, customer, and funnel marts built for reporting |
-| Analytics engineering | 21 dbt models and 67 dbt tests, docs, lineage, and exposures |
+| Analytics engineering | 21 dbt models and 74 dbt tests, docs, lineage, and exposures |
 | Orchestration | One Airflow 3 DAG of 20 tasks covering lakehouse, warehouse, dbt, and reporting |
 | Reporting | Power BI Online dashboard assets, screenshots, CSV exports, and refresh flow documentation |
 | Infrastructure | Terraform for the S3 layer that serves the Power BI CSVs |
@@ -259,7 +259,15 @@ mart_customer_value              mart_customer_lifetime_value_scd2
 mart_marketing_funnel            mart_marketing_funnel_scd2
 ```
 
-The `_scd2` facts join each row to the dimension version that was valid at the event time. A row that has no such version is rejected to `data/quarantine/` rather than joined to the current version. The point-in-time report checks that Silver rows = valid rows + rejected rows.
+The `_scd2` facts join each row to the dimension version that was valid at the event time. A fact is never dropped because its dimension reference is bad. A missing key (an organic order has no campaign) is the unknown member. A key that is present but has no valid dimension row, for example a campaign that Silver quarantined, is the invalid-reference member (`INVALID` in Gold, key `-1` in the warehouse): the fact is kept with its own natural ID and resolves to the real member as soon as the dimension row is valid. A fact is rejected to `data/quarantine/` only for its own defect, such as an item whose order does not exist. The point-in-time report counts the invalid references per fact and key and checks that Silver rows = valid rows + rejected rows.
+
+**Real source attributes.** The generator delivers, and every layer carries: an order's status (`completed`, `cancelled`, `returned`), tax (18% of the net value), shipping (free from INR 4,999, else INR 99) and `total_amount` (`net + tax + shipping`, the same name and meaning in Silver, Gold, the warehouse, the marts and the exports; the net value is `cart_value` in the lake and `net_revenue` in the warehouse); the ad platform's feed per campaign, day and region (spend, impressions, clicks, and the platform's own conversions and attributed revenue, related by realistic cost per click, click-through rate and return on ad spend); a product's brand and status (`active`, `discontinued`; a status change opens a new SCD2 version); and a campaign's objective (`campaign_type`: awareness, consideration, conversion, retention). Silver validates each one, and each batch contains one deliberately dirty row per attribute that must be quarantined. Only a completed order is a sale: revenue, order counts, average order value, lifetime value, attributed revenue and units in every mart count completed orders, and the marts show cancelled and returned orders in columns of their own.
+
+**Regional ad spend.** Each campaign targets two to five states. `fact_campaign_spend` has one row per campaign, day and region; a campaign's spend, and what is compared with its budget, is the sum over its regions. Each feed row repeats the platform's total for the campaign-day, and a reconciliation check requires the regional rows to sum to it. Spend and return on ad spend by channel and by region are two queries at the end of `sql/warehouse/dashboard_query_pack.sql`; the route B exports of the spend and order facts carry the same columns. Product prices are in a realistic INR range per category and most order lines are one unit, so the average order value is a few thousand rupees and platform and warehouse ROAS are both in single digits.
+
+**Marts tie out.** Every mart has one row for the unknown member and one for the invalid-reference member, flagged in `member_type` (`known`, `unknown_member`, `invalid_reference`); filter `member_type = 'known'` for real customers, products or campaigns only. With those rows each mart's completed-order revenue, spend and units equal the fact totals, and the mart validation checks exactly that.
+
+**Consumer contract.** `tests/integration/test_warehouse.py` records every relation and column that Project 4 and Project 5 read (name, type, grain, key) and the integration run asserts it: adding a column is free; removing, renaming or retyping a recorded one, emptying the relation or breaking its key fails the run.
 
 ---
 
@@ -316,7 +324,7 @@ docs/warehouse/runbook.md
 
 ## 10. dbt Analytics Engineering Layer
 
-The dbt layer organizes warehouse models, marts, tests, docs, lineage, and dashboard exposures: 21 models and 67 tests.
+The dbt layer organizes warehouse models, marts, tests, docs, lineage, and dashboard exposures: 21 models and 74 tests.
 
 Main dbt areas:
 
@@ -346,11 +354,13 @@ cp dbt/profiles.yml.example dbt/profiles.yml   # git-ignored; reads WAREHOUSE_DB
 cd dbt
 ../venv-dbt/bin/dbt debug --profiles-dir .
 ../venv-dbt/bin/dbt parse --profiles-dir . --no-partial-parse
-../venv-dbt/bin/dbt run --profiles-dir .              # PASS=21
-../venv-dbt/bin/dbt test --profiles-dir .             # PASS=65
+../venv-dbt/bin/dbt run --profiles-dir .              # 21 models: PASS=22
+../venv-dbt/bin/dbt test --profiles-dir .             # 74 tests:  PASS=75
 ../venv-dbt/bin/dbt docs generate --profiles-dir .
 cd ..
 ```
+
+dbt's `PASS=` total is one more than the 21 models or the 74 tests (71 in `schema.yml`, 3 in `dbt/tests/`). The extra result is the project's `on-run-end` hook in `dbt/dbt_project.yml`, which grants the read-only role `p2_reader` USAGE on the dbt schemas; dbt runs it at the end of both `dbt run` and `dbt test` and counts it.
 
 Keep `dbt/profiles.yml` in place: the DAG's dbt tasks need it. `dbt/target/`, `dbt/logs/`, and `dbt/profiles.yml` are git-ignored.
 
@@ -370,7 +380,15 @@ build_warehouse → dbt_run → dbt_test → dbt_docs → power_bi_export
 
 **A rebuild is invisible to readers.** `build_warehouse` builds the dimensions and facts, the SCD2 validation, the marts and the reconciliation as one transaction (`scripts/run_warehouse_sql.sh` given the five files, starting with `sql/warehouse/begin_generation.sql`). It renames the live `warehouse`, `marts`, `audit` and `staging` schemas aside, builds new ones under the same names, and commits. Until the commit a reader still gets the old warehouse, with no error, no empty mart and no waiting; after it, the new one. If the build fails, nothing changes. That includes its checks: the quality gate (reconciliation, SCD2 validation, mart validation) runs before the commit, so a build with a failing check is rolled back, the task fails, and the failing checks (name, expected, actual, details) are written to the task log and to `logs/warehouse/failed_build_<timestamp>.json`. The staging loader fills `staging_next`, which the same transaction publishes as `staging`. The dbt views keep reading the generation they were created on until `dbt run` replaces them one by one, so they still exist and still answer if dbt or the export fails. A retired generation (`warehouse_retired_<n>` and its siblings) is dropped by a later build once no view outside it reads it.
 
-The DAG has no schedule and allows one active run. Its tasks use `venv/bin/python` and `venv-dbt/bin/dbt`, and each task gets `BATCH_DATE = {{ (dag_run.logical_date or dag_run.run_after).astimezone(macros.dateutil.tz.gettz('Asia/Kolkata')) | ds }}`: the India date of the run. Every task also runs under a run lock (`scripts/pipeline_lock.py`, lock file `logs/pipeline_run.lock`): a task of a second run started by any route fails at once with exit code 75 until the first run finishes or fails; `python scripts/pipeline_lock.py --release --force` clears the lock of a run that died.
+**The build files run only as one build.** `create_warehouse_tables.sql`, `scd2_validation_queries.sql`, `create_marts.sql` and `reconciliation_report.sql` each start by checking that they are inside the transaction that `begin_generation.sql` opened; run on their own they fail with a message and change nothing. Rebuild the warehouse with `bash scripts/run_airflow_task.sh build_warehouse`.
+
+**A consumer's own view cannot go stale unnoticed.** A view that someone creates on a warehouse or mart table is bound to the generation it was created on, and nothing would ever replace it. So the build first looks for views and materialized views outside the pipeline's schemas (`staging`, `warehouse`, `marts`, `audit` and the dbt schemas) that read the warehouse. If it finds any it stops before changing anything and names each view and what it reads: drop them, run the build, and create them again. Consumers who only query `marts.*` or the dbt views are not affected.
+
+The DAG has no schedule and allows one active run. Its tasks use `venv/bin/python` and `venv-dbt/bin/dbt`, and each task gets `BATCH_DATE = {{ (dag_run.logical_date or dag_run.run_after).astimezone(macros.dateutil.tz.gettz('Asia/Kolkata')) | ds }}`: the India date of the run. Every task also runs under a run lock (`scripts/pipeline_lock.py`, lock file `logs/pipeline_run.lock`): a task of a second run started by any route fails at once with exit code 75 until the first run finishes or fails; `python scripts/pipeline_lock.py --release --force` clears the lock of a run that died. The scripts that write to the lake or the warehouse take the same lock when they are started by hand: `scripts/run_airflow_task.sh <task>`, `scripts/run_warehouse_sql.sh` (and so `run_warehouse_bi_pipeline.sh` and `run_warehouse_reconciliation_pipeline.sh`), and `tests/integration/rebuild_warehouse.sh`.
+
+**Volume checks.** The Bronze checks fail a feed (one raw file) that is empty, unless the batch is declared empty by a file named `_EMPTY_BATCH` in its raw folder. They also fail a feed with fewer rows than half the median of the earlier batches (`P2_MIN_VOLUME_RATIO`, default 0.5). The first batch ever loaded is the initial load: it has no baseline and is never used as one, so the second batch only has to be non-empty. How many delivered rows must survive Silver is a separate check (the per-batch pass ratio).
+
+**An empty first batch.** When the very first batch is declared empty and its raw files have no rows, Bronze ingests and checks them, and every later task succeeds without running and prints `NOTHING TO PROCESS`: no lake table and no warehouse is created, and the first batch with rows builds everything. An empty batch after an earlier one is processed normally.
 
 **Trigger from the UI.** Set the logical date to the day to process or rerun, at 12:00 on that day, or leave it at now to process today. The CLI's `-l` works the same way. Section 15 also has a scripted REST trigger with a render gate that shows the date before any task runs.
 
@@ -417,7 +435,7 @@ exports/power_bi/export_manifest.json
 - the bucket policy grants public `s3:GetObject` on exactly those five objects, with no listing and no write;
 - the module uploads the five files from `data/bi_exports/`.
 
-`terraform output power_bi_csv_urls` prints the HTTPS URLs that Power BI uses. `data_quality_summary.csv` is built only from verified checks: warehouse reconciliation, SCD2 validation, Silver quarantine, point-in-time conservation, and the web events the warehouse rejects. See `docs/power_bi_dashboard_spec.md` and `docs/terraform_aws_bi_exports.md`.
+`terraform output power_bi_csv_urls` prints the HTTPS URLs that Power BI uses. `data_quality_summary.csv` is built only from verified checks: warehouse reconciliation, SCD2 validation, Silver quarantine, point-in-time conservation, and the number of facts kept on the invalid-reference member per fact and dimension. See `docs/power_bi_dashboard_spec.md` and `docs/terraform_aws_bi_exports.md`.
 
 Power BI docs:
 
@@ -448,7 +466,7 @@ GitHub Actions (`.github/workflows/ci.yml`) runs on pushes and pull requests to 
 | Job | What it checks |
 |---|---|
 | Static checks | required files; no committed local paths, private keys, AWS keys, or dbt credentials; Python compile; shell syntax; warehouse SQL assets; Airflow DAG source; ruff; dbt project structure and `dbt parse` |
-| Unit tests | `pytest tests/unit` on Python 3.14 with Java 17, run twice: once with `TZ=UTC` and once with `TZ=Asia/Kolkata` |
+| Unit tests | `pytest tests/unit` on Python 3.14 with Java 17, run twice: once with `TZ=UTC` and once with `TZ=Asia/Kolkata`. The job starts a PostgreSQL 16.14 service container on port 5546 for the tests that build a warehouse, and sets `P2_REQUIRE_DB=1`, so those tests fail instead of being skipped if the database is missing |
 | Integration | the whole pipeline end to end against PostgreSQL 16.14; see below |
 | Power BI artifact validation | `scripts/validate_powerbi_assets.py`: exports, manifest, docs, screenshots |
 | Terraform validation | Terraform 1.17.1: `fmt -check`, `init -backend=false`, `validate`, and no tracked state or tfvars |
@@ -470,12 +488,17 @@ bash tests/integration/run_local.sh            # add --keep to keep the work fol
 
 It runs a copy of the working tree under `/tmp` against a throwaway PostgreSQL 16.14 container, `p2it_postgres_<pid>` on port 5440. It removes only that container afterwards. Locally it skips the three dbt tasks; CI runs them.
 
-Run the unit tests locally the way CI does:
+Run the unit tests locally the way CI does. The tests that build a warehouse need a throwaway PostgreSQL on port 5546; they drop and rebuild its schemas, so they only run when `P2_F_SANDBOX=1` says that database is theirs to use:
 
 ```bash
-TZ=UTC venv/bin/python -m pytest tests/unit -p no:cacheprovider
-TZ=Asia/Kolkata venv/bin/python -m pytest tests/unit -p no:cacheprovider
+docker run -d --name p2-part-f-sandbox -p 127.0.0.1:5546:5432 \
+  -e POSTGRES_USER=project2 -e POSTGRES_PASSWORD=project2 -e POSTGRES_DB=marketing_analytics postgres:16.14
+P2_F_SANDBOX=1 P2_REQUIRE_DB=1 TZ=UTC venv/bin/python -m pytest tests/unit -p no:cacheprovider -rs
+P2_F_SANDBOX=1 P2_REQUIRE_DB=1 TZ=Asia/Kolkata venv/bin/python -m pytest tests/unit -p no:cacheprovider -rs
+docker rm -f p2-part-f-sandbox
 ```
+
+Without `P2_F_SANDBOX=1` those tests are skipped; with `P2_REQUIRE_DB=1` a missing database is a failure, never a skip.
 
 ---
 
@@ -731,16 +754,17 @@ venv/bin/python tests/integration/run_dag.py --batch-date 2026-06-18 --log-dir /
 
 ### Option 3: task by task
 
-These are the same commands the DAG runs, in DAG order:
+These are the same commands the DAG runs, in DAG order. A task started by hand takes the run lock for itself, so the loop runs under the lock as one run:
 
 ```bash
+P2_RUN_ID=manual-$(date +%s) venv/bin/python scripts/pipeline_lock.py --last manual_run -- bash -c '
 for task in generate_data bronze_ingestion bronze_quality_checks silver_transformations \
     silver_quality_checks gold_transformations gold_quality_checks duckdb_gold_analytics \
     publish_gold_to_postgres scd2_dimensions point_in_time_fact_joins scd2_gold_marts \
     scd2_duckdb_analytics create_postgresql_schemas load_gold_scd2_to_staging \
     build_warehouse dbt_run dbt_test dbt_docs power_bi_export; do
-  bash scripts/run_airflow_task.sh "$task" || break
-done
+  bash scripts/run_airflow_task.sh "$task" || exit 1
+done'
 ```
 
 Rerunning a batch date is safe. Generation is skipped when the raw files exist, and the lake and the warehouse come out identical.
@@ -786,7 +810,7 @@ ORDER BY status;
 "
 ```
 
-Expected: `PASS | 16`.
+Expected: `PASS | 27`.
 
 ### Warehouse marts
 

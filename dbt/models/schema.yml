@@ -169,6 +169,15 @@ models:
       - name: product_id
         tests:
           - not_null
+      - name: brand
+        tests:
+          - not_null
+      - name: product_status
+        tests:
+          # From the source; the unknown and invalid-reference members carry their label.
+          - accepted_values:
+              arguments:
+                values: ['active', 'discontinued', 'Unknown', 'Invalid reference']
       - name: is_current
         tests:
           - accepted_values:
@@ -186,6 +195,12 @@ models:
       - name: campaign_id
         tests:
           - not_null
+      - name: campaign_type
+        tests:
+          # The campaign's objective, from the source.
+          - accepted_values:
+              arguments:
+                values: ['awareness', 'consideration', 'conversion', 'retention', 'Unknown', 'Invalid reference']
       - name: is_current
         tests:
           - accepted_values:
@@ -208,6 +223,15 @@ models:
         tests:
           - not_null
           - unique
+      - name: order_status
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['completed', 'cancelled', 'returned']
+      - name: total_amount
+        tests:
+          - not_null
       - name: customer_sk
         tests:
           - not_null
@@ -245,6 +269,9 @@ models:
         tests:
           - not_null
           - unique
+      - name: conversions
+        tests:
+          - not_null
       - name: campaign_sk
         tests:
           - not_null

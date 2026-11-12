@@ -30,6 +30,13 @@ if [ "$PGCONTAINER" = "project2_postgres" ] && [ "${CI:-}" != "true" ] && [ "${P
     exit 2
 fi
 
+# The whole script is one run under the pipeline run lock, so no pipeline run
+# and no other rebuild can change the warehouse between its builds and checks.
+if [ -z "${P2_LOCK_HELD:-}" ]; then
+    export PROJECT_ROOT="${PROJECT_ROOT:-$REPO}" P2_RUN_ID="rebuild-warehouse-$(date +%s%N)-$$"
+    exec python3 "$REPO/scripts/pipeline_lock.py" --last rebuild_warehouse -- bash "$0" "$@"
+fi
+
 mkdir -p "$WORK"
 psql_db() { docker exec -i -e "PGOPTIONS=-c p2.run_id=${P2_RUN_ID}" "$PGCONTAINER" psql -U project2 -d marketing_analytics -v ON_ERROR_STOP=1 -At -F $'\t' "$@"; }
 
@@ -66,7 +73,7 @@ SELECT 'product', product_sk, product_id, effective_from FROM warehouse.dim_prod
 SELECT 'campaign', campaign_sk, campaign_id, effective_from FROM warehouse.dim_campaign ORDER BY campaign_sk;
 SELECT 'orders', order_id, order_sk, customer_sk, campaign_sk, order_date_sk, region_sk, channel_sk, customer_id, campaign_id, source_updated_at, record_hash FROM warehouse.fact_orders ORDER BY order_id;
 SELECT 'items', order_item_nk, order_item_sk, order_sk, customer_sk, product_sk, order_date_sk, region_sk, channel_sk, customer_id, product_id, source_updated_at, record_hash FROM warehouse.fact_order_items ORDER BY order_item_nk;
-SELECT 'spend', campaign_spend_nk, campaign_spend_sk, campaign_sk, spend_date_sk, region_sk, channel_sk, campaign_id, source_updated_at, record_hash FROM warehouse.fact_campaign_spend ORDER BY campaign_spend_nk;
+SELECT 'spend', campaign_spend_nk, campaign_spend_sk, campaign_sk, spend_date_sk, channel_sk, campaign_id, source_updated_at, record_hash FROM warehouse.fact_campaign_spend ORDER BY campaign_spend_nk;
 SELECT 'web', event_id, event_sk, customer_sk, product_sk, campaign_sk, event_date_sk, region_sk, channel_sk, customer_id, product_id, campaign_id, source_updated_at, record_hash FROM warehouse.fact_web_events ORDER BY event_id;
 SELECT 'conversions', conversion_nk, conversion_sk, event_sk, customer_sk, product_sk, campaign_sk, conversion_date_sk, region_sk, channel_sk, customer_id, product_id, campaign_id, source_updated_at, record_hash FROM warehouse.fact_conversions ORDER BY conversion_nk;
 SQL

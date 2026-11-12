@@ -26,6 +26,17 @@ This file is development-idempotent:
 
 BEGIN;
 
+-- This file is one step of the warehouse build. It refuses to run anywhere but
+-- in the build transaction that sql/warehouse/begin_generation.sql started
+-- (which sets p2.build_txid for that transaction only), so it can never drop or
+-- rebuild the live tables on its own.
+DO $$
+BEGIN
+    IF current_setting('p2.build_txid', true) IS DISTINCT FROM txid_current()::TEXT THEN
+        RAISE EXCEPTION 'create_warehouse_tables.sql runs only inside the warehouse build transaction started by sql/warehouse/begin_generation.sql. Run the whole build: bash scripts/run_airflow_task.sh build_warehouse';
+    END IF;
+END $$;
+
 CREATE SCHEMA IF NOT EXISTS warehouse;
 CREATE SCHEMA IF NOT EXISTS audit;
 
@@ -191,6 +202,21 @@ $$;
 -- hash, so collisions stay negligible as tables grow: the first 16 hex digits
 -- of md5(prefix || '|' || natural_key), masked to 63 bits so the key is
 -- non-negative, and never 0 (0 is the unknown member).
+-- The dimension key of a fact. resolved_sk is the version covering the fact
+-- time, when there is one. Without one: a natural ID that the dimension knows
+-- gives the unknown member (0); a natural ID the dimension has never held
+-- valid (its row was quarantined, or never delivered) gives the
+-- invalid-reference member (-1). The fact keeps its natural ID either way, so
+-- it resolves to the real member as soon as the dimension row is valid.
+CREATE OR REPLACE FUNCTION warehouse.member_sk(resolved_sk BIGINT, natural_id_in_dimension BOOLEAN)
+RETURNS BIGINT
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT coalesce(resolved_sk, CASE WHEN natural_id_in_dimension THEN 0 ELSE -1 END);
+$$;
+
+
 CREATE OR REPLACE FUNCTION warehouse.deterministic_fact_sk(prefix TEXT, natural_key TEXT)
 RETURNS BIGINT
 LANGUAGE SQL
@@ -294,6 +320,8 @@ CREATE TABLE warehouse.dim_product (
     product_name TEXT,
     category TEXT,
     brand TEXT,
+    -- active or discontinued: SCD2-tracked, so a change opens a new version.
+    product_status TEXT,
     original_price NUMERIC(18, 2),
     current_price NUMERIC(18, 2),
     inventory_remaining INTEGER,
@@ -321,6 +349,8 @@ CREATE TABLE warehouse.dim_campaign (
     campaign_sk BIGINT PRIMARY KEY,
     campaign_id TEXT NOT NULL,
     campaign_name TEXT,
+    -- The campaign's objective: awareness, consideration, conversion or retention.
+    campaign_type TEXT,
     channel TEXT,
     traffic_source TEXT,
     target_segment TEXT,
@@ -409,14 +439,20 @@ CREATE TABLE warehouse.fact_orders (
     region_sk BIGINT NOT NULL REFERENCES warehouse.dim_region(region_sk),
     channel_sk BIGINT NOT NULL REFERENCES warehouse.dim_channel(channel_sk),
     order_timestamp TIMESTAMPTZ,
-    order_status TEXT NOT NULL DEFAULT 'completed',
+    -- completed, cancelled or returned, from the source. Only a completed
+    -- order is a sale: the marts count revenue from completed orders.
+    order_status TEXT NOT NULL,
     payment_method TEXT,
     item_count INTEGER NOT NULL DEFAULT 0,
     gross_amount NUMERIC(18, 2) NOT NULL DEFAULT 0,
     discount_amount NUMERIC(18, 2) NOT NULL DEFAULT 0,
-    tax_amount NUMERIC(18, 2) NOT NULL DEFAULT 0,
-    shipping_amount NUMERIC(18, 2) NOT NULL DEFAULT 0,
     net_revenue NUMERIC(18, 2) NOT NULL DEFAULT 0,
+    -- What the customer was charged: total_amount = net_revenue + tax_amount
+    -- + shipping_amount (checked by the reconciliation). net_revenue stays the
+    -- sum of the lines.
+    tax_amount NUMERIC(18, 2) NOT NULL,
+    shipping_amount NUMERIC(18, 2) NOT NULL,
+    total_amount NUMERIC(18, 2) NOT NULL,
     source_record_hash TEXT,
     -- The batch date (Asia/Kolkata day) of the Bronze batch that last delivered
     -- the row, and an md5 of the row's business columns. Both come from the
@@ -427,10 +463,12 @@ CREATE TABLE warehouse.fact_orders (
     CONSTRAINT chk_fact_orders_amounts CHECK (
         gross_amount >= 0
         AND discount_amount >= 0
+        AND net_revenue >= 0
         AND tax_amount >= 0
         AND shipping_amount >= 0
-        AND net_revenue >= 0
-    )
+        AND total_amount >= 0
+    ),
+    CONSTRAINT chk_fact_orders_status CHECK (order_status IN ('completed', 'cancelled', 'returned'))
 );
 
 COMMENT ON TABLE warehouse.fact_orders IS
@@ -486,14 +524,19 @@ CREATE TABLE warehouse.fact_campaign_spend (
     campaign_sk BIGINT NOT NULL REFERENCES warehouse.dim_campaign(campaign_sk),
     campaign_id TEXT NOT NULL,
     spend_date_sk INTEGER NOT NULL REFERENCES warehouse.dim_date(date_sk),
+    -- The region the ad platform reports the row for (a state; city Unknown).
+    -- The grain is campaign, day and region: a campaign's spend, and what is
+    -- compared with its budget, is the sum over its regions.
     region_sk BIGINT NOT NULL REFERENCES warehouse.dim_region(region_sk),
     channel_sk BIGINT NOT NULL REFERENCES warehouse.dim_channel(channel_sk),
     spend_date DATE,
     spend_amount NUMERIC(18, 2) NOT NULL DEFAULT 0,
     impressions BIGINT NOT NULL DEFAULT 0,
     clicks BIGINT NOT NULL DEFAULT 0,
-    conversions BIGINT NOT NULL DEFAULT 0,
-    attributed_revenue NUMERIC(18, 2) NOT NULL DEFAULT 0,
+    -- What the ad platform itself reports for the campaign-day. The warehouse
+    -- measures its own orders and conversions; the marts show both.
+    conversions BIGINT NOT NULL,
+    attributed_revenue NUMERIC(18, 2) NOT NULL,
     -- The batch date (Asia/Kolkata day) of the Bronze batch that last delivered
     -- the row, and an md5 of the row's business columns. Both come from the
     -- data only, so a rebuild never changes them.
@@ -510,7 +553,7 @@ CREATE TABLE warehouse.fact_campaign_spend (
 );
 
 COMMENT ON TABLE warehouse.fact_campaign_spend IS
-'Campaign-spend fact table. Joins campaign spend to SCD2 campaign version, channel, region, and spend date.';
+'Campaign-spend fact table. One row per campaign, day and region, as the ad platform reports it: spend, impressions, clicks, and the conversions and attributed revenue the platform itself measures. Joined to the SCD2 campaign version, channel, region and spend date.';
 
 CREATE TABLE warehouse.fact_web_events (
     -- warehouse.deterministic_fact_sk('web_event', event_id), set by the load; a hash
@@ -557,27 +600,6 @@ CREATE TABLE warehouse.fact_web_events (
 
 COMMENT ON TABLE warehouse.fact_web_events IS
 'Web-event-grain fact table. Stores behavior events and links them to point-in-time customer/product/campaign dimensions where possible.';
-
--- Web events whose customer, product or campaign key is present but has no
--- dimension version covering the event time (for example a key quarantined in
--- Silver). The same rule as the point-in-time order, item and spend rejects.
-DROP TABLE IF EXISTS audit.fact_web_events_rejects;
-
-CREATE TABLE audit.fact_web_events_rejects (
-    event_id TEXT PRIMARY KEY,
-    session_id TEXT,
-    customer_id TEXT NOT NULL,
-    product_id TEXT NOT NULL,
-    campaign_id TEXT NOT NULL,
-    event_timestamp TIMESTAMPTZ,
-    event_type TEXT NOT NULL,
-    event_value NUMERIC(18, 2) NOT NULL DEFAULT 0,
-    reject_reason TEXT NOT NULL,
-    warehouse_loaded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-COMMENT ON TABLE audit.fact_web_events_rejects IS
-'Web events rejected by the warehouse load: a source customer/product/campaign key with no covering dimension version. A NULL key is not rejected; it resolves to the unknown member (0).';
 
 CREATE TABLE warehouse.fact_conversions (
     -- warehouse.deterministic_fact_sk('conversion', conversion_nk), set by the load; a hash
@@ -632,32 +654,51 @@ VALUES (
     NULL, 'Unknown', 'Unknown', 'Unknown',
     TIMESTAMPTZ '1900-01-01 00:00:00+00', TIMESTAMPTZ '9999-12-31 00:00:00+00',
     TRUE, NULL, 'UNKNOWN'
+), (
+    -- The invalid-reference member: facts whose key is present but has no
+    -- valid dimension row (warehouse.member_sk). Distinct from the unknown
+    -- member (0), which is for facts with no key at all.
+    -1, 'INVALID', 'Invalid reference', NULL, NULL, NULL,
+    'Invalid reference', NULL, NULL, 'Invalid reference',
+    NULL, 'Invalid reference', 'Invalid reference', 'Invalid reference',
+    TIMESTAMPTZ '1900-01-01 00:00:00+00', TIMESTAMPTZ '9999-12-31 00:00:00+00',
+    TRUE, NULL, 'INVALID'
 )
 ON CONFLICT (customer_sk) DO NOTHING;
 
 INSERT INTO warehouse.dim_product (
-    product_sk, product_id, product_name, category, brand,
+    product_sk, product_id, product_name, category, brand, product_status,
     original_price, current_price, inventory_remaining,
     effective_from, effective_to, is_current, source_updated_at, scd_hash
 )
 VALUES (
-    0, 'UNKNOWN', 'Unknown', 'Unknown', NULL,
+    0, 'UNKNOWN', 'Unknown', 'Unknown', 'Unknown', 'Unknown',
     0, 0, NULL,
     TIMESTAMPTZ '1900-01-01 00:00:00+00', TIMESTAMPTZ '9999-12-31 00:00:00+00',
     TRUE, NULL, 'UNKNOWN'
+), (
+    -1, 'INVALID', 'Invalid reference', 'Invalid reference', 'Invalid reference', 'Invalid reference',
+    0, 0, NULL,
+    TIMESTAMPTZ '1900-01-01 00:00:00+00', TIMESTAMPTZ '9999-12-31 00:00:00+00',
+    TRUE, NULL, 'INVALID'
 )
 ON CONFLICT (product_sk) DO NOTHING;
 
 INSERT INTO warehouse.dim_campaign (
-    campaign_sk, campaign_id, campaign_name, channel,
+    campaign_sk, campaign_id, campaign_name, campaign_type, channel,
     traffic_source, target_segment, campaign_status, ab_test_group, campaign_start_date, campaign_end_date,
     budget, effective_from, effective_to, is_current, source_updated_at, scd_hash
 )
 VALUES (
-    0, 'UNKNOWN', 'Unknown', 'Unknown',
+    0, 'UNKNOWN', 'Unknown', 'Unknown', 'Unknown',
     'Unknown', 'Unknown', 'Unknown', 'Unknown', NULL, NULL,
     0, TIMESTAMPTZ '1900-01-01 00:00:00+00', TIMESTAMPTZ '9999-12-31 00:00:00+00',
     TRUE, NULL, 'UNKNOWN'
+), (
+    -1, 'INVALID', 'Invalid reference', 'Invalid reference', 'Invalid reference',
+    'Invalid reference', 'Invalid reference', 'Invalid reference', 'Invalid reference', NULL, NULL,
+    0, TIMESTAMPTZ '1900-01-01 00:00:00+00', TIMESTAMPTZ '9999-12-31 00:00:00+00',
+    TRUE, NULL, 'INVALID'
 )
 ON CONFLICT (campaign_sk) DO NOTHING;
 
@@ -696,6 +737,7 @@ BEGIN
         'staging.dim_customers',
         'staging.stg_gold_fact_orders_scd2',
         'staging.stg_gold_fact_orders',
+        'staging.stg_gold_fact_campaign_spend_scd2',
         'staging.stg_gold_fact_web_events',
         'staging.fact_web_events'
     ]
@@ -947,6 +989,7 @@ BEGIN
                     coalesce(nullif(r->>'product_name', ''), nullif(r->>'name', '')) AS product_name,
                     coalesce(nullif(r->>'category', ''), nullif(r->>'product_category', ''), 'Unknown') AS category,
                     nullif(r->>'brand', '') AS brand,
+                    coalesce(nullif(r->>'status', ''), nullif(r->>'product_status', '')) AS product_status,
                     coalesce(warehouse.safe_numeric(r->>'original_price'), warehouse.safe_numeric(r->>'list_price')) AS original_price,
                     coalesce(warehouse.safe_numeric(r->>'discounted_price'), warehouse.safe_numeric(r->>'current_price'), warehouse.safe_numeric(r->>'price')) AS current_price,
                     warehouse.safe_int(r->>'inventory_remaining') AS inventory_remaining,
@@ -985,12 +1028,12 @@ BEGIN
             END $guard$;
 
             INSERT INTO warehouse.dim_product (
-                product_sk, product_id, product_name, category, brand,
+                product_sk, product_id, product_name, category, brand, product_status,
                 original_price, current_price, inventory_remaining,
                 effective_from, effective_to, is_current, source_updated_at, scd_hash
             )
             SELECT DISTINCT ON (product_sk)
-                product_sk, product_id, product_name, category, brand,
+                product_sk, product_id, product_name, category, brand, product_status,
                 original_price, current_price, inventory_remaining,
                 effective_from,
                 CASE
@@ -1010,6 +1053,7 @@ BEGIN
                 product_name = EXCLUDED.product_name,
                 category = EXCLUDED.category,
                 brand = EXCLUDED.brand,
+                product_status = EXCLUDED.product_status,
                 original_price = EXCLUDED.original_price,
                 current_price = EXCLUDED.current_price,
                 inventory_remaining = EXCLUDED.inventory_remaining,
@@ -1058,6 +1102,7 @@ BEGIN
                     coalesce(nullif(r->>'traffic_source', ''), nullif(r->>'channel', ''), 'Unknown') AS traffic_source,
                     coalesce(nullif(r->>'target_segment', ''), nullif(r->>'customer_segment', ''), 'Unknown') AS target_segment,
                     nullif(r->>'campaign_status', '') AS campaign_status,
+                    nullif(r->>'campaign_type', '') AS campaign_type,
                     nullif(r->>'ab_test_group', '') AS ab_test_group,
                     coalesce(warehouse.safe_date(r->>'campaign_start_date'), warehouse.safe_date(r->>'start_date')) AS campaign_start_date,
                     coalesce(warehouse.safe_date(r->>'campaign_end_date'), warehouse.safe_date(r->>'end_date')) AS campaign_end_date,
@@ -1098,12 +1143,12 @@ BEGIN
 
             INSERT INTO warehouse.dim_campaign (
                 campaign_sk, campaign_id, campaign_name, channel,
-                traffic_source, target_segment, campaign_status, ab_test_group, campaign_start_date, campaign_end_date,
+                traffic_source, target_segment, campaign_status, campaign_type, ab_test_group, campaign_start_date, campaign_end_date,
                 budget, effective_from, effective_to, is_current, source_updated_at, scd_hash
             )
             SELECT DISTINCT ON (campaign_sk)
                 campaign_sk, campaign_id, campaign_name, channel,
-                traffic_source, target_segment, campaign_status, ab_test_group, campaign_start_date, campaign_end_date,
+                traffic_source, target_segment, campaign_status, campaign_type, ab_test_group, campaign_start_date, campaign_end_date,
                 budget,
                 effective_from,
                 CASE
@@ -1125,6 +1170,7 @@ BEGIN
                 traffic_source = EXCLUDED.traffic_source,
                 target_segment = EXCLUDED.target_segment,
                 campaign_status = EXCLUDED.campaign_status,
+                campaign_type = EXCLUDED.campaign_type,
                 ab_test_group = EXCLUDED.ab_test_group,
                 campaign_start_date = EXCLUDED.campaign_start_date,
                 campaign_end_date = EXCLUDED.campaign_end_date,
@@ -1244,28 +1290,19 @@ BEGIN
                     coalesce(nullif(r->>'city', ''), nullif(r->>'home_city', ''), 'Unknown') AS city,
                     coalesce(nullif(r->>'state', ''), nullif(r->>'home_state', ''), 'Unknown') AS state,
                     coalesce(nullif(r->>'country', ''), 'Unknown') AS country,
-                    coalesce(nullif(r->>'order_status', ''), 'completed') AS order_status,
+                    lower(nullif(r->>'order_status', '')) AS order_status,
+                    warehouse.safe_numeric(r->>'tax_amount') AS tax_amount,
+                    warehouse.safe_numeric(r->>'shipping_amount') AS shipping_amount,
+                    warehouse.safe_numeric(r->>'total_amount') AS total_amount,
                     nullif(r->>'payment_method', '') AS payment_method,
                     coalesce(warehouse.safe_int(r->>'item_count'), warehouse.safe_int(r->>'quantity'), 0) AS item_count,
-                    coalesce(
-                        warehouse.safe_numeric(r->>'gross_amount'),
-                        warehouse.safe_numeric(r->>'total_amount'),
-                        warehouse.safe_numeric(r->>'order_total'),
-                        warehouse.safe_numeric(r->>'total_revenue'),
-                        warehouse.safe_numeric(r->>'cart_value'),
-                        0
-                    ) AS gross_amount,
-                    coalesce(warehouse.safe_numeric(r->>'discount_amount'), 0) AS discount_amount,
-                    coalesce(warehouse.safe_numeric(r->>'tax_amount'), 0) AS tax_amount,
-                    coalesce(warehouse.safe_numeric(r->>'shipping_amount'), 0) AS shipping_amount,
-                    coalesce(
-                        warehouse.safe_numeric(r->>'net_revenue'),
-                        warehouse.safe_numeric(r->>'revenue'),
-                        warehouse.safe_numeric(r->>'total_revenue'),
-                        warehouse.safe_numeric(r->>'cart_value'),
-                        warehouse.safe_numeric(r->>'gross_amount'),
-                        0
-                    ) AS net_revenue,
+                    -- gross_amount and discount_amount are set from the order's
+                    -- items after the item load (below); these are placeholders.
+                    0::NUMERIC AS gross_amount,
+                    0::NUMERIC AS discount_amount,
+                    -- The order's net value is the source's cart_value (the sum
+                    -- of its lines). No other column stands in for it.
+                    warehouse.safe_numeric(r->>'cart_value') AS net_revenue,
                     coalesce(nullif(r->>'record_hash', ''), nullif(r->>'source_record_hash', ''), md5(r::TEXT)) AS source_record_hash,
                     (warehouse.safe_date(r->>'ingestion_date')::TIMESTAMP AT TIME ZONE 'UTC') AS source_updated_at,
                     md5(r::TEXT) AS row_fingerprint
@@ -1274,14 +1311,14 @@ BEGIN
             INSERT INTO warehouse.fact_orders (
                 order_sk, order_id, customer_sk, campaign_sk, order_date_sk, region_sk, channel_sk,
                 order_timestamp, order_status, payment_method, item_count,
-                gross_amount, discount_amount, tax_amount, shipping_amount, net_revenue,
+                gross_amount, discount_amount, net_revenue, tax_amount, shipping_amount, total_amount,
                 source_record_hash, customer_id, campaign_id, source_updated_at
             )
             SELECT DISTINCT ON (b.order_id)
                 warehouse.deterministic_fact_sk('order', b.order_id) AS order_sk,
                 b.order_id,
-                coalesce(dc.customer_sk, 0) AS customer_sk,
-                coalesce(dcamp.campaign_sk, 0) AS campaign_sk,
+                warehouse.member_sk(dc.customer_sk, b.customer_id IN (SELECT known.customer_id FROM warehouse.dim_customer known)) AS customer_sk,
+                warehouse.member_sk(dcamp.campaign_sk, b.campaign_id IN (SELECT known.campaign_id FROM warehouse.dim_campaign known)) AS campaign_sk,
                 warehouse.date_sk(warehouse.business_date(b.order_ts)) AS order_date_sk,
                 coalesce(dr.region_sk, 0) AS region_sk,
                 coalesce(dch.channel_sk, 0) AS channel_sk,
@@ -1291,9 +1328,10 @@ BEGIN
                 b.item_count,
                 b.gross_amount,
                 b.discount_amount,
+                b.net_revenue,
                 b.tax_amount,
                 b.shipping_amount,
-                b.net_revenue,
+                b.total_amount,
                 b.source_record_hash,
                 b.customer_id,
                 b.campaign_id,
@@ -1333,12 +1371,13 @@ BEGIN
                 channel_sk = EXCLUDED.channel_sk,
                 order_timestamp = EXCLUDED.order_timestamp,
                 order_status = EXCLUDED.order_status,
+                tax_amount = EXCLUDED.tax_amount,
+                shipping_amount = EXCLUDED.shipping_amount,
+                total_amount = EXCLUDED.total_amount,
                 payment_method = EXCLUDED.payment_method,
                 item_count = EXCLUDED.item_count,
                 gross_amount = EXCLUDED.gross_amount,
                 discount_amount = EXCLUDED.discount_amount,
-                tax_amount = EXCLUDED.tax_amount,
-                shipping_amount = EXCLUDED.shipping_amount,
                 net_revenue = EXCLUDED.net_revenue,
                 source_record_hash = EXCLUDED.source_record_hash,
                 customer_id = EXCLUDED.customer_id,
@@ -1417,7 +1456,7 @@ BEGIN
                 fo.order_sk,
                 b.order_id,
                 coalesce(nullif(fo.customer_sk, 0), dc.customer_sk, 0) AS customer_sk,
-                coalesce(dp.product_sk, 0) AS product_sk,
+                warehouse.member_sk(dp.product_sk, b.product_id IN (SELECT known.product_id FROM warehouse.dim_product known)) AS product_sk,
                 -- An item is dated by its order, like its order_timestamp below.
                 coalesce(nullif(fo.order_date_sk, 0), warehouse.date_sk(warehouse.business_date(b.order_ts)), 0) AS order_date_sk,
                 -- An item without its own geography or channel resolves to the
@@ -1571,15 +1610,14 @@ BEGIN
                     ) AS campaign_spend_nk,
                     coalesce(nullif((warehouse.safe_numeric(r->>'campaign_id')::BIGINT)::TEXT, ''), nullif(r->>'campaign_id', ''), 'UNKNOWN') AS campaign_id,
                     coalesce(warehouse.safe_date(r->>'spend_date'), warehouse.safe_date(r->>'date')) AS spend_date,
-                    coalesce(nullif(r->>'city', ''), 'Unknown') AS city,
-                    coalesce(nullif(r->>'state', ''), 'Unknown') AS state,
-                    coalesce(nullif(r->>'country', ''), 'Unknown') AS country,
+                    nullif(r->>'state', '') AS state,
+                    nullif(r->>'country', '') AS country,
                     coalesce(nullif(r->>'channel', ''), nullif(r->>'traffic_source', ''), 'Unknown') AS channel_value,
                     coalesce(warehouse.safe_numeric(r->>'spend_amount'), warehouse.safe_numeric(r->>'ad_spend'), warehouse.safe_numeric(r->>'cost'), 0) AS spend_amount,
                     coalesce(warehouse.safe_bigint(r->>'impressions'), 0) AS impressions,
                     coalesce(warehouse.safe_bigint(r->>'clicks'), 0) AS clicks,
-                    coalesce(warehouse.safe_bigint(r->>'conversions'), 0) AS conversions,
-                    coalesce(warehouse.safe_numeric(r->>'attributed_revenue'), warehouse.safe_numeric(r->>'revenue'), 0) AS attributed_revenue,
+                    warehouse.safe_bigint(r->>'conversions') AS conversions,
+                    warehouse.safe_numeric(r->>'attributed_revenue') AS attributed_revenue,
                     (warehouse.safe_date(r->>'ingestion_date')::TIMESTAMP AT TIME ZONE 'UTC') AS source_updated_at,
                     md5(r::TEXT) AS row_fingerprint
                 FROM src
@@ -1592,7 +1630,7 @@ BEGIN
             SELECT DISTINCT ON (b.campaign_spend_nk)
                 warehouse.deterministic_fact_sk('campaign_spend', b.campaign_spend_nk) AS campaign_spend_sk,
                 b.campaign_spend_nk,
-                coalesce(dc.campaign_sk, 0) AS campaign_sk,
+                warehouse.member_sk(dc.campaign_sk, b.campaign_id IN (SELECT known.campaign_id FROM warehouse.dim_campaign known)) AS campaign_sk,
                 warehouse.date_sk(b.spend_date) AS spend_date_sk,
                 coalesce(dr.region_sk, 0) AS region_sk,
                 coalesce(dch.channel_sk, 0) AS channel_sk,
@@ -1615,7 +1653,7 @@ BEGIN
                 LIMIT 1
             ) dc ON TRUE
             LEFT JOIN warehouse.dim_region dr
-                ON dr.region_nk = warehouse.region_nk(b.city, b.state, b.country)
+                ON dr.region_nk = warehouse.region_nk(NULL, b.state, b.country)
             LEFT JOIN warehouse.dim_channel dch
                 ON dch.channel_nk = warehouse.channel_nk(b.channel_value)
             ORDER BY b.campaign_spend_nk, b.spend_date DESC NULLS LAST, b.row_fingerprint
@@ -1643,11 +1681,11 @@ END $$;
 -- One rule for every fact key, as for orders, items and spend
 -- (spark-batch/point_in_time_fact_joins.py):
 --   - a NULL customer, product or campaign key resolves to the unknown member (0);
---   - a key that is present but has no dimension version covering the event
---     time (for example one quarantined in Silver) rejects the event into
---     audit.fact_web_events_rejects with a reason naming every such key.
--- No dimension member is ever invented for a web event. Conversions are built
--- from the loaded web events, so a rejected event has no conversion.
+--   - a key that is present but has no valid dimension row (for example one
+--     quarantined in Silver) resolves to the invalid-reference member (-1).
+--     The event is kept, with its natural ID, and resolves to the real member
+--     once the dimension row is valid (warehouse.member_sk).
+-- No event is dropped for a bad reference, and no member is invented per key.
 
 DO $$
 DECLARE
@@ -1717,28 +1755,11 @@ BEGIN
             )
             SELECT
                 b.*,
-                dc.customer_sk,
-                dp.product_sk,
-                dcamp.campaign_sk,
+                warehouse.member_sk(dc.customer_sk, b.customer_id IN (SELECT known.customer_id FROM warehouse.dim_customer known)) AS customer_sk,
+                warehouse.member_sk(dp.product_sk, b.product_id IN (SELECT known.product_id FROM warehouse.dim_product known)) AS product_sk,
+                warehouse.member_sk(dcamp.campaign_sk, b.campaign_id IN (SELECT known.campaign_id FROM warehouse.dim_campaign known)) AS campaign_sk,
                 coalesce(dr.region_sk, 0) AS region_sk,
-                coalesce(dch.channel_sk, 0) AS channel_sk,
-                nullif(concat_ws('; ',
-                    CASE WHEN dc.customer_sk IS NULL THEN
-                        CASE WHEN EXISTS (SELECT 1 FROM warehouse.dim_customer d WHERE d.customer_id = b.customer_id)
-                             THEN 'no dim_customer version covers event_timestamp'
-                             ELSE 'customer_id not in dim_customer' END
-                    END,
-                    CASE WHEN dp.product_sk IS NULL THEN
-                        CASE WHEN EXISTS (SELECT 1 FROM warehouse.dim_product d WHERE d.product_id = b.product_id)
-                             THEN 'no dim_product version covers event_timestamp'
-                             ELSE 'product_id not in dim_product' END
-                    END,
-                    CASE WHEN dcamp.campaign_sk IS NULL THEN
-                        CASE WHEN EXISTS (SELECT 1 FROM warehouse.dim_campaign d WHERE d.campaign_id = b.campaign_id)
-                             THEN 'no dim_campaign version covers event_timestamp'
-                             ELSE 'campaign_id not in dim_campaign' END
-                    END
-                ), '') AS reject_reason
+                coalesce(dch.channel_sk, 0) AS channel_sk
             FROM deduplicated b
             -- A NULL key is 'UNKNOWN' here, which the unknown member (0, open
             -- from 1900 to 9999) matches; any other key must match a real version.
@@ -1774,17 +1795,6 @@ BEGIN
             LEFT JOIN warehouse.dim_channel dch
                 ON dch.channel_nk = warehouse.channel_nk(b.channel_value);
         $sql$, source_table);
-
-        INSERT INTO audit.fact_web_events_rejects (
-            event_id, session_id, customer_id, product_id, campaign_id,
-            event_timestamp, event_type, event_value, reject_reason
-        )
-        SELECT
-            event_id, session_id, customer_id, product_id, campaign_id,
-            event_ts, event_type, event_value, reject_reason
-        FROM web_events_resolved
-        WHERE reject_reason IS NOT NULL
-        ORDER BY event_id;
 
         INSERT INTO warehouse.fact_web_events (
             event_sk, event_id, session_id, customer_sk, product_sk, campaign_sk,
@@ -1831,7 +1841,6 @@ BEGIN
             b.campaign_id,
             b.source_updated_at
         FROM web_events_resolved b
-        WHERE b.reject_reason IS NULL
         ORDER BY b.event_id
         ON CONFLICT (event_id) DO UPDATE SET
             session_id = EXCLUDED.session_id,
@@ -1930,7 +1939,7 @@ ON CONFLICT (conversion_nk) DO UPDATE SET
 
 UPDATE warehouse.fact_orders SET record_hash = md5(array_to_string(ARRAY[
     order_id, customer_id, campaign_id, (order_timestamp AT TIME ZONE 'UTC')::TEXT, order_status, payment_method, item_count::TEXT,
-    gross_amount::TEXT, discount_amount::TEXT, tax_amount::TEXT, shipping_amount::TEXT, net_revenue::TEXT
+    gross_amount::TEXT, discount_amount::TEXT, net_revenue::TEXT, tax_amount::TEXT, shipping_amount::TEXT, total_amount::TEXT
 ], '|', '<NULL>'));
 
 UPDATE warehouse.fact_order_items SET record_hash = md5(array_to_string(ARRAY[

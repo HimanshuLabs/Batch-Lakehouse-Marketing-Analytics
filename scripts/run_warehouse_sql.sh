@@ -18,6 +18,11 @@
 #   bash scripts/run_warehouse_sql.sh sql/warehouse/begin_generation.sql \
 #       sql/warehouse/create_warehouse_tables.sql sql/warehouse/scd2_validation_queries.sql \
 #       sql/warehouse/create_marts.sql sql/warehouse/reconciliation_report.sql
+#
+# It runs under the pipeline run lock (scripts/pipeline_lock.py): inside a
+# pipeline task the run already holds it (P2_LOCK_HELD); started by hand it
+# takes it for this one command, and exits with 75 without running anything
+# while another run owns it.
 set -euo pipefail
 
 if [[ $# -eq 0 ]]; then
@@ -28,6 +33,13 @@ SQL_FILE="${SQL_FILES[0]}"
 
 RUN_MODE="${RUN_MODE:-docker}"
 P2_RUN_ID="${P2_RUN_ID:-warehouse-$(date +%s%N)-$$}"
+
+if [[ -z "${P2_LOCK_HELD:-}" ]]; then
+  # The lock file is logs/pipeline_run.lock of the project this runs in.
+  export P2_RUN_ID PROJECT_ROOT="${PROJECT_ROOT:-$PWD}"
+  exec python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/pipeline_lock.py" --last run_warehouse_sql -- \
+    bash "${BASH_SOURCE[0]}" "$@"
+fi
 
 PGCONTAINER="${PGCONTAINER:-project2_postgres}"
 PGHOST="${PGHOST:-localhost}"

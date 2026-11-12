@@ -64,8 +64,10 @@ Supports daily revenue reporting, order volume tracking, and average order value
 | Column group | Meaning |
 |---|---|
 | Date column | Reporting date used for trend analysis |
-| Revenue metrics | Total revenue for the reporting period |
-| Order metrics | Order count and supporting sales volume metrics |
+| Revenue metrics | Gross, discount and net revenue of the completed orders of the day |
+| Charge metrics | `tax_amount`, `shipping_amount` and `total_amount` (net + tax + shipping) of those orders |
+| Order metrics | Completed order count and supporting sales volume metrics |
+| Cancelled and returned | `cancelled_order_count`, `cancelled_amount`, `returned_order_count`, `returned_amount`: not counted as revenue |
 | Average value metrics | Average order value or similar derived KPI fields |
 | Audit/support fields | Optional mart-generated metadata or supporting fields |
 
@@ -113,11 +115,13 @@ Supports marketing performance reporting across campaign spend, campaign-attribu
 
 | Column group | Meaning |
 |---|---|
-| Campaign identifiers | Campaign ID, campaign name, or campaign grouping fields |
+| Campaign identifiers | Campaign ID, campaign name, `campaign_type` (the objective: awareness, consideration, conversion, retention), status and A/B group; `member_type` as in the customer dataset |
 | Channel/source fields | Marketing channel, traffic source, or attribution fields |
 | Spend metrics | Campaign cost/spend values |
-| Revenue metrics | Campaign-attributed revenue |
+| Revenue metrics | `attributed_revenue`: net revenue of the completed orders the warehouse attributes to the campaign |
+| Ad platform metrics | `ad_platform_conversions`, `platform_attributed_revenue`, `platform_roas`: what the ad platform itself reports, shown beside the warehouse-measured figures |
 | Conversion metrics | Conversion counts, conversion rates, or funnel outcomes |
+| Cancelled and returned | Cancelled and returned order counts and amounts: not counted as revenue |
 | Efficiency metrics | ROAS, cost per conversion, or related performance metrics |
 
 ### Recommended Power BI data types
@@ -169,9 +173,9 @@ Supports product sales reporting, category performance analysis, and merchandisi
 
 | Column group | Meaning |
 |---|---|
-| Product identifiers | Product ID, product name, or product grouping fields |
-| Category fields | Product category or hierarchy fields |
-| Quantity metrics | Units sold or item count |
+| Product identifiers | Product ID, product name, or product grouping fields; `member_type` as in the customer dataset |
+| Category fields | Product category, `brand` and `product_status` (active or discontinued) |
+| Quantity metrics | Units sold in completed orders; `cancelled_units`, `returned_units` and `returned_amount` beside them |
 | Revenue metrics | Product-level or category-level revenue |
 | Price/value metrics | Average price, average item value, or supporting sales metrics |
 
@@ -220,10 +224,11 @@ Supports customer analytics, segmentation, lifetime value reporting, and purchas
 
 | Column group | Meaning |
 |---|---|
-| Customer identifiers | Customer ID or customer-level keys |
+| Customer identifiers | Customer ID or customer-level keys; `member_type` is `known` for a real customer (the mart also has one row each for the unknown and the invalid-reference member) |
 | Segment fields | Customer segment, membership tier, or grouping attributes |
-| Value metrics | Lifetime value, revenue contribution, or spend totals |
-| Purchase metrics | Order count, repeat purchase indicators, frequency metrics |
+| Value metrics | Lifetime value, revenue contribution, or spend totals, from completed orders |
+| Purchase metrics | Completed order count, repeat purchase indicators, frequency metrics |
+| Cancelled and returned | `cancelled_order_count`, `cancelled_amount`, `returned_order_count`, `returned_amount` |
 | Recency fields | Last order/activity date or freshness indicators |
 | Geography fields | City, state, country, or regional grouping fields if present |
 

@@ -18,6 +18,14 @@ is owned by a run, named by P2_RUN_ID (the Airflow run_id, or run_dag.py's id):
   - An owner that has not started a task for P2_RUN_LOCK_STALE_SECONDS (default
     3600) is taken to be dead and may be replaced.
 
+The command runs with P2_LOCK_HELD set to the run id. The scripts that write to
+the lake or the warehouse (run_airflow_task.sh, run_warehouse_sql.sh,
+tests/integration/rebuild_warehouse.sh) take the lock themselves, as a one-task
+run, when they are started without it, so a task or a rebuild run by hand cannot
+overlap a pipeline run either. To run several by hand as one run:
+
+    python scripts/pipeline_lock.py --last manual_run -- bash -c '<commands>'
+
 Exit code 75 means the lock is held by another run; nothing was executed.
 """
 from __future__ import annotations
@@ -118,7 +126,8 @@ def run_task(task_id: str, command: list[str], last: bool) -> int:
                 "updated_at": now_text(), "updated_epoch": time.time()}
         write_state(handle, mine)
 
-        child = subprocess.Popen(command)
+        # P2_LOCK_HELD tells the scripts below that this run holds the lock.
+        child = subprocess.Popen(command, env={**os.environ, "P2_LOCK_HELD": run_id})
 
         def stop(signum, _frame):
             child.send_signal(signum)

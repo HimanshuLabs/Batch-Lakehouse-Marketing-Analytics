@@ -25,6 +25,17 @@ Design:
 
 BEGIN;
 
+-- This file is one step of the warehouse build. It refuses to run anywhere but
+-- in the build transaction that sql/warehouse/begin_generation.sql started
+-- (which sets p2.build_txid for that transaction only), so it can never drop or
+-- rebuild the live tables on its own.
+DO $$
+BEGIN
+    IF current_setting('p2.build_txid', true) IS DISTINCT FROM txid_current()::TEXT THEN
+        RAISE EXCEPTION 'create_marts.sql runs only inside the warehouse build transaction started by sql/warehouse/begin_generation.sql. Run the whole build: bash scripts/run_airflow_task.sh build_warehouse';
+    END IF;
+END $$;
+
 CREATE SCHEMA IF NOT EXISTS marts;
 CREATE SCHEMA IF NOT EXISTS audit;
 
@@ -66,13 +77,26 @@ WITH current_customers AS (
 orders_by_customer AS (
     SELECT
         dc.customer_id,
-        COUNT(DISTINCT fo.order_id) AS total_order_count,
-        COALESCE(SUM(fo.gross_amount), 0) AS gross_revenue,
-        COALESCE(SUM(fo.discount_amount), 0) AS total_discount_amount,
-        COALESCE(SUM(fo.net_revenue), 0) AS lifetime_value,
-        COALESCE(AVG(fo.net_revenue), 0) AS average_order_value,
-        MIN(fo.order_timestamp) AS first_order_timestamp,
-        MAX(fo.order_timestamp) AS last_order_timestamp
+        -- Only a completed order is a sale: counts, revenue, lifetime value and
+        -- order value are those of completed orders. Cancelled and returned
+        -- orders are shown beside them.
+        COUNT(DISTINCT fo.order_id) FILTER (WHERE fo.order_status = 'completed') AS total_order_count,
+        COALESCE(SUM(fo.gross_amount) FILTER (WHERE fo.order_status = 'completed'), 0) AS gross_revenue,
+        COALESCE(SUM(fo.discount_amount) FILTER (WHERE fo.order_status = 'completed'), 0) AS total_discount_amount,
+        COALESCE(SUM(fo.net_revenue) FILTER (WHERE fo.order_status = 'completed'), 0) AS lifetime_value,
+        COALESCE(AVG(fo.net_revenue) FILTER (WHERE fo.order_status = 'completed'), 0) AS average_order_value,
+        MIN(fo.order_timestamp) FILTER (WHERE fo.order_status = 'completed') AS first_order_timestamp,
+        MAX(fo.order_timestamp) FILTER (WHERE fo.order_status = 'completed') AS last_order_timestamp,
+        COUNT(DISTINCT fo.order_id) FILTER (WHERE fo.order_status = 'cancelled') AS cancelled_order_count,
+        COALESCE(SUM(fo.net_revenue) FILTER (WHERE fo.order_status = 'cancelled'), 0) AS cancelled_amount,
+        COUNT(DISTINCT fo.order_id) FILTER (WHERE fo.order_status = 'returned') AS returned_order_count,
+        COALESCE(SUM(fo.net_revenue) FILTER (WHERE fo.order_status = 'returned'), 0) AS returned_amount,
+        -- 1 = the third of the buying customers with the highest lifetime value.
+        NTILE(3) OVER (
+            PARTITION BY (COALESCE(SUM(fo.net_revenue) FILTER (WHERE fo.order_status = 'completed'), 0) > 0
+                          AND dc.customer_id NOT IN ('UNKNOWN', 'INVALID'))
+            ORDER BY COALESCE(SUM(fo.net_revenue) FILTER (WHERE fo.order_status = 'completed'), 0) DESC, dc.customer_id
+        ) AS value_third
     FROM warehouse.fact_orders fo
     JOIN warehouse.dim_customer dc
         ON fo.customer_sk = dc.customer_sk
@@ -83,8 +107,12 @@ items_by_customer AS (
         dc.customer_id,
         COALESCE(SUM(foi.quantity), 0) AS total_units_purchased,
         COUNT(DISTINCT dp.category) FILTER (WHERE dp.category IS NOT NULL) AS product_categories_purchased,
-        COUNT(DISTINCT dp.product_id) FILTER (WHERE dp.product_id <> 'UNKNOWN') AS distinct_products_purchased
+        COUNT(DISTINCT dp.product_id) FILTER (WHERE dp.product_id NOT IN ('UNKNOWN', 'INVALID')) AS distinct_products_purchased
     FROM warehouse.fact_order_items foi
+    -- Items of completed orders only.
+    JOIN warehouse.fact_orders fo
+        ON fo.order_sk = foi.order_sk
+       AND fo.order_status = 'completed'
     JOIN warehouse.dim_customer dc
         ON foi.customer_sk = dc.customer_sk
     LEFT JOIN warehouse.dim_product dp
@@ -117,6 +145,11 @@ web_by_customer AS (
 )
 SELECT
     cc.customer_id,
+    -- 'known' for a real member. The marts also carry one row each for the
+    -- unknown member (facts with no key) and the invalid-reference member
+    -- (facts whose key has no valid dimension row), so every mart ties out to
+    -- the fact totals; filter member_type = 'known' for the real members only.
+    CASE cc.customer_id WHEN 'UNKNOWN' THEN 'unknown_member' WHEN 'INVALID' THEN 'invalid_reference' ELSE 'known' END AS member_type,
     cc.customer_name,
     cc.email,
     cc.gender,
@@ -136,6 +169,11 @@ SELECT
     ROUND(COALESCE(o.lifetime_value, 0), 2) AS lifetime_value,
     ROUND(COALESCE(o.average_order_value, 0), 2) AS average_order_value,
 
+    COALESCE(o.cancelled_order_count, 0)::BIGINT AS cancelled_order_count,
+    ROUND(COALESCE(o.cancelled_amount, 0), 2) AS cancelled_amount,
+    COALESCE(o.returned_order_count, 0)::BIGINT AS returned_order_count,
+    ROUND(COALESCE(o.returned_amount, 0), 2) AS returned_amount,
+
     COALESCE(i.total_units_purchased, 0)::BIGINT AS total_units_purchased,
     COALESCE(i.product_categories_purchased, 0)::BIGINT AS product_categories_purchased,
     COALESCE(i.distinct_products_purchased, 0)::BIGINT AS distinct_products_purchased,
@@ -152,11 +190,13 @@ SELECT
 
     (COALESCE(o.total_order_count, 0) >= 2) AS repeat_purchase_signal,
 
+    -- Thirds of the customers who have bought, by lifetime value: the
+    -- boundaries come from the data, not from fixed amounts.
     CASE
-        WHEN COALESCE(o.lifetime_value, 0) >= 1000 THEN 'High Value'
-        WHEN COALESCE(o.lifetime_value, 0) >= 250 THEN 'Medium Value'
-        WHEN COALESCE(o.lifetime_value, 0) > 0 THEN 'Low Value'
-        ELSE 'No Purchase Yet'
+        WHEN COALESCE(o.lifetime_value, 0) <= 0 THEN 'No Purchase Yet'
+        WHEN o.value_third = 1 THEN 'High Value'
+        WHEN o.value_third = 2 THEN 'Medium Value'
+        ELSE 'Low Value'
     END AS customer_value_segment,
 
     COALESCE(w.web_event_count, 0)::BIGINT AS web_event_count,
@@ -185,8 +225,7 @@ LEFT JOIN orders_by_customer o
 LEFT JOIN items_by_customer i
     ON cc.customer_id = i.customer_id
 LEFT JOIN web_by_customer w
-    ON cc.customer_id = w.customer_id
-WHERE cc.customer_id <> 'UNKNOWN';
+    ON cc.customer_id = w.customer_id;
 
 COMMENT ON VIEW marts.mart_customer_360 IS
 'BI-ready customer profile mart combining current customer attributes, lifetime revenue, order behavior, repeat purchase signal, and web engagement metrics.';
@@ -205,6 +244,7 @@ WITH current_campaigns AS (
     SELECT
         campaign_id,
         campaign_name,
+        campaign_type,
         channel,
         traffic_source,
         target_segment,
@@ -222,6 +262,7 @@ spend_by_campaign AS (
         COALESCE(SUM(fcs.spend_amount), 0) AS total_spend,
         COALESCE(SUM(fcs.impressions), 0) AS impressions,
         COALESCE(SUM(fcs.clicks), 0) AS clicks,
+        -- What the ad platform itself reports, beside the warehouse's own figures.
         COALESCE(SUM(fcs.conversions), 0) AS ad_platform_conversions,
         COALESCE(SUM(fcs.attributed_revenue), 0) AS platform_attributed_revenue
     FROM warehouse.fact_campaign_spend fcs
@@ -232,10 +273,15 @@ spend_by_campaign AS (
 orders_by_campaign AS (
     SELECT
         dc.campaign_id,
-        COUNT(DISTINCT fo.order_id) AS order_count,
-        COUNT(DISTINCT fo.customer_sk) AS purchasing_customer_count,
-        COALESCE(SUM(fo.net_revenue), 0) AS warehouse_attributed_revenue,
-        COALESCE(AVG(fo.net_revenue), 0) AS average_order_value
+        -- Completed orders only (see mart_customer_360).
+        COUNT(DISTINCT fo.order_id) FILTER (WHERE fo.order_status = 'completed') AS order_count,
+        COUNT(DISTINCT fo.customer_id) FILTER (WHERE fo.order_status = 'completed') AS purchasing_customer_count,
+        COALESCE(SUM(fo.net_revenue) FILTER (WHERE fo.order_status = 'completed'), 0) AS warehouse_attributed_revenue,
+        COALESCE(AVG(fo.net_revenue) FILTER (WHERE fo.order_status = 'completed'), 0) AS average_order_value,
+        COUNT(DISTINCT fo.order_id) FILTER (WHERE fo.order_status = 'cancelled') AS cancelled_order_count,
+        COALESCE(SUM(fo.net_revenue) FILTER (WHERE fo.order_status = 'cancelled'), 0) AS cancelled_amount,
+        COUNT(DISTINCT fo.order_id) FILTER (WHERE fo.order_status = 'returned') AS returned_order_count,
+        COALESCE(SUM(fo.net_revenue) FILTER (WHERE fo.order_status = 'returned'), 0) AS returned_amount
     FROM warehouse.fact_orders fo
     JOIN warehouse.dim_campaign dc
         ON fo.campaign_sk = dc.campaign_sk
@@ -270,7 +316,13 @@ conversions_by_campaign AS (
 )
 SELECT
     cc.campaign_id,
+    -- 'known' for a real member. The marts also carry one row each for the
+    -- unknown member (facts with no key) and the invalid-reference member
+    -- (facts whose key has no valid dimension row), so every mart ties out to
+    -- the fact totals; filter member_type = 'known' for the real members only.
+    CASE cc.campaign_id WHEN 'UNKNOWN' THEN 'unknown_member' WHEN 'INVALID' THEN 'invalid_reference' ELSE 'known' END AS member_type,
     cc.campaign_name,
+    cc.campaign_type,
     cc.channel,
     cc.traffic_source,
     cc.target_segment,
@@ -300,6 +352,20 @@ SELECT
     ROUND(COALESCE(s.platform_attributed_revenue, 0), 2) AS platform_attributed_revenue,
     ROUND(COALESCE(c.warehouse_conversion_value, 0), 2) AS warehouse_conversion_value,
     ROUND(COALESCE(o.average_order_value, 0), 2) AS average_order_value,
+
+    COALESCE(o.cancelled_order_count, 0)::BIGINT AS cancelled_order_count,
+    ROUND(COALESCE(o.cancelled_amount, 0), 2) AS cancelled_amount,
+    COALESCE(o.returned_order_count, 0)::BIGINT AS returned_order_count,
+    ROUND(COALESCE(o.returned_amount, 0), 2) AS returned_amount,
+
+    -- The platform's own return on spend, beside roas (warehouse-measured) below.
+    ROUND(
+        CASE
+            WHEN COALESCE(s.total_spend, 0) = 0 THEN 0
+            ELSE COALESCE(s.platform_attributed_revenue, 0) / NULLIF(s.total_spend, 0)
+        END,
+        4
+    ) AS platform_roas,
 
     ROUND(
         CASE
@@ -352,8 +418,7 @@ LEFT JOIN orders_by_campaign o
 LEFT JOIN web_by_campaign w
     ON cc.campaign_id = w.campaign_id
 LEFT JOIN conversions_by_campaign c
-    ON cc.campaign_id = c.campaign_id
-WHERE cc.campaign_id <> 'UNKNOWN';
+    ON cc.campaign_id = c.campaign_id;
 
 COMMENT ON VIEW marts.mart_campaign_performance IS
 'BI-ready campaign mart with spend, impressions, clicks, conversions, attributed revenue, ROAS, CTR, CPC, CPA, and session-to-order conversion metrics.';
@@ -374,6 +439,7 @@ WITH current_products AS (
         product_name,
         category,
         brand,
+        product_status,
         original_price,
         current_price,
         inventory_remaining
@@ -383,14 +449,20 @@ WITH current_products AS (
 sales_by_product AS (
     SELECT
         dp.product_id,
-        COUNT(DISTINCT foi.order_id) FILTER (WHERE foi.order_id IS NOT NULL) AS order_count,
-        COUNT(DISTINCT foi.customer_sk) AS purchasing_customer_count,
-        COALESCE(SUM(foi.quantity), 0) AS units_sold,
-        COALESCE(SUM(foi.line_revenue), 0) AS product_revenue,
-        COALESCE(AVG(foi.unit_price), 0) AS average_selling_price,
-        MIN(foi.order_timestamp) AS first_sold_timestamp,
-        MAX(foi.order_timestamp) AS last_sold_timestamp
+        -- An item is sold when its order is completed.
+        COUNT(DISTINCT foi.order_id) FILTER (WHERE fo.order_status = 'completed') AS order_count,
+        COUNT(DISTINCT foi.customer_id) FILTER (WHERE fo.order_status = 'completed') AS purchasing_customer_count,
+        COALESCE(SUM(foi.quantity) FILTER (WHERE fo.order_status = 'completed'), 0) AS units_sold,
+        COALESCE(SUM(foi.line_revenue) FILTER (WHERE fo.order_status = 'completed'), 0) AS product_revenue,
+        COALESCE(AVG(foi.unit_price) FILTER (WHERE fo.order_status = 'completed'), 0) AS average_selling_price,
+        MIN(foi.order_timestamp) FILTER (WHERE fo.order_status = 'completed') AS first_sold_timestamp,
+        MAX(foi.order_timestamp) FILTER (WHERE fo.order_status = 'completed') AS last_sold_timestamp,
+        COALESCE(SUM(foi.quantity) FILTER (WHERE fo.order_status = 'cancelled'), 0) AS cancelled_units,
+        COALESCE(SUM(foi.quantity) FILTER (WHERE fo.order_status = 'returned'), 0) AS returned_units,
+        COALESCE(SUM(foi.line_revenue) FILTER (WHERE fo.order_status = 'returned'), 0) AS returned_amount
     FROM warehouse.fact_order_items foi
+    JOIN warehouse.fact_orders fo
+        ON fo.order_sk = foi.order_sk
     JOIN warehouse.dim_product dp
         ON foi.product_sk = dp.product_sk
     GROUP BY dp.product_id
@@ -428,9 +500,15 @@ web_by_product AS (
 product_base AS (
     SELECT
         cp.product_id,
+        -- 'known' for a real member. The marts also carry one row each for the
+        -- unknown member (facts with no key) and the invalid-reference member
+        -- (facts whose key has no valid dimension row), so every mart ties out to
+        -- the fact totals; filter member_type = 'known' for the real members only.
+        CASE cp.product_id WHEN 'UNKNOWN' THEN 'unknown_member' WHEN 'INVALID' THEN 'invalid_reference' ELSE 'known' END AS member_type,
         cp.product_name,
         cp.category,
         cp.brand,
+        cp.product_status,
         ROUND(COALESCE(cp.original_price, 0), 2) AS original_price,
         ROUND(COALESCE(cp.current_price, 0), 2) AS current_price,
         cp.inventory_remaining,
@@ -442,6 +520,9 @@ product_base AS (
         ROUND(COALESCE(s.average_selling_price, 0), 2) AS average_selling_price,
         s.first_sold_timestamp,
         s.last_sold_timestamp,
+        COALESCE(s.cancelled_units, 0)::BIGINT AS cancelled_units,
+        COALESCE(s.returned_units, 0)::BIGINT AS returned_units,
+        ROUND(COALESCE(s.returned_amount, 0), 2) AS returned_amount,
 
         COALESCE(w.product_web_event_count, 0)::BIGINT AS product_web_event_count,
         COALESCE(w.product_session_count, 0)::BIGINT AS product_session_count,
@@ -467,13 +548,14 @@ product_base AS (
         ON cp.product_id = s.product_id
     LEFT JOIN web_by_product w
         ON cp.product_id = w.product_id
-    WHERE cp.product_id <> 'UNKNOWN'
 )
 SELECT
     product_id,
+    member_type,
     product_name,
     category,
     brand,
+    product_status,
     original_price,
     current_price,
     inventory_remaining,
@@ -484,6 +566,9 @@ SELECT
     average_selling_price,
     first_sold_timestamp,
     last_sold_timestamp,
+    cancelled_units,
+    returned_units,
+    returned_amount,
     product_web_event_count,
     product_session_count,
     product_view_event_count,
@@ -525,22 +610,28 @@ WITH orders_enriched AS (
         fo.order_sk,
         fo.order_id,
         fo.customer_sk,
-        dc.customer_id,
+        -- The customer's own ID, so orders on the invalid-reference member
+        -- still count as their real customers.
+        fo.customer_id,
         fo.order_date_sk,
         fo.order_timestamp,
+        fo.order_status,
+        -- Only a completed order is a sale; the revenue columns below count
+        -- completed orders, and cancelled and returned orders have their own.
+        (fo.order_status = 'completed') AS sold,
         fo.gross_amount,
         fo.discount_amount,
+        fo.net_revenue,
         fo.tax_amount,
         fo.shipping_amount,
-        fo.net_revenue,
+        fo.total_amount,
         fo.item_count,
+        -- The customer's n-th completed order (numbered within the status).
         ROW_NUMBER() OVER (
-            PARTITION BY dc.customer_id
+            PARTITION BY fo.customer_id, fo.order_status
             ORDER BY fo.order_timestamp NULLS LAST, fo.order_sk
         ) AS customer_order_number
     FROM warehouse.fact_orders fo
-    JOIN warehouse.dim_customer dc
-        ON fo.customer_sk = dc.customer_sk
 )
 SELECT
     dd.full_date AS revenue_date,
@@ -553,30 +644,37 @@ SELECT
     dd.year_number,
     dd.is_weekend,
 
-    COUNT(DISTINCT oe.order_id) AS order_count,
-    COUNT(DISTINCT oe.customer_id) AS purchasing_customer_count,
-    COUNT(DISTINCT oe.customer_id) FILTER (WHERE oe.customer_order_number > 1) AS repeat_customer_count,
+    COUNT(DISTINCT oe.order_id) FILTER (WHERE oe.sold) AS order_count,
+    COUNT(DISTINCT oe.customer_id) FILTER (WHERE oe.sold) AS purchasing_customer_count,
+    COUNT(DISTINCT oe.customer_id) FILTER (WHERE oe.sold AND oe.customer_order_number > 1) AS repeat_customer_count,
 
-    COALESCE(SUM(oe.item_count), 0)::BIGINT AS item_count,
-    ROUND(COALESCE(SUM(oe.gross_amount), 0), 2) AS gross_revenue,
-    ROUND(COALESCE(SUM(oe.discount_amount), 0), 2) AS discount_amount,
-    ROUND(COALESCE(SUM(oe.tax_amount), 0), 2) AS tax_amount,
-    ROUND(COALESCE(SUM(oe.shipping_amount), 0), 2) AS shipping_amount,
-    ROUND(COALESCE(SUM(oe.net_revenue), 0), 2) AS net_revenue,
+    COALESCE(SUM(oe.item_count) FILTER (WHERE oe.sold), 0)::BIGINT AS item_count,
+    ROUND(COALESCE(SUM(oe.gross_amount) FILTER (WHERE oe.sold), 0), 2) AS gross_revenue,
+    ROUND(COALESCE(SUM(oe.discount_amount) FILTER (WHERE oe.sold), 0), 2) AS discount_amount,
+    ROUND(COALESCE(SUM(oe.net_revenue) FILTER (WHERE oe.sold), 0), 2) AS net_revenue,
+    -- What customers were charged for those orders: net + tax + shipping.
+    ROUND(COALESCE(SUM(oe.tax_amount) FILTER (WHERE oe.sold), 0), 2) AS tax_amount,
+    ROUND(COALESCE(SUM(oe.shipping_amount) FILTER (WHERE oe.sold), 0), 2) AS shipping_amount,
+    ROUND(COALESCE(SUM(oe.total_amount) FILTER (WHERE oe.sold), 0), 2) AS total_amount,
+
+    COUNT(DISTINCT oe.order_id) FILTER (WHERE oe.order_status = 'cancelled') AS cancelled_order_count,
+    ROUND(COALESCE(SUM(oe.net_revenue) FILTER (WHERE oe.order_status = 'cancelled'), 0), 2) AS cancelled_amount,
+    COUNT(DISTINCT oe.order_id) FILTER (WHERE oe.order_status = 'returned') AS returned_order_count,
+    ROUND(COALESCE(SUM(oe.net_revenue) FILTER (WHERE oe.order_status = 'returned'), 0), 2) AS returned_amount,
 
     ROUND(
         CASE
-            WHEN COUNT(DISTINCT oe.order_id) = 0 THEN 0
-            ELSE COALESCE(SUM(oe.net_revenue), 0) / NULLIF(COUNT(DISTINCT oe.order_id), 0)
+            WHEN COUNT(DISTINCT oe.order_id) FILTER (WHERE oe.sold) = 0 THEN 0
+            ELSE COALESCE(SUM(oe.net_revenue) FILTER (WHERE oe.sold), 0) / NULLIF(COUNT(DISTINCT oe.order_id) FILTER (WHERE oe.sold), 0)
         END,
         2
     ) AS average_order_value,
 
     ROUND(
         CASE
-            WHEN COUNT(DISTINCT oe.customer_id) = 0 THEN 0
-            ELSE COUNT(DISTINCT oe.customer_id) FILTER (WHERE oe.customer_order_number > 1)::NUMERIC
-                 / NULLIF(COUNT(DISTINCT oe.customer_id), 0) * 100
+            WHEN COUNT(DISTINCT oe.customer_id) FILTER (WHERE oe.sold) = 0 THEN 0
+            ELSE COUNT(DISTINCT oe.customer_id) FILTER (WHERE oe.sold AND oe.customer_order_number > 1)::NUMERIC
+                 / NULLIF(COUNT(DISTINCT oe.customer_id) FILTER (WHERE oe.sold), 0) * 100
         END,
         2
     ) AS repeat_customer_rate_pct
@@ -656,6 +754,8 @@ SELECT
     COALESCE(channel_group, 'Unknown') AS channel_group,
 
     COALESCE(campaign_id, 'UNKNOWN') AS campaign_id,
+    CASE COALESCE(campaign_id, 'UNKNOWN') WHEN 'UNKNOWN' THEN 'unknown_member' WHEN 'INVALID' THEN 'invalid_reference'
+         ELSE 'known' END AS member_type,
     COALESCE(campaign_name, 'Unknown') AS campaign_name,
     COALESCE(traffic_source, 'Unknown') AS traffic_source,
     COALESCE(target_segment, 'Unknown') AS target_segment,
@@ -859,11 +959,12 @@ SELECT
     ABS(src.source_amount - tgt.target_amount),
     0.01,
     CASE WHEN ABS(src.source_amount - tgt.target_amount) <= 0.01 THEN 'PASS' ELSE 'FAIL' END,
-    'Validates total daily mart net revenue equals warehouse fact_orders net revenue.'
+    'Validates total daily mart net revenue equals the net revenue of the completed orders in warehouse fact_orders.'
 FROM mart_validation_context mvc
 CROSS JOIN (
     SELECT COALESCE(SUM(fo.net_revenue), 0)::NUMERIC AS source_amount
     FROM warehouse.fact_orders fo
+    WHERE fo.order_status = 'completed'
 ) src
 CROSS JOIN (
     SELECT COALESCE(SUM(net_revenue), 0)::NUMERIC AS target_amount
@@ -897,14 +998,14 @@ SELECT
     ABS(src.source_amount - tgt.target_amount),
     0.01,
     CASE WHEN ABS(src.source_amount - tgt.target_amount) <= 0.01 THEN 'PASS' ELSE 'FAIL' END,
-    'Validates product mart revenue equals BI-visible warehouse fact_order_items line revenue.'
+    'Validates product mart revenue (every member row) equals the line revenue of the completed orders in warehouse fact_order_items.'
 FROM mart_validation_context mvc
 CROSS JOIN (
     SELECT COALESCE(SUM(foi.line_revenue), 0)::NUMERIC AS source_amount
     FROM warehouse.fact_order_items foi
-    JOIN warehouse.dim_product dp
-        ON foi.product_sk = dp.product_sk
-    WHERE dp.product_id <> 'UNKNOWN'
+    JOIN warehouse.fact_orders fo
+        ON fo.order_sk = foi.order_sk
+       AND fo.order_status = 'completed'
 ) src
 CROSS JOIN (
     SELECT COALESCE(SUM(product_revenue), 0)::NUMERIC AS target_amount
@@ -938,18 +1039,195 @@ SELECT
     ABS(src.source_amount - tgt.target_amount),
     0.01,
     CASE WHEN ABS(src.source_amount - tgt.target_amount) <= 0.01 THEN 'PASS' ELSE 'FAIL' END,
-    'Validates campaign mart spend equals BI-visible warehouse fact_campaign_spend spend amount.'
+    'Validates campaign mart spend (every member row, summed over regions and days) equals warehouse fact_campaign_spend spend amount.'
 FROM mart_validation_context mvc
 CROSS JOIN (
     SELECT COALESCE(SUM(fcs.spend_amount), 0)::NUMERIC AS source_amount
     FROM warehouse.fact_campaign_spend fcs
-    JOIN warehouse.dim_campaign dc
-        ON fcs.campaign_sk = dc.campaign_sk
-    WHERE dc.campaign_id <> 'UNKNOWN'
 ) src
 CROSS JOIN (
     SELECT COALESCE(SUM(total_spend), 0)::NUMERIC AS target_amount
     FROM marts.mart_campaign_performance
+) tgt;
+
+-- 4a. Validates customer mart lifetime value (every member row) equals the net revenue of the completed orders.
+INSERT INTO audit.mart_validation_report (
+    validation_run_id,
+    check_name,
+    check_category,
+    source_object,
+    target_object,
+    metric_name,
+    source_value,
+    target_value,
+    difference,
+    tolerance,
+    status,
+    details
+)
+SELECT
+    mvc.validation_run_id,
+    'customer_lifetime_value_matches_fact_orders',
+    'reconciliation',
+    'warehouse.fact_orders',
+    'marts.mart_customer_360',
+    'net_revenue',
+    src.source_amount,
+    tgt.target_amount,
+    ABS(src.source_amount - tgt.target_amount),
+    0.01,
+    CASE WHEN ABS(src.source_amount - tgt.target_amount) <= 0.01 THEN 'PASS' ELSE 'FAIL' END,
+    'Validates customer mart lifetime value (every member row) equals the net revenue of the completed orders.'
+FROM mart_validation_context mvc
+CROSS JOIN (
+    SELECT COALESCE(SUM(net_revenue), 0)::NUMERIC AS source_amount FROM warehouse.fact_orders WHERE order_status = 'completed'
+) src
+CROSS JOIN (
+    SELECT COALESCE(SUM(lifetime_value), 0)::NUMERIC AS target_amount FROM marts.mart_customer_360
+) tgt;
+
+-- 4b. Validates customer mart units (every member row) equal the units of the completed orders.
+INSERT INTO audit.mart_validation_report (
+    validation_run_id,
+    check_name,
+    check_category,
+    source_object,
+    target_object,
+    metric_name,
+    source_value,
+    target_value,
+    difference,
+    tolerance,
+    status,
+    details
+)
+SELECT
+    mvc.validation_run_id,
+    'customer_units_match_fact_order_items',
+    'reconciliation',
+    'warehouse.fact_order_items',
+    'marts.mart_customer_360',
+    'quantity',
+    src.source_amount,
+    tgt.target_amount,
+    ABS(src.source_amount - tgt.target_amount),
+    0.01,
+    CASE WHEN ABS(src.source_amount - tgt.target_amount) <= 0.01 THEN 'PASS' ELSE 'FAIL' END,
+    'Validates customer mart units (every member row) equal the units of the completed orders.'
+FROM mart_validation_context mvc
+CROSS JOIN (
+    SELECT COALESCE(SUM(foi.quantity), 0)::NUMERIC AS source_amount FROM warehouse.fact_order_items foi JOIN warehouse.fact_orders fo ON fo.order_sk = foi.order_sk AND fo.order_status = 'completed'
+) src
+CROSS JOIN (
+    SELECT COALESCE(SUM(total_units_purchased), 0)::NUMERIC AS target_amount FROM marts.mart_customer_360
+) tgt;
+
+-- 4c. Validates campaign mart attributed revenue (every member row) equals the net revenue of the completed orders.
+INSERT INTO audit.mart_validation_report (
+    validation_run_id,
+    check_name,
+    check_category,
+    source_object,
+    target_object,
+    metric_name,
+    source_value,
+    target_value,
+    difference,
+    tolerance,
+    status,
+    details
+)
+SELECT
+    mvc.validation_run_id,
+    'campaign_revenue_matches_fact_orders',
+    'reconciliation',
+    'warehouse.fact_orders',
+    'marts.mart_campaign_performance',
+    'net_revenue',
+    src.source_amount,
+    tgt.target_amount,
+    ABS(src.source_amount - tgt.target_amount),
+    0.01,
+    CASE WHEN ABS(src.source_amount - tgt.target_amount) <= 0.01 THEN 'PASS' ELSE 'FAIL' END,
+    'Validates campaign mart attributed revenue (every member row) equals the net revenue of the completed orders.'
+FROM mart_validation_context mvc
+CROSS JOIN (
+    SELECT COALESCE(SUM(net_revenue), 0)::NUMERIC AS source_amount FROM warehouse.fact_orders WHERE order_status = 'completed'
+) src
+CROSS JOIN (
+    SELECT COALESCE(SUM(attributed_revenue), 0)::NUMERIC AS target_amount FROM marts.mart_campaign_performance
+) tgt;
+
+-- 4d. Validates product mart units sold (every member row) equal the units of the completed orders.
+INSERT INTO audit.mart_validation_report (
+    validation_run_id,
+    check_name,
+    check_category,
+    source_object,
+    target_object,
+    metric_name,
+    source_value,
+    target_value,
+    difference,
+    tolerance,
+    status,
+    details
+)
+SELECT
+    mvc.validation_run_id,
+    'product_units_match_fact_order_items',
+    'reconciliation',
+    'warehouse.fact_order_items',
+    'marts.mart_product_sales',
+    'quantity',
+    src.source_amount,
+    tgt.target_amount,
+    ABS(src.source_amount - tgt.target_amount),
+    0.01,
+    CASE WHEN ABS(src.source_amount - tgt.target_amount) <= 0.01 THEN 'PASS' ELSE 'FAIL' END,
+    'Validates product mart units sold (every member row) equal the units of the completed orders.'
+FROM mart_validation_context mvc
+CROSS JOIN (
+    SELECT COALESCE(SUM(foi.quantity), 0)::NUMERIC AS source_amount FROM warehouse.fact_order_items foi JOIN warehouse.fact_orders fo ON fo.order_sk = foi.order_sk AND fo.order_status = 'completed'
+) src
+CROSS JOIN (
+    SELECT COALESCE(SUM(units_sold), 0)::NUMERIC AS target_amount FROM marts.mart_product_sales
+) tgt;
+
+-- 4e. Validates campaign mart ad-platform conversions and attributed revenue (every member row) equal warehouse fact_campaign_spend.
+INSERT INTO audit.mart_validation_report (
+    validation_run_id,
+    check_name,
+    check_category,
+    source_object,
+    target_object,
+    metric_name,
+    source_value,
+    target_value,
+    difference,
+    tolerance,
+    status,
+    details
+)
+SELECT
+    mvc.validation_run_id,
+    'campaign_platform_results_match_fact_campaign_spend',
+    'reconciliation',
+    'warehouse.fact_campaign_spend',
+    'marts.mart_campaign_performance',
+    'attributed_revenue',
+    src.source_amount,
+    tgt.target_amount,
+    ABS(src.source_amount - tgt.target_amount),
+    0.01,
+    CASE WHEN ABS(src.source_amount - tgt.target_amount) <= 0.01 THEN 'PASS' ELSE 'FAIL' END,
+    'Validates campaign mart ad-platform conversions and attributed revenue (every member row) equal warehouse fact_campaign_spend.'
+FROM mart_validation_context mvc
+CROSS JOIN (
+    SELECT (COALESCE(SUM(attributed_revenue), 0) + COALESCE(SUM(conversions), 0))::NUMERIC AS source_amount FROM warehouse.fact_campaign_spend
+) src
+CROSS JOIN (
+    SELECT (COALESCE(SUM(platform_attributed_revenue), 0) + COALESCE(SUM(ad_platform_conversions), 0))::NUMERIC AS target_amount FROM marts.mart_campaign_performance
 ) tgt;
 
 -- 5. Customer 360 has no negative core metrics.

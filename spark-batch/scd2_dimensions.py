@@ -88,18 +88,17 @@ DIMENSION_CONFIGS: Dict[str, Dict[str, object]] = {
         "tracked_columns": [
             "product_name",
             "category",
-            "brand",
             "price",
+            # active / discontinued: a status change opens a new version.
             "status",
         ],
         "column_map": {
             "price": "discounted_price",
+            "status": "product_status",
         },
-        "untracked_optional": [
-            "brand",
-            "status",
-        ],
+        "untracked_optional": [],
         "carried_columns": [
+            "brand",
             "original_price",
             "inventory_remaining",
         ],
@@ -133,6 +132,8 @@ DIMENSION_CONFIGS: Dict[str, Dict[str, object]] = {
         },
         "untracked_optional": [],
         "carried_columns": [
+            # The campaign's objective (awareness, consideration, conversion, retention).
+            "campaign_type",
             "ab_test_group",
         ],
         "date_candidates": [
