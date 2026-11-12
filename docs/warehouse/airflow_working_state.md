@@ -149,9 +149,9 @@ The UI is at `http://127.0.0.1:8080`.
 
 ## 7. Trigger a run for a chosen BATCH_DATE
 
-The DAG sets `BATCH_DATE` from `{{ (dag_run.logical_date or dag_run.run_after) | ds }}`: the run's logical date when it has one, otherwise its `run_after` time. Both are in UTC, so `BATCH_DATE` is the UTC day.
+The DAG sets `BATCH_DATE` from `{{ (dag_run.logical_date or dag_run.run_after).astimezone(macros.dateutil.tz.gettz('Asia/Kolkata')) | ds }}`: the run's logical date when it has one, otherwise its `run_after` time, converted to India time. `BATCH_DATE` is the India (Asia/Kolkata) day.
 
-**From the UI.** Trigger the DAG and set **Logical Date** to the day you want to process or rerun. Use 12:00 on that day: noon keeps the UTC day the same whichever timezone the UI shows. To process today, leave the field at its default, now. "Today" means the current UTC day, so between 00:00 and 05:30 IST it is still the previous day.
+**From the UI.** Trigger the DAG and set **Logical Date** to the day you want to process or rerun. Use 12:00 on that day: noon is the same day in India whichever timezone the UI shows. To process today, leave the field at its default, now. "Today" means the current day in India, also between 00:00 and 05:30 IST.
 
 **From the CLI**, the same applies: `airflow dags trigger batch_lakehouse_marketing_analytics -l 2026-06-04T12:00:00+00:00` for a given day, or the same command without `-l` for today.
 

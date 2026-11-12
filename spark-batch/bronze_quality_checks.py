@@ -88,7 +88,7 @@ def count_raw_file_lines(path: Path, has_header: bool) -> int:
         return record_count - 1
 
     with path.open("r", encoding="utf-8") as file:
-        return sum(1 for _ in file)
+        return sum(1 for line in file if line.strip())
 
 
 def validate_table(
@@ -99,18 +99,40 @@ def validate_table(
     raw_has_header: bool,
     expected_bronze_columns: int | None = None,
 ) -> dict:
+    raw_row_count = count_raw_file_lines(raw_file, raw_has_header)
+
+    if raw_row_count == 0:
+        # An empty batch: valid when Bronze also has nothing for this batch date
+        # (bronze_ingestion writes no partition for it).
+        bronze_row_count = 0
+        if bronze_path.exists():
+            bronze_row_count = (
+                spark.read.parquet(str(bronze_path))
+                .filter(col("ingestion_date") == lit(BATCH_DATE).cast("date"))
+                .count()
+            )
+        return {
+            "table_name": table_name,
+            "status": "PASSED" if bronze_row_count == 0 else "FAILED",
+            "raw_row_count": 0,
+            "bronze_row_count": bronze_row_count,
+            "bronze_column_count": 0,
+            "missing_metadata_columns": "",
+            "failure_reason": "" if bronze_row_count == 0 else (
+                f"the raw file is empty but Bronze has {bronze_row_count} row(s) for ingestion_date={BATCH_DATE}"
+            ),
+        }
+
     if not bronze_path.exists():
         return {
             "table_name": table_name,
             "status": "FAILED",
-            "raw_row_count": None,
-            "bronze_row_count": None,
-            "bronze_column_count": None,
+            "raw_row_count": raw_row_count,
+            "bronze_row_count": 0,
+            "bronze_column_count": 0,
             "missing_metadata_columns": "ALL",
             "failure_reason": f"Missing Bronze path: {bronze_path}",
         }
-
-    raw_row_count = count_raw_file_lines(raw_file, raw_has_header)
 
     # Read the table root (keeps the ingestion_date partition column) and
     # check only this run's partition; earlier batches stay in Bronze.
@@ -130,9 +152,6 @@ def validate_table(
             failure_reasons.append(
                 f"expected exactly one batch_id for ingestion_date={BATCH_DATE}, found {batch_id_count}"
             )
-
-    if raw_row_count <= 0:
-        failure_reasons.append("raw row count is zero")
 
     if bronze_row_count <= 0:
         failure_reasons.append("bronze row count is zero")

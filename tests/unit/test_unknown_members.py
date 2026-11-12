@@ -40,7 +40,7 @@ KEY_TEXT_EXCEPTIONS = {
         # input tokens that mean NULL
         "WHEN lower(btrim(value)) IN ('null', 'none', 'nan', 'unknown') THEN NULL",
         # deterministic_sk's NULL fallback (hash input)
-        "SELECT abs(hashtext(coalesce(prefix, 'unknown') || '|' || coalesce(value, 'unknown'))::BIGINT) + 1000000000;",
+        "SELECT warehouse.deterministic_fact_sk(coalesce(prefix, 'unknown'), coalesce(value, 'unknown'));",
         # region_nk and channel_nk (hashed into region_sk and channel_sk)
         "coalesce(nullif(btrim(city_value), ''), 'unknown')",
         "|| coalesce(nullif(btrim(state_value), ''), 'unknown')",

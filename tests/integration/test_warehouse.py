@@ -452,6 +452,77 @@ def test_no_warehouse_or_mart_column_is_empty_unknown_or_constant():
     assert stale == [], "these columns vary now; remove them from CONSTANT_COLUMNS_ALLOWED"
 
 
+def test_every_key_is_a_63_bit_hash():
+    # No key function is 32-bit, and dimension keys are far outside that range.
+    assert sql("select count(*) from pg_proc p join pg_namespace n on n.oid = p.pronamespace "
+               "where n.nspname = 'warehouse' and p.prosrc ilike '%hashtext%'") == [["0"]]
+    for dimension in ("customer", "product", "campaign", "region"):
+        above = int(sql(f"select count(*) from warehouse.dim_{dimension} where {dimension}_sk > 4294967296")[0][0])
+        total = int(sql(f"select count(*) from warehouse.dim_{dimension} where {dimension}_sk <> 0")[0][0])
+        assert above == total > 0, (dimension, above, total)
+
+
+FACT_NATURAL_IDS = {
+    "fact_orders": {"customer": "customer_id", "campaign": "campaign_id"},
+    "fact_order_items": {"customer": "customer_id", "product": "product_id"},
+    "fact_campaign_spend": {"campaign": "campaign_id"},
+    "fact_web_events": {"customer": "customer_id", "product": "product_id", "campaign": "campaign_id"},
+    "fact_conversions": {"customer": "customer_id", "product": "product_id", "campaign": "campaign_id"},
+}
+
+
+@pytest.mark.parametrize("fact", sorted(FACT_NATURAL_IDS))
+def test_facts_carry_natural_ids_source_time_and_record_hash(fact):
+    rows = int(sql(f"select count(*) from warehouse.{fact}")[0][0])
+    for dimension, column in FACT_NATURAL_IDS[fact].items():
+        # The natural ID beside each key is that dimension member's ID
+        # ('UNKNOWN' exactly where the key is the unknown member).
+        assert sql(
+            f"select count(*) from warehouse.{fact} f join warehouse.dim_{dimension} d using ({dimension}_sk) "
+            f"where d.{column} <> f.{column}"
+        ) == [["0"]], (fact, column)
+    hashes, stamped, batches = sql(
+        f"select count(distinct record_hash), count(source_updated_at), "
+        f"string_agg(distinct source_updated_at::date::text, ',' order by source_updated_at::date::text) "
+        f"from warehouse.{fact}")[0]
+    assert int(hashes) == rows and int(stamped) == rows
+    # source_updated_at is the batch that delivered the row, never the load time.
+    assert set(batches.split(",")) <= set(BATCH_DATES), batches
+
+
+def test_the_reader_role_reads_but_cannot_write_or_see_staging():
+    def as_reader(query):
+        return subprocess.run(
+            ["docker", "exec", "-i", PGCONTAINER, "psql", "-U", "project2", "-d", "marketing_analytics",
+             "-v", "ON_ERROR_STOP=1", "-At", "-c", f"set role p2_reader; {query}"],
+            capture_output=True, text=True)
+
+    for relation in ("warehouse.fact_orders", "marts.mart_revenue_daily", "audit.v_latest_reconciliation_report"):
+        result = as_reader(f"select count(*) from {relation}")
+        assert result.returncode == 0 and int(result.stdout.split()[-1]) > 0, (relation, result.stderr)
+    for forbidden in ("select count(*) from staging.stg_gold_fact_orders_scd2",
+                      "delete from warehouse.fact_orders", "create table marts.mine (x int)"):
+        result = as_reader(forbidden)
+        assert result.returncode != 0 and "permission denied" in result.stderr, (forbidden, result.stderr)
+
+
+def test_point_in_time_rows_carry_their_own_batch_date():
+    import duckdb
+
+    facts = PROJECT_ROOT / "data" / "gold" / "fact_orders_scd2"
+    mismatched, stamps = duckdb.sql(
+        f"select count(*) filter (where processed_date <> ingestion_date), "
+        f"string_agg(distinct processed_date::varchar, ',' order by processed_date::varchar) "
+        f"from read_parquet('{facts}/**/*.parquet', hive_partitioning=false, union_by_name=true)"
+    ).fetchone()
+    assert mismatched == 0 and stamps == ",".join(BATCH_DATES)
+    bronze = PROJECT_ROOT / "data" / "bronze" / "bronze_orders"
+    paths = duckdb.sql(
+        f"select distinct source_file_name from read_parquet('{bronze}/**/*.parquet', hive_partitioning=false)"
+    ).fetchall()
+    assert sorted(p[0] for p in paths) == [f"data/raw/batch_date={d}/orders.csv" for d in BATCH_DATES]
+
+
 def test_golden_counts():
     expected = json.loads(EXPECTED_COUNTS.read_text(encoding="utf-8"))
     actual = collect_counts()

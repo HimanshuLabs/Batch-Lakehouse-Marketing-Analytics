@@ -128,7 +128,8 @@ def test_reconciliation_checks_gross_minus_discount_equals_net():
 def test_gold_web_events_keep_the_engagement_and_lineage_fields(spark, load_job):
     gold = load_job(GOLD_JOB, BATCH_DATE="2026-06-18")
     silver_row = {**BRONZE_TEMPLATES["web_events"], "source_system": "web_events"}
-    events = spark.createDataFrame([silver_row]).withColumn("event_timestamp", F.to_timestamp("event_timestamp"))
+    events = spark.createDataFrame([silver_row]).withColumn("event_timestamp", F.to_timestamp("event_timestamp")) \
+        .withColumn("ingestion_date", F.to_date(F.lit("2026-06-18")))
 
     row = gold.build_fact_web_events(events).collect()[0].asDict()
 

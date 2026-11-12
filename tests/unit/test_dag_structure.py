@@ -14,7 +14,7 @@ import pytest
 
 DAG_FILE = "airflow/dags/batch_lakehouse_pipeline.py"
 DAG_ID = "batch_lakehouse_marketing_analytics"
-BATCH_DATE_TEMPLATE = "{{ (dag_run.logical_date or dag_run.run_after) | ds }}"
+BATCH_DATE_TEMPLATE = "{{ (dag_run.logical_date or dag_run.run_after).astimezone(macros.dateutil.tz.gettz('Asia/Kolkata')) | ds }}"
 
 CHAIN = [
     "generate_data", "bronze_ingestion", "bronze_quality_checks", "silver_transformations",

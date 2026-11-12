@@ -12,6 +12,17 @@ PGPORT="${PGPORT:-5434}"
 PGDATABASE="${PGDATABASE:-marketing_analytics}"
 PGUSER="${PGUSER:-project2}"
 
+# The password of the read-only role p2_reader (sql/warehouse/create_schemas.sql):
+# from the environment, or from .env in the project. Without one the role
+# exists but cannot log in.
+if [[ -z "${P2_READER_PASSWORD:-}" && -f .env ]]; then
+  P2_READER_PASSWORD="$(grep -E '^P2_READER_PASSWORD=' .env | tail -1 | cut -d= -f2- || true)"
+fi
+READER_ARGS=()
+if [[ -n "${P2_READER_PASSWORD:-}" ]]; then
+  READER_ARGS=(-v "p2_reader_password=${P2_READER_PASSWORD}")
+fi
+
 if [[ ! -f "$SQL_FILE" ]]; then
   echo "ERROR: SQL file not found: $SQL_FILE"
   exit 1
@@ -41,7 +52,7 @@ if [[ "$RUN_MODE" == "docker" ]]; then
   fi
 
   docker exec -i "$PGCONTAINER" \
-    psql -v ON_ERROR_STOP=1 -v pipeline_run_id="${P2_RUN_ID}" -U "$PGUSER" -d "$PGDATABASE" \
+    psql -v ON_ERROR_STOP=1 -v pipeline_run_id="${P2_RUN_ID}" "${READER_ARGS[@]}" -U "$PGUSER" -d "$PGDATABASE" \
     < <(printf "SELECT set_config('p2.run_id', :'pipeline_run_id', false);\n"; cat "$SQL_FILE") \
     2>&1 | tee "$LOG_FILE"
 
@@ -62,6 +73,7 @@ elif [[ "$RUN_MODE" == "host" ]]; then
     --username "$PGUSER" \
     --set ON_ERROR_STOP=1 \
     --set pipeline_run_id="${P2_RUN_ID}" \
+    "${READER_ARGS[@]}" \
     --file <(printf "SELECT set_config('p2.run_id', :'pipeline_run_id', false);\n"; cat "$SQL_FILE") \
     2>&1 | tee "$LOG_FILE"
 

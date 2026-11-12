@@ -152,19 +152,27 @@ def test_a_null_campaign_resolves_to_the_unknown_member(spark, pit):
 # --- the job end to end, in a temporary project ----------------------------
 
 def write_project(spark, root, orders: list[tuple], items: list[tuple],
-                  totals: dict | None = None, bronze_items: list[tuple] | None = None):
+                  totals: dict | None = None, bronze_items: list[tuple] | None = None,
+                  order_batches: dict | None = None):
     """orders: (order_id, customer_id, campaign_id, time); items: (order_item_id, order_id, product_id).
 
     Each item's line_amount is 100.0 and, unless totals overrides it, an order's
     cart_value is the sum of its items. bronze_items (order_item_id, order_id)
-    defaults to the Silver items.
+    defaults to the Silver items. Every Silver row is stamped as the real job
+    does: processed_date is the last run (2026-06-18) and ingestion_date is the
+    batch that delivered the row (2026-06-18, or order_batches[order_id]).
     """
     silver = root / "data" / "silver"
     gold = root / "data" / "gold"
     totals = {**{o: 100.0 * sum(1 for _, io, _ in items if io == o) for o, *_ in orders}, **(totals or {})}
 
     def silver_table(name, frame):
-        frame.withColumn("processed_date", F.to_date(F.lit("2026-06-18"))) \
+        batch = F.lit("2026-06-18")
+        if name == "silver_orders" and order_batches:
+            batch = F.coalesce(F.create_map(*[F.lit(v) for pair in order_batches.items() for v in pair])[F.col("order_id")],
+                               batch)
+        frame.withColumn("ingestion_date", F.to_date(batch)) \
+            .withColumn("processed_date", F.to_date(F.lit("2026-06-18"))) \
             .write.mode("overwrite").partitionBy("processed_date").parquet(str(silver / name))
 
     silver_table("silver_orders", spark.createDataFrame(
@@ -254,6 +262,20 @@ def test_organic_orders_are_counted_among_the_facts_not_among_the_rejects(spark,
     assert orders["fact_resolutions"]["campaign_sk"]["unknown_member"] == organic_facts == 1
     assert orders["fact_resolutions"]["customer_sk"]["key_not_in_dimension"] == 0
     assert sum(orders["fact_resolutions"]["campaign_sk"].values()) == orders["conservation"]["valid_rows"]
+
+
+def test_point_in_time_rows_are_stamped_with_their_own_batch_date(spark, pit, project_root, no_stop):
+    # Silver stamps every row with the last run's date. After a backfill of an
+    # older batch that made every fact look like it came from the older batch.
+    write_project(spark, project_root,
+                  orders=[(1, 5, 4, "2026-05-10 10:00:00"), (2, 5, 4, "2026-06-10 10:00:00")],
+                  items=[(10, 1, 4), (20, 2, 4)],
+                  order_batches={1: "2026-05-18"})
+    pit.main()
+
+    facts = spark.read.parquet(str(project_root / "data" / "gold" / "fact_orders_scd2"))
+    stamped = {row["order_id"]: str(row["processed_date"]) for row in facts.collect()}
+    assert stamped == {1: "2026-05-18", 2: "2026-06-18"}
 
 
 def test_the_job_checks_order_totals_and_excludes_incomplete_orders(spark, pit, project_root, no_stop):

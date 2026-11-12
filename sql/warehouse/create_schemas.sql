@@ -43,7 +43,35 @@ CREATE SCHEMA IF NOT EXISTS audit;
 COMMENT ON SCHEMA audit IS
 'Trust and control schema for reconciliation checks, data quality results, freshness checks, and warehouse publish validation.';
 
+-- ---------------------------------------------------------------------------
+-- p2_reader: the read-only role for consumers (BI tools, Project 4, Project 5).
+-- It can SELECT from warehouse, marts and audit, and from the dbt schemas (dbt
+-- grants those itself: dbt/dbt_project.yml). It cannot read staging and cannot
+-- write anything. Tables are dropped and recreated by every build, so the
+-- grants are default privileges of the owner, not one-off grants.
+-- The role can log in only when a password is given (P2_READER_PASSWORD in
+-- .env, passed by scripts/run_warehouse_sql.sh); without one it is NOLOGIN.
+-- ---------------------------------------------------------------------------
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'p2_reader') THEN
+        CREATE ROLE p2_reader NOLOGIN;
+    END IF;
+END $$;
+
+ALTER ROLE p2_reader SET default_transaction_read_only = on;
+GRANT CONNECT ON DATABASE marketing_analytics TO p2_reader;
+GRANT USAGE ON SCHEMA warehouse, marts, audit TO p2_reader;
+GRANT SELECT ON ALL TABLES IN SCHEMA warehouse, marts, audit TO p2_reader;
+ALTER DEFAULT PRIVILEGES IN SCHEMA warehouse, marts, audit GRANT SELECT ON TABLES TO p2_reader;
+REVOKE ALL ON SCHEMA staging FROM p2_reader;
+REVOKE ALL ON ALL TABLES IN SCHEMA staging FROM p2_reader;
+
 COMMIT;
+
+\if :{?p2_reader_password}
+ALTER ROLE p2_reader LOGIN PASSWORD :'p2_reader_password';
+\endif
 
 SELECT
     schema_name

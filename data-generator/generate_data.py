@@ -798,7 +798,8 @@ def fsync_dir(path: Path) -> None:
 def raw_dir_is_complete(raw_dir: Path) -> bool:
     # Legacy seven-file batches remain immutable. The new truth sidecar does
     # not authorize automatic replacement of an existing complete raw batch.
-    return all((raw_dir / name).is_file() and (raw_dir / name).stat().st_size > 0
+    # A CSV always has its header; an empty batch has an empty JSON-lines file.
+    return all((raw_dir / name).is_file() and (name.endswith(".json") or (raw_dir / name).stat().st_size > 0)
                for name in RAW_FILES if name != "generation_truth.json")
 
 

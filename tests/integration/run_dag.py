@@ -31,7 +31,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DAG_FILE = REPO_ROOT / "airflow" / "dags" / "batch_lakehouse_pipeline.py"
-BATCH_DATE_TEMPLATE = "{{ (dag_run.logical_date or dag_run.run_after) | ds }}"
+BATCH_DATE_TEMPLATE = "{{ (dag_run.logical_date or dag_run.run_after).astimezone(macros.dateutil.tz.gettz('Asia/Kolkata')) | ds }}"
 
 
 def load_dag() -> tuple[object, dict[str, dict], list[tuple[str, str]]]:
@@ -140,6 +140,17 @@ def main() -> int:
         args.log_dir.mkdir(parents=True, exist_ok=True)
     bash = shutil.which("bash") or "/bin/bash"
 
+    try:
+        return run_tasks(args, order, selected, tasks, env, bash)
+    finally:
+        # This invocation is the whole run (it may stop before the DAG's last
+        # task), so give the pipeline run lock back whatever happened.
+        if not args.dry_run:
+            subprocess.run([env["PROJECT_PYTHON"], str(Path(env["PROJECT_ROOT"]) / "scripts" / "pipeline_lock.py"),
+                            "--release"], env=env, stdout=subprocess.DEVNULL, check=False)
+
+
+def run_tasks(args, order, selected, tasks, env, bash) -> int:
     for number, task in enumerate(order, 1):
         if task not in selected:
             continue
