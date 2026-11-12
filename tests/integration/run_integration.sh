@@ -5,6 +5,10 @@
 #   3. a rerun of 2026-06-18 that must leave the lake, the warehouse and the
 #      marts identical (tests/integration/fingerprint.py, tests/sql/*.sql)
 #   4. tests/integration/rebuild_warehouse.sh (rebuilds and insert-order checks)
+#   During 3 and 4 a reader (tests/integration/reader_loop.py, as p2_reader)
+#   keeps querying every mart and every dbt view: through those four rebuilds,
+#   and a fifth that fails its checks and is rolled back, it must get no error
+#   and no empty result, and only whole generations.
 #
 # Usage: bash tests/integration/run_integration.sh <work dir>
 #
@@ -56,6 +60,14 @@ echo "################ assertions"
 P2_IT_PROJECT_ROOT="$REPO" P2_IT_PGCONTAINER="$PGCONTAINER" \
     "$PY" -B -m pytest tests/integration -m integration -p no:cacheprovider "${PYTEST_ARGS[@]}"
 
+echo "################ a reader keeps reading during the rebuilds below"
+rm -f "$WORK/reader.stop"
+"$PY" -B tests/integration/reader_loop.py --container "$PGCONTAINER" \
+    --stop-file "$WORK/reader.stop" --out "$WORK/reader.json" &
+READER_PID=$!
+# Whatever happens below, the reader is told to stop.
+trap 'touch "$WORK/reader.stop"' EXIT
+
 echo "################ determinism: rerun 2026-06-18"
 fingerprint "$WORK/before"
 run_batch 2026-06-18 rerun-2026-06-18
@@ -71,6 +83,10 @@ done
 
 echo "################ rebuild and insert-order checks"
 bash tests/integration/rebuild_warehouse.sh "$WORK/rebuild"
+
+echo "################ what the reader saw"
+touch "$WORK/reader.stop"
+wait "$READER_PID"
 
 echo
 echo "Integration run passed."

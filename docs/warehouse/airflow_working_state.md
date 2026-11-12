@@ -113,7 +113,7 @@ source scripts/airflow_local_env.sh
 airflow db migrate
 airflow db check
 airflow dags list-import-errors
-airflow tasks list batch_lakehouse_marketing_analytics   # 23 tasks
+airflow tasks list batch_lakehouse_marketing_analytics   # 20 tasks
 ```
 
 ---
@@ -246,10 +246,7 @@ scd2_gold_marts
 scd2_duckdb_analytics
 create_postgresql_schemas
 load_gold_scd2_to_staging
-build_warehouse_tables
-run_scd2_validation
-build_reporting_marts
-run_warehouse_reconciliation
+build_warehouse
 dbt_run
 dbt_test
 dbt_docs

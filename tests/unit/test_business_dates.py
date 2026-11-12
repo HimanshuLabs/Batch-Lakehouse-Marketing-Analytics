@@ -29,11 +29,10 @@ def sql_code(path) -> str:
 
 def test_business_date_converts_utc_to_asia_kolkata():
     code = sql_code(TABLES_SQL)
-    body = re.search(r"FUNCTION warehouse\.business_date\(utc_ts TIMESTAMP\).*?\$\$(.*?)\$\$", code, re.S)
-    assert body, "warehouse.business_date(utc_ts TIMESTAMP) is not defined"
-    assert re.sub(r"\s+", " ", body.group(1)).strip() == (
-        "SELECT ((utc_ts AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata')::DATE;"
-    )
+    # H2: the argument is an instant (TIMESTAMPTZ), so one conversion is enough.
+    body = re.search(r"FUNCTION warehouse\.business_date\(ts TIMESTAMPTZ\).*?\$\$(.*?)\$\$", code, re.S)
+    assert body, "warehouse.business_date(ts TIMESTAMPTZ) is not defined"
+    assert re.sub(r"\s+", " ", body.group(1)).strip() == "SELECT (ts AT TIME ZONE 'Asia/Kolkata')::DATE;"
     today = re.search(r"FUNCTION warehouse\.business_today\(\).*?\$\$(.*?)\$\$", code, re.S)
     assert today and "now() AT TIME ZONE 'Asia/Kolkata'" in today.group(1)
 

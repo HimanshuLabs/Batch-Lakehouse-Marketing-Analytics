@@ -931,8 +931,6 @@ ORDER BY
     check_category,
     check_name;
 
-COMMIT;
-
 SELECT
     check_name,
     source_object,
@@ -948,13 +946,24 @@ ORDER BY
     CASE status WHEN 'FAIL' THEN 0 ELSE 1 END,
     check_name;
 
--- Persist diagnostic FAIL rows before raising, so failed runs remain inspectable.
+-- ---------------------------------------------------------------------------
+-- Quality gate, before the commit: a build that fails a check is never
+-- published. Every check of this run in the three reports must be PASS, and
+-- each report must have checks for this run. Otherwise the failing checks are
+-- written to the log (one NOTICE each, and one P2_FAILED_BUILD_REPORT line of
+-- JSON that scripts/run_warehouse_sql.sh saves as
+-- logs/warehouse/failed_build_<timestamp>.json), and the exception rolls the
+-- whole transaction back: the previous warehouse stays live and untouched, and
+-- the report tables of the failed build are gone with it.
+-- ---------------------------------------------------------------------------
 DO $$
 DECLARE
     current_run TEXT := NULLIF(current_setting('p2.run_id', true), '');
     report RECORD;
     check_count BIGINT;
-    failures BIGINT;
+    failed JSONB;
+    item JSONB;
+    failing JSONB := '[]'::JSONB;
 BEGIN
     FOR report IN SELECT * FROM (VALUES
         ('reconciliation_report', 'reconciliation_run_id'),
@@ -962,12 +971,61 @@ BEGIN
         ('mart_validation_report', 'validation_run_id')
     ) AS reports(table_name, run_column)
     LOOP
-        EXECUTE format('SELECT count(*), count(*) FILTER (WHERE status IS DISTINCT FROM ''PASS'') FROM audit.%I WHERE %I = $1',
-                       report.table_name, report.run_column)
-        INTO check_count, failures USING current_run;
-        IF check_count = 0 OR failures > 0 THEN
-            RAISE EXCEPTION 'Quality gate failed: % run % has % checks, % failures',
-                report.table_name, current_run, check_count, failures;
+        EXECUTE format(
+            'SELECT count(*), coalesce(jsonb_agg(to_jsonb(t)) FILTER (WHERE t.status IS DISTINCT FROM ''PASS''), ''[]''::JSONB) '
+            'FROM audit.%I t WHERE %I = $1', report.table_name, report.run_column)
+        INTO check_count, failed USING current_run;
+
+        IF check_count = 0 THEN
+            failing := failing || jsonb_build_object(
+                'report', 'audit.' || report.table_name,
+                'check_name', '(no checks recorded for this run)',
+                'expected', 'at least one check',
+                'actual', '0 checks',
+                'details', format('audit.%s has no row for run %s: its checks did not run.', report.table_name, current_run));
         END IF;
+
+        FOR item IN SELECT value FROM jsonb_array_elements(failed) ORDER BY value->>'check_name' LOOP
+            failing := failing || jsonb_build_object(
+                'report', 'audit.' || report.table_name,
+                'check_name', item->>'check_name',
+                'status', item->>'status',
+                -- What the check compares: the source side is what was expected.
+                'expected', coalesce(item->>'source_count', item->>'source_amount', item->>'source_value',
+                                     CASE WHEN item ? 'failed_row_count' THEN '0' END),
+                'actual', coalesce(item->>'target_count', item->>'target_amount', item->>'target_value',
+                                   item->>'failed_row_count'),
+                'difference', coalesce(item->>'count_difference', item->>'amount_difference', item->>'difference'),
+                'metric', coalesce(item->>'metric_name', CASE WHEN item ? 'failed_row_count' THEN 'failed_row_count' END),
+                'expected_from', coalesce(item->>'source_object', item->>'checked_entity'),
+                'actual_from', item->>'target_object',
+                -- A check without its own text still says what was compared.
+                'details', coalesce(item->>'details', format(
+                    '%s: %s has %s, %s has %s (difference %s).',
+                    coalesce(item->>'metric_name', 'failed_row_count'),
+                    coalesce(item->>'source_object', item->>'checked_entity', 'expected'),
+                    coalesce(item->>'source_count', item->>'source_amount', item->>'source_value', '0'),
+                    coalesce(item->>'target_object', 'actual'),
+                    coalesce(item->>'target_count', item->>'target_amount', item->>'target_value', item->>'failed_row_count', '?'),
+                    coalesce(item->>'count_difference', item->>'amount_difference', item->>'difference', '?'))));
+        END LOOP;
     END LOOP;
+
+    IF jsonb_array_length(failing) > 0 THEN
+        FOR item IN SELECT value FROM jsonb_array_elements(failing) LOOP
+            RAISE NOTICE 'FAILED CHECK % | % | expected % | actual % | %',
+                item->>'report', item->>'check_name', coalesce(item->>'expected', '-'),
+                coalesce(item->>'actual', '-'), coalesce(item->>'details', '');
+        END LOOP;
+        RAISE NOTICE 'P2_FAILED_BUILD_REPORT %', jsonb_build_object(
+            'run_id', current_run,
+            'failed_at', to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+            'outcome', 'rolled back: nothing of this build was published, the previous warehouse is unchanged',
+            'failing_check_count', jsonb_array_length(failing),
+            'failing_checks', failing)::TEXT;
+        RAISE EXCEPTION 'Quality gate failed: % failing check(s) in run %. The build is rolled back; the previous warehouse stays live.',
+            jsonb_array_length(failing), current_run;
+    END IF;
 END $$;
+
+COMMIT;

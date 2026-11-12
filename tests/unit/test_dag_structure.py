@@ -21,8 +21,9 @@ CHAIN = [
     "silver_quality_checks", "gold_transformations", "gold_quality_checks",
     ["duckdb_gold_analytics", "publish_gold_to_postgres"],
     "scd2_dimensions", "point_in_time_fact_joins", "scd2_gold_marts", "scd2_duckdb_analytics",
-    "create_postgresql_schemas", "load_gold_scd2_to_staging", "build_warehouse_tables",
-    "run_scd2_validation", "build_reporting_marts", "run_warehouse_reconciliation",
+    # H2: build_warehouse is the former build_warehouse_tables, run_scd2_validation,
+    # build_reporting_marts and run_warehouse_reconciliation, as one transaction.
+    "create_postgresql_schemas", "load_gold_scd2_to_staging", "build_warehouse",
     "dbt_run", "dbt_test", "dbt_docs", "power_bi_export",
 ]
 

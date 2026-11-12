@@ -14,7 +14,7 @@ FROM warehouse.dim_channel
 UNION ALL
 SELECT 'fact_orders', count(*),
        md5(string_agg(f.order_id || ':' || f.customer_sk || ':' || f.campaign_sk || ':' || f.order_date_sk
-                      || ':' || r.region_nk || ':' || c.channel_nk || ':' || coalesce(f.order_timestamp::TEXT, '')
+                      || ':' || r.region_nk || ':' || c.channel_nk || ':' || coalesce((f.order_timestamp AT TIME ZONE 'UTC')::TEXT, '')
                       || ':' || f.item_count || ':' || f.gross_amount || ':' || f.discount_amount || ':' || f.net_revenue
                       || ':' || coalesce(f.payment_method, '') || ':' || coalesce(f.source_record_hash, ''),
                       ',' ORDER BY f.order_id))
@@ -24,7 +24,7 @@ JOIN warehouse.dim_channel c USING (channel_sk)
 UNION ALL
 SELECT 'fact_order_items without region/channel', count(*),
        md5(string_agg(f.order_item_nk || ':' || coalesce(f.order_id, '') || ':' || f.customer_sk || ':' || f.product_sk
-                      || ':' || f.order_date_sk || ':' || coalesce(f.order_timestamp::TEXT, '') || ':' || f.quantity
+                      || ':' || f.order_date_sk || ':' || coalesce((f.order_timestamp AT TIME ZONE 'UTC')::TEXT, '') || ':' || f.quantity
                       || ':' || f.unit_price || ':' || f.discount_percent || ':' || f.line_revenue,
                       ',' ORDER BY f.order_item_nk))
 FROM warehouse.fact_order_items f
@@ -46,7 +46,7 @@ UNION ALL
 SELECT 'fact_web_events', count(*),
        md5(string_agg(f.event_id || ':' || f.customer_sk || ':' || f.product_sk || ':' || f.campaign_sk
                       || ':' || f.event_date_sk || ':' || r.region_nk || ':' || c.channel_nk
-                      || ':' || coalesce(f.event_timestamp::TEXT, '') || ':' || f.event_type || ':' || f.event_value,
+                      || ':' || coalesce((f.event_timestamp AT TIME ZONE 'UTC')::TEXT, '') || ':' || f.event_type || ':' || f.event_value,
                       ',' ORDER BY f.event_id))
 FROM warehouse.fact_web_events f
 JOIN warehouse.dim_region r USING (region_sk)

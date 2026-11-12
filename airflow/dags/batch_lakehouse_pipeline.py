@@ -153,84 +153,26 @@ with DAG(
 
     create_postgresql_schemas = BashOperator(
         task_id="create_postgresql_schemas",
-        bash_command=locked(
-            "create_postgresql_schemas",
-            (
-                "set -euo pipefail\n"
-                f"cd {PROJECT_ROOT}\n"
-                "env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/create_schemas.sql"
-            ),
-        ),
+        bash_command=locked("create_postgresql_schemas", f"bash {RUNNER} create_postgresql_schemas"),
         env=DEFAULT_ENV,
     )
 
     load_gold_scd2_to_staging = BashOperator(
         task_id="load_gold_scd2_to_staging",
-        bash_command=locked(
-            "load_gold_scd2_to_staging",
-            (
-                "set -euo pipefail\n"
-                f"cd {PROJECT_ROOT}\n"
-                "if [ -f scripts/load_gold_to_postgres_staging.py ]; then\n"
-                "  source venv/bin/activate\n"
-                "  python scripts/load_gold_to_postgres_staging.py\n"
-                "else\n"
-                "  env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/load_gold_to_staging.sql\n"
-                "fi"
-            ),
-        ),
+        bash_command=locked("load_gold_scd2_to_staging", f"bash {RUNNER} load_gold_scd2_to_staging"),
         env=DEFAULT_ENV,
     )
 
-    build_warehouse_tables = BashOperator(
-        task_id="build_warehouse_tables",
-        bash_command=locked(
-            "build_warehouse_tables",
-            (
-                "set -euo pipefail\n"
-                f"cd {PROJECT_ROOT}\n"
-                "env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/create_warehouse_tables.sql"
-            ),
-        ),
-        env=DEFAULT_ENV,
-    )
-
-    run_scd2_validation = BashOperator(
-        task_id="run_scd2_validation",
-        bash_command=locked(
-            "run_scd2_validation",
-            (
-                "set -euo pipefail\n"
-                f"cd {PROJECT_ROOT}\n"
-                "env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/scd2_validation_queries.sql"
-            ),
-        ),
-        env=DEFAULT_ENV,
-    )
-
-    run_warehouse_reconciliation = BashOperator(
-        task_id="run_warehouse_reconciliation",
-        bash_command=locked(
-            "run_warehouse_reconciliation",
-            (
-                "set -euo pipefail\n"
-                f"cd {PROJECT_ROOT}\n"
-                "env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/reconciliation_report.sql"
-            ),
-        ),
-        env=DEFAULT_ENV,
-    )
-
-    build_reporting_marts = BashOperator(
-        task_id="build_reporting_marts",
-        bash_command=locked(
-            "build_reporting_marts",
-            (
-                "set -euo pipefail\n"
-                f"cd {PROJECT_ROOT}\n"
-                "env -u PGPORT bash scripts/run_warehouse_sql.sh sql/warehouse/create_marts.sql"
-            ),
-        ),
+    # The whole warehouse (dimensions and facts, SCD2 validation, marts,
+    # reconciliation) is built as a new generation in one transaction: readers
+    # see the old warehouse until it commits and the new one from then on, never
+    # a missing or half-built table (sql/warehouse/begin_generation.sql). The
+    # quality gate at the end of reconciliation_report.sql runs before the
+    # commit: a failing check fails this task and rolls the build back, so the
+    # previous warehouse stays live (logs/warehouse/failed_build_<timestamp>.json).
+    build_warehouse = BashOperator(
+        task_id="build_warehouse",
+        bash_command=locked("build_warehouse", f"bash {RUNNER} build_warehouse"),
         env=DEFAULT_ENV,
     )
 
@@ -273,10 +215,7 @@ with DAG(
         >> scd2_duckdb_analytics
         >> create_postgresql_schemas
         >> load_gold_scd2_to_staging
-        >> build_warehouse_tables
-        >> run_scd2_validation
-        >> build_reporting_marts
-        >> run_warehouse_reconciliation
+        >> build_warehouse
         >> dbt_run
         >> dbt_test
         >> dbt_docs

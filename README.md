@@ -29,7 +29,7 @@ This project demonstrates practical Data Engineering and Analytics Engineering c
 | Reproducibility | Deterministic, incremental batches; reruns of a batch leave the lake and the warehouse unchanged |
 | BI readiness | Revenue, campaign, product, customer, and funnel marts built for reporting |
 | Analytics engineering | 21 dbt models and 67 dbt tests, docs, lineage, and exposures |
-| Orchestration | One Airflow 3 DAG of 23 tasks covering lakehouse, warehouse, dbt, and reporting |
+| Orchestration | One Airflow 3 DAG of 20 tasks covering lakehouse, warehouse, dbt, and reporting |
 | Reporting | Power BI Online dashboard assets, screenshots, CSV exports, and refresh flow documentation |
 | Infrastructure | Terraform for the S3 layer that serves the Power BI CSVs |
 | CI/CD | GitHub Actions: static checks, unit tests in two time zones, and a full end-to-end integration run |
@@ -291,6 +291,7 @@ Main SQL assets:
 ```text
 sql/warehouse/create_schemas.sql
 sql/warehouse/load_gold_to_staging.sql
+sql/warehouse/begin_generation.sql
 sql/warehouse/create_warehouse_tables.sql
 sql/warehouse/create_marts.sql
 sql/warehouse/create_indexes.sql
@@ -357,16 +358,17 @@ Keep `dbt/profiles.yml` in place: the DAG's dbt tasks need it. `dbt/target/`, `d
 
 ## 11. Airflow Orchestration Layer
 
-Airflow coordinates the platform execution flow. One DAG, `batch_lakehouse_marketing_analytics` in `airflow/dags/batch_lakehouse_pipeline.py`, runs 23 `BashOperator` tasks through `scripts/run_airflow_task.sh`:
+Airflow coordinates the platform execution flow. One DAG, `batch_lakehouse_marketing_analytics` in `airflow/dags/batch_lakehouse_pipeline.py`, runs 20 `BashOperator` tasks through `scripts/run_airflow_task.sh`:
 
 ```text
 generate_data → bronze_ingestion → bronze_quality_checks → silver_transformations →
 silver_quality_checks → gold_transformations → gold_quality_checks → duckdb_gold_analytics →
 publish_gold_to_postgres → scd2_dimensions → point_in_time_fact_joins → scd2_gold_marts →
 scd2_duckdb_analytics → create_postgresql_schemas → load_gold_scd2_to_staging →
-build_warehouse_tables → run_scd2_validation → build_reporting_marts →
-run_warehouse_reconciliation → dbt_run → dbt_test → dbt_docs → power_bi_export
+build_warehouse → dbt_run → dbt_test → dbt_docs → power_bi_export
 ```
+
+**A rebuild is invisible to readers.** `build_warehouse` builds the dimensions and facts, the SCD2 validation, the marts and the reconciliation as one transaction (`scripts/run_warehouse_sql.sh` given the five files, starting with `sql/warehouse/begin_generation.sql`). It renames the live `warehouse`, `marts`, `audit` and `staging` schemas aside, builds new ones under the same names, and commits. Until the commit a reader still gets the old warehouse, with no error, no empty mart and no waiting; after it, the new one. If the build fails, nothing changes. That includes its checks: the quality gate (reconciliation, SCD2 validation, mart validation) runs before the commit, so a build with a failing check is rolled back, the task fails, and the failing checks (name, expected, actual, details) are written to the task log and to `logs/warehouse/failed_build_<timestamp>.json`. The staging loader fills `staging_next`, which the same transaction publishes as `staging`. The dbt views keep reading the generation they were created on until `dbt run` replaces them one by one, so they still exist and still answer if dbt or the export fails. A retired generation (`warehouse_retired_<n>` and its siblings) is dropped by a later build once no view outside it reads it.
 
 The DAG has no schedule and allows one active run. Its tasks use `venv/bin/python` and `venv-dbt/bin/dbt`, and each task gets `BATCH_DATE = {{ (dag_run.logical_date or dag_run.run_after).astimezone(macros.dateutil.tz.gettz('Asia/Kolkata')) | ds }}`: the India date of the run. Every task also runs under a run lock (`scripts/pipeline_lock.py`, lock file `logs/pipeline_run.lock`): a task of a second run started by any route fails at once with exit code 75 until the first run finishes or fails; `python scripts/pipeline_lock.py --release --force` clears the lock of a run that died.
 
@@ -457,6 +459,8 @@ The integration job (`tests/integration/run_integration.sh`):
 2. asserts that all quality reports pass, that every Silver row is conserved, that SCD2 validation and reconciliation are all PASS, and that the counts equal `tests/integration/expected_counts.json`;
 3. reruns `2026-06-18` and requires the lake, the warehouse, and the marts to be identical (determinism);
 4. rebuilds the warehouse and checks that load order does not change the results (`tests/integration/rebuild_warehouse.sh`).
+
+During steps 3 and 4 a reader (`tests/integration/reader_loop.py`, connected as `p2_reader`) keeps counting the rows of every mart and every dbt view. Across those four rebuilds, and a fifth that is made to fail its reconciliation and must publish nothing, it must get no error, no empty result and no row count other than the one it started with.
 
 Run the integration test locally without touching `data/`, `logs/`, or `project2_postgres`:
 
@@ -686,7 +690,7 @@ docker start project2_postgres
 
 The `project2` password is a local development default; it is also the default in `.env.example` and `dbt/profiles.yml.example`.
 
-**Read-only access.** Consumers (BI tools, Project 4, Project 5) connect as `p2_reader`, not as the owner. The role is created by `sql/warehouse/create_schemas.sql` on every run. It can `SELECT` from the `warehouse`, `marts` and `audit` schemas and from the dbt schemas (`dbt_staging`, `dbt_warehouse`, `dbt_marts`, `dbt_audit`); it cannot read `staging` and cannot write. Its password comes from `P2_READER_PASSWORD` in `.env` (the local default in `.env.example` is `p2_reader`); without one the role exists but cannot log in.
+**Read-only access.** Consumers (BI tools, Project 4, Project 5) connect as `p2_reader`, not as the owner. The role is created by `sql/warehouse/create_schemas.sql` on every run. It can `SELECT` from the `warehouse`, `marts` and `audit` schemas and from the dbt schemas (`dbt_staging`, `dbt_warehouse`, `dbt_marts`, `dbt_audit`); it cannot read `staging` and cannot write. Timestamps in the warehouse and the marts are `timestamptz`, shown in UTC (the database's time zone); business dates and date keys are Asia/Kolkata dates. Its password comes from `P2_READER_PASSWORD` in `.env` (the local default in `.env.example` is `p2_reader`); without one the role exists but cannot log in.
 
 | Setting | Value |
 |---|---|
@@ -734,8 +738,7 @@ for task in generate_data bronze_ingestion bronze_quality_checks silver_transfor
     silver_quality_checks gold_transformations gold_quality_checks duckdb_gold_analytics \
     publish_gold_to_postgres scd2_dimensions point_in_time_fact_joins scd2_gold_marts \
     scd2_duckdb_analytics create_postgresql_schemas load_gold_scd2_to_staging \
-    build_warehouse_tables run_scd2_validation build_reporting_marts \
-    run_warehouse_reconciliation dbt_run dbt_test dbt_docs power_bi_export; do
+    build_warehouse dbt_run dbt_test dbt_docs power_bi_export; do
   bash scripts/run_airflow_task.sh "$task" || break
 done
 ```
