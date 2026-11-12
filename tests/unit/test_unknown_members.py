@@ -104,28 +104,30 @@ def test_the_campaign_mart_reconciles_to_orders_with_a_known_campaign(spark, loa
     marts = load_job(MARTS_JOB)
     # Completed orders: 100 on a real campaign, 40 organic (unknown member), 25
     # on a campaign with no valid dimension row (invalid-reference member).
-    # Order 4 was cancelled and order 5 returned: not revenue.
+    # Order 4 was cancelled: not a sale. Order 5 was returned and refunded in
+    # full (K1): a sale of 30 and a refund of 30, so no revenue either.
     fact_orders = spark.createDataFrame(
-        [(1, "c-1", "campaign-4-v1", 100.0, "completed"), (2, "c-1", "UNKNOWN", 40.0, "completed"),
-         (3, "INVALID", "INVALID", 25.0, "completed"), (4, "c-1", "campaign-4-v1", 70.0, "cancelled"),
-         (5, "c-1", "campaign-4-v1", 30.0, "returned")],
-        "order_id int, customer_sk string, campaign_sk string, cart_value double, order_status string")
+        [(1, "c-1", "campaign-4-v1", 100.0, "completed", 0.0), (2, "c-1", "UNKNOWN", 40.0, "completed", 0.0),
+         (3, "INVALID", "INVALID", 25.0, "completed", 0.0), (4, "c-1", "campaign-4-v1", 70.0, "cancelled", 0.0),
+         (5, "c-1", "campaign-4-v1", 30.0, "returned", 30.0)],
+        "order_id int, customer_sk string, campaign_sk string, cart_value double, order_status string, refund_amount double")
     items = spark.createDataFrame(
-        [(10, 1, "p-1", 100.0, 1), (20, 2, "p-1", 40.0, 2), (30, 3, "INVALID", 25.0, 1), (40, 4, "p-1", 70.0, 1),
-         (50, 5, "p-1", 30.0, 1)],
-        "order_item_id int, order_id int, product_sk string, line_amount double, quantity int")
+        [(10, 1, "p-1", 100.0, 1, 0.0), (20, 2, "p-1", 40.0, 2, 0.0), (30, 3, "INVALID", 25.0, 1, 0.0),
+         (40, 4, "p-1", 70.0, 1, 0.0), (50, 5, "p-1", 30.0, 1, 30.0)],
+        "order_item_id int, order_id int, product_sk string, line_amount double, quantity int, refund_amount double")
     spend = spark.createDataFrame([(1, "campaign-4-v1", 25.0), (2, "INVALID", 9.0)],
                                   "spend_id int, campaign_sk string, spend_amount double")
     # J3: each mart has a row for the unknown and for the invalid-reference
     # member, so its totals are the fact totals.
     campaign_mart = spark.createDataFrame(
-        [("campaign-4-v1", 100.0, 25.0), ("UNKNOWN", 40.0, 0.0), ("INVALID", 25.0, 9.0)],
-        "campaign_sk string, total_revenue double, total_spend double")
+        [("campaign-4-v1", 100.0, 25.0, 30.0), ("UNKNOWN", 40.0, 0.0, 0.0), ("INVALID", 25.0, 9.0, 0.0)],
+        "campaign_sk string, total_revenue double, total_spend double, refund_amount double")
     clv_mart = spark.createDataFrame(
-        [("c-1", 140.0, 70.0, 30.0), ("INVALID", 25.0, 0.0, 0.0)],
-        "customer_sk string, total_revenue double, cancelled_amount double, returned_amount double")
-    product_mart = spark.createDataFrame([("p-1", 140.0, 3), ("INVALID", 25.0, 1)],
-                                         "product_sk string, total_revenue double, units_sold int")
+        [("c-1", 140.0, 70.0, 30.0, 30.0), ("INVALID", 25.0, 0.0, 0.0, 0.0)],
+        "customer_sk string, total_revenue double, cancelled_amount double, returned_amount double, refund_amount double")
+    # Units sold are those of the orders that were not cancelled: the returned order's unit is one of them.
+    product_mart = spark.createDataFrame([("p-1", 140.0, 4, 30.0), ("INVALID", 25.0, 1, 0.0)],
+                                         "product_sk string, total_revenue double, units_sold int, refund_amount double")
     funnel_mart = spark.createDataFrame([("facebook",)], "channel string")
 
     result = marts.validate_marts(fact_orders, items, spend, campaign_mart, clv_mart, product_mart, funnel_mart)
@@ -134,6 +136,9 @@ def test_the_campaign_mart_reconciles_to_orders_with_a_known_campaign(spark, loa
     assert result["checks"]["campaign_revenue_reconciles_to_campaign_fact_orders"] is True
     assert result["checks"]["clv_revenue_reconciles_to_fact_orders"] is True
     assert result["checks"]["clv_cancelled_and_returned_reconcile_to_fact_orders"] is True
+    for name in ("campaign_refunds_reconcile_to_fact_orders", "clv_refunds_reconcile_to_fact_orders",
+                 "product_refunds_reconcile_to_fact_order_items"):
+        assert result["checks"][name] is True, name
     metrics = result["metrics"]
     assert metrics["completed_order_revenue"] == pytest.approx(165.0)
     assert metrics["cancelled_and_returned_order_amount"] == pytest.approx(100.0)
@@ -141,9 +146,15 @@ def test_the_campaign_mart_reconciles_to_orders_with_a_known_campaign(spark, loa
     assert metrics["invalid_customer_order_revenue"] == pytest.approx(25.0)
 
     # A mart that counted the cancelled and the returned order as revenue fails.
-    inflated = spark.createDataFrame([("campaign-4-v1", 200.0, 25.0), ("UNKNOWN", 40.0, 0.0), ("INVALID", 25.0, 9.0)],
-                                     "campaign_sk string, total_revenue double, total_spend double")
+    inflated = spark.createDataFrame(
+        [("campaign-4-v1", 200.0, 25.0, 30.0), ("UNKNOWN", 40.0, 0.0, 0.0), ("INVALID", 25.0, 9.0, 0.0)],
+        "campaign_sk string, total_revenue double, total_spend double, refund_amount double")
     assert marts.validate_marts(fact_orders, items, spend, inflated, clv_mart, product_mart, funnel_mart)["status"] == "FAIL"
+    # A mart that lost the refund fails the refund check.
+    no_refund = clv_mart.withColumn("refund_amount", F.lit(0.0))
+    lost = marts.validate_marts(fact_orders, items, spend, campaign_mart, no_refund, product_mart, funnel_mart)
+    assert lost["status"] == "FAIL" and lost["checks"]["clv_refunds_reconcile_to_fact_orders"] is False
+    assert (result["metrics"]["order_refunds"], result["metrics"]["item_refunds"]) == (30.0, 30.0)
     # A mart without its member rows no longer ties out to the facts.
     known_only = campaign_mart.filter("campaign_sk not in ('UNKNOWN', 'INVALID')")
     without = marts.validate_marts(fact_orders, items, spend, known_only, clv_mart, product_mart, funnel_mart)
@@ -155,9 +166,11 @@ def test_the_campaign_mart_reconciles_to_orders_with_a_known_campaign(spark, loa
 def test_the_gold_marts_carry_flagged_rows_for_the_unknown_and_invalid_members(spark, load_job):
     marts = load_job(MARTS_JOB)
     orders = spark.createDataFrame(
-        [(1, "c-1", "k-1", "2026-06-01 10:00:00", 100.0, "completed"), (2, "INVALID", "UNKNOWN", "2026-06-02 10:00:00", 40.0, "completed"),
-         (3, "c-1", "INVALID", "2026-06-03 10:00:00", 25.0, "returned")],
-        "order_id int, customer_sk string, campaign_sk string, order_date string, cart_value double, order_status string",
+        [(1, "c-1", "k-1", "2026-06-01 10:00:00", 100.0, "completed", 0.0),
+         (2, "INVALID", "UNKNOWN", "2026-06-02 10:00:00", 40.0, "completed", 0.0),
+         (3, "c-1", "INVALID", "2026-06-03 10:00:00", 25.0, "returned", 25.0)],
+        "order_id int, customer_sk string, campaign_sk string, order_date string, cart_value double, order_status string, "
+        "refund_amount double",
     ).withColumn("order_date", F.to_timestamp("order_date"))
     customers = spark.createDataFrame(
         [("c-1", 7, "Asha", "asha@example.org", "Pune", "MH", "India", "Student", "Gold")],

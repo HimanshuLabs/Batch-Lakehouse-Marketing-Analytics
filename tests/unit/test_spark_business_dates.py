@@ -47,9 +47,10 @@ def test_the_funnel_event_date_is_the_ist_date(spark, marts):
 def test_customer_lifetime_days_count_ist_days(spark, marts):
     # 17:30 IST on 06-17 and 00:30 IST on 06-18: one business day apart (zero in UTC).
     orders = spark.createDataFrame(
-        [(1, "c-1", "2026-06-17 12:00:00", 10.0, "k-1", "completed"), (2, "c-1", AT_0030_IST, 20.0, "k-1", "completed")],
+        [(1, "c-1", "2026-06-17 12:00:00", 10.0, "k-1", "completed", 0.0),
+         (2, "c-1", AT_0030_IST, 20.0, "k-1", "completed", 0.0)],
         "order_id int, customer_sk string, order_date string, cart_value double, campaign_sk string, "
-        "order_status string",
+        "order_status string, refund_amount double",
     ).withColumn("order_date", F.to_timestamp("order_date"))
     customers = spark.createDataFrame(
         [("c-1", 7, "Asha", "asha@example.org", "Pune", "MH", "India", "Student", "Gold")],

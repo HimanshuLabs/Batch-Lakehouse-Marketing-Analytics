@@ -158,6 +158,12 @@ def test_order_status_tax_shipping_and_total_are_generated(anchor_and_increment)
         items = pd.read_csv(folder / "order_items.csv").iloc[3:]
         lines = items.groupby("order_id")["line_amount"].sum().round(2)
         complete = clean[~clean["order_id"].isin(pd.read_csv(folder / "order_items.csv").iloc[:3]["order_id"])]
+        # K1: an order delivered again (cancelled or returned since an earlier
+        # batch) comes without its items; they were delivered with the order.
+        block = (pd.Timestamp(batch) - pd.Timestamp("2026-05-18")).days
+        again = complete[complete["order_id"] // 100_000 != block]
+        assert set(again["order_status"]) <= {"cancelled", "returned"} and (len(again) > 0) == (batch != "2026-05-18"), batch
+        complete = complete[complete["order_id"] // 100_000 == block]
         assert (complete["order_id"].map(lines) == complete["cart_value"]).all(), batch
 
 
@@ -253,7 +259,7 @@ def test_each_new_attribute_has_one_dirty_row_recorded_in_the_truth_file(anchor_
     }
     for batch, folder in anchor_and_increment.items():
         truth = [json.loads(line) for line in (folder / "generation_truth.json").read_text(encoding="utf-8").splitlines()]
-        assert truth[0]["generator_version"] == "session_budget_v3"
+        assert truth[0]["generator_version"] == "session_budget_v4"
         fixtures = {(row["table"], row["reason"]): row["row_index"] for row in truth if row["kind"] == "quality_fixture"}
         for table, reasons in expected.items():
             frame = pd.read_csv(folder / table)

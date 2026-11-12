@@ -144,6 +144,9 @@ def build_fact_orders(orders: DataFrame) -> DataFrame:
             "order_timestamp",
             to_date(col("order_timestamp")).alias("order_date"),
             "order_status",
+            "status_timestamp",
+            "refund_amount",
+            "updated_at",
             "payment_method",
             col("cart_value").alias("order_amount"),
             "tax_amount",
@@ -242,8 +245,15 @@ def build_fact_web_events(web_events: DataFrame) -> DataFrame:
 
 
 def completed_orders(orders: DataFrame) -> DataFrame:
-    """The orders that count as revenue: a cancelled or returned order is not a sale."""
-    return orders.filter(col("order_status") == "completed")
+    """The orders that are sales (every order that was not cancelled), with cart_value net of refunds.
+
+    A returned order stays a sale; its refund is subtracted, so the revenue in
+    these marts is net of refunds.
+    """
+    return (
+        orders.filter(col("order_status") != "cancelled")
+        .withColumn("cart_value", col("cart_value") - col("refund_amount"))
+    )
 
 
 def build_mart_campaign_performance(

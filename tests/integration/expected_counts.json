@@ -16,9 +16,9 @@
     "silver_campaigns": 37,
     "silver_campaigns_history": 39,
     "quarantine_campaigns": 8,
-    "bronze_orders": 1469,
+    "bronze_orders": 1480,
     "silver_orders": 1455,
-    "quarantine_orders": 12,
+    "quarantine_orders": 18,
     "bronze_order_items": 5625,
     "silver_order_items": 5589,
     "quarantine_order_items": 36,
@@ -49,7 +49,7 @@
     "warehouse.dim_customer": 503,
     "warehouse.dim_product": 153,
     "warehouse.dim_campaign": 41,
-    "warehouse.dim_date": 136,
+    "warehouse.dim_date": 153,
     "warehouse.dim_region": 793,
     "warehouse.dim_channel": 8,
     "warehouse.fact_orders": 1455,
@@ -60,7 +60,10 @@
     "marts.mart_customer_360": 499,
     "marts.mart_product_sales": 149,
     "marts.mart_campaign_performance": 39,
-    "marts.mart_revenue_daily": 135,
-    "marts.mart_marketing_funnel": 2537
+    "marts.mart_revenue_daily": 139,
+    "marts.mart_marketing_funnel": 2537,
+    "marts.mart_customer_daily_snapshot": 65662,
+    "marts.mart_product_daily_snapshot": 22363,
+    "marts.mart_campaign_daily_snapshot": 5914
   }
 }

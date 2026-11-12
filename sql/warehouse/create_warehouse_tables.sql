@@ -442,6 +442,13 @@ CREATE TABLE warehouse.fact_orders (
     -- completed, cancelled or returned, from the source. Only a completed
     -- order is a sale: the marts count revenue from completed orders.
     order_status TEXT NOT NULL,
+    -- When the status took effect: the order time for a completed order, the
+    -- cancellation or the return time otherwise. The source delivers an order
+    -- again when it changes; this is its latest version. A sale is recognised
+    -- on the order date, a refund on the business date of status_timestamp.
+    status_timestamp TIMESTAMPTZ NOT NULL,
+    -- What was refunded for a returned order (all or part of net_revenue); 0 otherwise.
+    refund_amount NUMERIC(18, 2) NOT NULL,
     payment_method TEXT,
     item_count INTEGER NOT NULL DEFAULT 0,
     gross_amount NUMERIC(18, 2) NOT NULL DEFAULT 0,
@@ -468,7 +475,13 @@ CREATE TABLE warehouse.fact_orders (
         AND shipping_amount >= 0
         AND total_amount >= 0
     ),
-    CONSTRAINT chk_fact_orders_status CHECK (order_status IN ('completed', 'cancelled', 'returned'))
+    CONSTRAINT chk_fact_orders_status CHECK (order_status IN ('completed', 'cancelled', 'returned')),
+    CONSTRAINT chk_fact_orders_lifecycle CHECK (
+        status_timestamp >= order_timestamp
+        AND refund_amount >= 0
+        AND refund_amount <= net_revenue
+        AND (order_status = 'returned') = (refund_amount > 0)
+    )
 );
 
 COMMENT ON TABLE warehouse.fact_orders IS
@@ -497,6 +510,10 @@ CREATE TABLE warehouse.fact_order_items (
     gross_amount NUMERIC(18, 2),
     discount_amount NUMERIC(18, 2),
     line_revenue NUMERIC(18, 2) NOT NULL DEFAULT 0,
+    -- The item's share of its order's refund (0 unless the order was returned).
+    -- The point-in-time job splits the order's refund over its items in
+    -- proportion to their lines, so the items of an order sum to the order's refund.
+    refund_amount NUMERIC(18, 2) NOT NULL,
     -- The batch date (Asia/Kolkata day) of the Bronze batch that last delivered
     -- the row, and an md5 of the row's business columns. Both come from the
     -- data only, so a rebuild never changes them.
@@ -510,6 +527,7 @@ CREATE TABLE warehouse.fact_order_items (
         AND (gross_amount IS NULL OR gross_amount >= 0)
         AND (discount_amount IS NULL OR discount_amount >= 0)
         AND line_revenue >= 0
+        AND refund_amount >= 0
     )
 );
 
@@ -1291,6 +1309,8 @@ BEGIN
                     coalesce(nullif(r->>'state', ''), nullif(r->>'home_state', ''), 'Unknown') AS state,
                     coalesce(nullif(r->>'country', ''), 'Unknown') AS country,
                     lower(nullif(r->>'order_status', '')) AS order_status,
+                    warehouse.safe_timestamp(r->>'status_timestamp') AS status_timestamp,
+                    warehouse.safe_numeric(r->>'refund_amount') AS refund_amount,
                     warehouse.safe_numeric(r->>'tax_amount') AS tax_amount,
                     warehouse.safe_numeric(r->>'shipping_amount') AS shipping_amount,
                     warehouse.safe_numeric(r->>'total_amount') AS total_amount,
@@ -1310,7 +1330,7 @@ BEGIN
             )
             INSERT INTO warehouse.fact_orders (
                 order_sk, order_id, customer_sk, campaign_sk, order_date_sk, region_sk, channel_sk,
-                order_timestamp, order_status, payment_method, item_count,
+                order_timestamp, order_status, status_timestamp, refund_amount, payment_method, item_count,
                 gross_amount, discount_amount, net_revenue, tax_amount, shipping_amount, total_amount,
                 source_record_hash, customer_id, campaign_id, source_updated_at
             )
@@ -1324,6 +1344,8 @@ BEGIN
                 coalesce(dch.channel_sk, 0) AS channel_sk,
                 b.order_ts,
                 b.order_status,
+                b.status_timestamp,
+                b.refund_amount,
                 b.payment_method,
                 b.item_count,
                 b.gross_amount,
@@ -1371,6 +1393,8 @@ BEGIN
                 channel_sk = EXCLUDED.channel_sk,
                 order_timestamp = EXCLUDED.order_timestamp,
                 order_status = EXCLUDED.order_status,
+                status_timestamp = EXCLUDED.status_timestamp,
+                refund_amount = EXCLUDED.refund_amount,
                 tax_amount = EXCLUDED.tax_amount,
                 shipping_amount = EXCLUDED.shipping_amount,
                 total_amount = EXCLUDED.total_amount,
@@ -1440,6 +1464,7 @@ BEGIN
                         warehouse.safe_numeric(r->>'line_total'),
                         0
                     ) AS source_line_revenue,
+                    warehouse.safe_numeric(r->>'refund_amount') AS refund_amount,
                     (warehouse.safe_date(r->>'ingestion_date')::TIMESTAMP AT TIME ZONE 'UTC') AS source_updated_at,
                     md5(r::TEXT) AS row_fingerprint
                 FROM src
@@ -1447,7 +1472,7 @@ BEGIN
             INSERT INTO warehouse.fact_order_items (
                 order_item_sk, order_item_nk, order_sk, order_id, customer_sk, product_sk,
                 order_date_sk, region_sk, channel_sk, order_timestamp,
-                quantity, unit_price, discount_percent, gross_amount, discount_amount, line_revenue,
+                quantity, unit_price, discount_percent, gross_amount, discount_amount, line_revenue, refund_amount,
                 customer_id, product_id, source_updated_at
             )
             SELECT DISTINCT ON (b.order_item_nk)
@@ -1473,6 +1498,7 @@ BEGIN
                     WHEN b.source_line_revenue > 0 THEN b.source_line_revenue
                     ELSE b.quantity * b.unit_price
                 END AS line_revenue,
+                b.refund_amount,
                 -- An item has no customer of its own: its order's customer.
                 coalesce(nullif(b.customer_id, 'UNKNOWN'), fo.customer_id, 'UNKNOWN') AS customer_id,
                 b.product_id,
@@ -1518,6 +1544,7 @@ BEGIN
                 gross_amount = EXCLUDED.gross_amount,
                 discount_amount = EXCLUDED.discount_amount,
                 line_revenue = EXCLUDED.line_revenue,
+                refund_amount = EXCLUDED.refund_amount,
                 customer_id = EXCLUDED.customer_id,
                 product_id = EXCLUDED.product_id,
                 source_updated_at = EXCLUDED.source_updated_at,
@@ -1526,6 +1553,37 @@ BEGIN
     END IF;
 END $$;
 
+
+-- ---------------------------------------------------------------------------
+-- Every calendar day from the first fact date to the last one, including the
+-- days on which nothing happened and the day of the latest cancellation or
+-- return: refunds are recognised on their own date, and the daily snapshot
+-- marts have one row per entity for every day.
+-- ---------------------------------------------------------------------------
+
+INSERT INTO warehouse.dim_date (
+    date_sk, full_date, day_of_month, day_name, day_of_week,
+    week_of_year, month_number, month_name, quarter_number, year_number,
+    is_weekend, month_start_date, quarter_start_date, year_start_date
+)
+SELECT
+    warehouse.date_sk(d), d, extract(day from d)::INTEGER, trim(to_char(d, 'Day')), extract(isodow from d)::INTEGER,
+    extract(week from d)::INTEGER, extract(month from d)::INTEGER, trim(to_char(d, 'Month')),
+    extract(quarter from d)::INTEGER, extract(year from d)::INTEGER,
+    extract(isodow from d)::INTEGER IN (6, 7), date_trunc('month', d)::DATE, date_trunc('quarter', d)::DATE,
+    date_trunc('year', d)::DATE
+FROM (
+    SELECT generate_series(span.first_day, span.last_day, INTERVAL '1 day')::DATE AS d
+    FROM (
+        SELECT min(full_date) AS first_day,
+               greatest(max(full_date),
+                        (SELECT max(warehouse.business_date(status_timestamp)) FROM warehouse.fact_orders)) AS last_day
+        FROM warehouse.dim_date
+        WHERE date_sk <> 0
+    ) span
+    WHERE span.first_day IS NOT NULL
+) days
+ON CONFLICT (date_sk) DO NOTHING;
 
 -- ---------------------------------------------------------------------------
 -- Backfill order-level item_count from loaded order-item facts
@@ -1938,13 +1996,14 @@ ON CONFLICT (conversion_nk) DO UPDATE SET
 -- ---------------------------------------------------------------------------
 
 UPDATE warehouse.fact_orders SET record_hash = md5(array_to_string(ARRAY[
-    order_id, customer_id, campaign_id, (order_timestamp AT TIME ZONE 'UTC')::TEXT, order_status, payment_method, item_count::TEXT,
+    order_id, customer_id, campaign_id, (order_timestamp AT TIME ZONE 'UTC')::TEXT, order_status, (status_timestamp AT TIME ZONE 'UTC')::TEXT, refund_amount::TEXT,
+    payment_method, item_count::TEXT,
     gross_amount::TEXT, discount_amount::TEXT, net_revenue::TEXT, tax_amount::TEXT, shipping_amount::TEXT, total_amount::TEXT
 ], '|', '<NULL>'));
 
 UPDATE warehouse.fact_order_items SET record_hash = md5(array_to_string(ARRAY[
     order_item_nk, order_id, customer_id, product_id, (order_timestamp AT TIME ZONE 'UTC')::TEXT, quantity::TEXT, unit_price::TEXT,
-    discount_percent::TEXT, gross_amount::TEXT, discount_amount::TEXT, line_revenue::TEXT
+    discount_percent::TEXT, gross_amount::TEXT, discount_amount::TEXT, line_revenue::TEXT, refund_amount::TEXT
 ], '|', '<NULL>'));
 
 UPDATE warehouse.fact_campaign_spend SET record_hash = md5(array_to_string(ARRAY[

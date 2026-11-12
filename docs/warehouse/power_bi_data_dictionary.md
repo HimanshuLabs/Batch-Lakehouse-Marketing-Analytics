@@ -64,10 +64,11 @@ Supports daily revenue reporting, order volume tracking, and average order value
 | Column group | Meaning |
 |---|---|
 | Date column | Reporting date used for trend analysis |
-| Revenue metrics | Gross, discount and net revenue of the completed orders of the day |
+| Revenue metrics | Gross, discount and net revenue of the orders placed that day that were not cancelled (sales are recognised on the order date) |
+| Refund metrics | `refund_amount`: refunds of the returns that happened that day; `net_revenue_after_refunds` = `net_revenue` - `refund_amount` |
 | Charge metrics | `tax_amount`, `shipping_amount` and `total_amount` (net + tax + shipping) of those orders |
-| Order metrics | Completed order count and supporting sales volume metrics |
-| Cancelled and returned | `cancelled_order_count`, `cancelled_amount`, `returned_order_count`, `returned_amount`: not counted as revenue |
+| Order metrics | Count of the orders that were not cancelled, and supporting sales volume metrics |
+| Cancelled and returned | `cancelled_order_count`, `cancelled_amount` (by order date; not sales); `returned_order_count`, `returned_amount` (by the date of the return) |
 | Average value metrics | Average order value or similar derived KPI fields |
 | Audit/support fields | Optional mart-generated metadata or supporting fields |
 
@@ -118,10 +119,10 @@ Supports marketing performance reporting across campaign spend, campaign-attribu
 | Campaign identifiers | Campaign ID, campaign name, `campaign_type` (the objective: awareness, consideration, conversion, retention), status and A/B group; `member_type` as in the customer dataset |
 | Channel/source fields | Marketing channel, traffic source, or attribution fields |
 | Spend metrics | Campaign cost/spend values |
-| Revenue metrics | `attributed_revenue`: net revenue of the completed orders the warehouse attributes to the campaign |
+| Revenue metrics | `attributed_revenue`: `net_sales` (net value of the campaign's orders that were not cancelled) less `refund_amount` |
 | Ad platform metrics | `ad_platform_conversions`, `platform_attributed_revenue`, `platform_roas`: what the ad platform itself reports, shown beside the warehouse-measured figures |
 | Conversion metrics | Conversion counts, conversion rates, or funnel outcomes |
-| Cancelled and returned | Cancelled and returned order counts and amounts: not counted as revenue |
+| Cancelled and returned | Cancelled and returned order counts and amounts; a returned order is a sale whose refund is subtracted |
 | Efficiency metrics | ROAS, cost per conversion, or related performance metrics |
 
 ### Recommended Power BI data types
@@ -175,8 +176,8 @@ Supports product sales reporting, category performance analysis, and merchandisi
 |---|---|
 | Product identifiers | Product ID, product name, or product grouping fields; `member_type` as in the customer dataset |
 | Category fields | Product category, `brand` and `product_status` (active or discontinued) |
-| Quantity metrics | Units sold in completed orders; `cancelled_units`, `returned_units` and `returned_amount` beside them |
-| Revenue metrics | Product-level or category-level revenue |
+| Quantity metrics | Units sold in orders that were not cancelled; `cancelled_units`, `returned_units` and `returned_amount` beside them |
+| Revenue metrics | `product_revenue`: `net_sales` less `refund_amount` (the product's share of each order's refund); category revenue rank and share |
 | Price/value metrics | Average price, average item value, or supporting sales metrics |
 
 ### Recommended Power BI data types
@@ -226,8 +227,8 @@ Supports customer analytics, segmentation, lifetime value reporting, and purchas
 |---|---|
 | Customer identifiers | Customer ID or customer-level keys; `member_type` is `known` for a real customer (the mart also has one row each for the unknown and the invalid-reference member) |
 | Segment fields | Customer segment, membership tier, or grouping attributes |
-| Value metrics | Lifetime value, revenue contribution, or spend totals, from completed orders |
-| Purchase metrics | Completed order count, repeat purchase indicators, frequency metrics |
+| Value metrics | `lifetime_value`: `net_sales` (orders that were not cancelled) less `refund_amount` |
+| Purchase metrics | Count of orders that were not cancelled, repeat purchase indicators, frequency metrics |
 | Cancelled and returned | `cancelled_order_count`, `cancelled_amount`, `returned_order_count`, `returned_amount` |
 | Recency fields | Last order/activity date or freshness indicators |
 | Geography fields | City, state, country, or regional grouping fields if present |

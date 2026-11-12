@@ -99,27 +99,35 @@ def test_the_real_attributes_are_carried_by_the_warehouse_and_the_marts():
     assert "ON dr.region_nk = warehouse.region_nk(NULL, b.state, b.country)" in code
 
 
-def test_revenue_in_every_mart_counts_completed_orders_only():
-    sold = "FILTER (WHERE fo.order_status = 'completed')"
+def test_revenue_in_every_mart_counts_orders_that_were_not_cancelled_less_refunds():
+    # K1: a sale is an order that was not cancelled; a returned order stays a
+    # sale and its refund is subtracted.
+    sold = "FILTER (WHERE fo.order_status <> 'cancelled')"
     customer = view_body("marts.mart_customer_360")
     for metric in ("COUNT(DISTINCT fo.order_id)", "SUM(fo.gross_amount)", "SUM(fo.discount_amount)",
                    "SUM(fo.net_revenue)", "AVG(fo.net_revenue)"):
         assert f"{metric} {sold}" in customer, f"mart_customer_360: {metric}"
-    assert "AND fo.order_status = 'completed'" in customer, "units purchased are those of completed orders"
+    assert "AND fo.order_status <> 'cancelled'" in customer, "units purchased are those of orders that were not cancelled"
+    assert f"COALESCE(SUM(fo.net_revenue) {sold}, 0) - COALESCE(SUM(fo.refund_amount), 0) AS lifetime_value," in customer
     campaign = view_body("marts.mart_campaign_performance")
     for metric in ("COUNT(DISTINCT fo.order_id)", "SUM(fo.net_revenue)", "AVG(fo.net_revenue)"):
         assert f"{metric} {sold}" in campaign, f"mart_campaign_performance: {metric}"
+    assert f"COALESCE(SUM(fo.net_revenue) {sold}, 0) - COALESCE(SUM(fo.refund_amount), 0) AS warehouse_attributed_revenue," in campaign
     product = view_body("marts.mart_product_sales")
     for metric in ("COUNT(DISTINCT foi.order_id)", "SUM(foi.quantity)", "SUM(foi.line_revenue)", "AVG(foi.unit_price)"):
         assert f"{metric} {sold}" in product, f"mart_product_sales: {metric}"
+    assert f"COALESCE(SUM(foi.line_revenue) {sold}, 0) - COALESCE(SUM(foi.refund_amount), 0) AS product_revenue," in product
     daily = view_body("marts.mart_revenue_daily")
-    assert "(fo.order_status = 'completed') AS sold," in daily
+    assert "(fo.order_status <> 'cancelled') AS sold," in daily
+    assert "warehouse.date_sk(warehouse.business_date(fo.status_timestamp)) AS order_date_sk," in daily, \
+        "a return is recognised on the date it happened"
     # No aggregate over all orders is left in the daily mart.
     unfiltered = re.findall(r"(?:SUM|COUNT)\((?:DISTINCT )?oe\.[a-z_]+\)(?! FILTER)", daily)
     assert unfiltered == [], unfiltered
     for status in ("cancelled", "returned"):
-        for mart in (customer, campaign, daily):
-            assert f"FILTER (WHERE fo.order_status = '{status}')" in mart or f"oe.order_status = '{status}'" in mart
+        for mart in (customer, campaign):
+            assert f"FILTER (WHERE fo.order_status = '{status}')" in mart
+    assert "FILTER (WHERE oe.order_status = 'cancelled')" in daily and "FILTER (WHERE oe.is_return)" in daily
 
 
 def test_both_export_routes_and_dbt_carry_the_real_attributes():

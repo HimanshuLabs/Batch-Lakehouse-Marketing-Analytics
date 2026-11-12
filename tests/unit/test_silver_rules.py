@@ -242,9 +242,10 @@ def test_a_bad_value_of_a_new_attribute_is_quarantined_with_its_reason(spark, lo
 
 def test_the_new_attributes_reach_silver_typed_and_normalized(run_silver):
     orders, _ = run_silver("orders", [{"order_id": "1", "order_status": " Returned ", "cart_value": "100.00",
-                                       "tax_amount": "18.00", "shipping_amount": "499.00", "total_amount": "617.00"}])
-    assert [(row["order_status"], row["cart_value"], row["tax_amount"], row["shipping_amount"], row["total_amount"])
-            for row in orders.values()] == [("returned", 100.0, 18.0, 499.0, 617.0)]
+                                       "tax_amount": "18.00", "shipping_amount": "499.00", "total_amount": "617.00",
+                                       "status_timestamp": "2026-06-14T10:00:00", "refund_amount": "40.50"}])
+    assert [(row["order_status"], row["cart_value"], row["tax_amount"], row["shipping_amount"], row["total_amount"],
+             row["refund_amount"]) for row in orders.values()] == [("returned", 100.0, 18.0, 499.0, 617.0, 40.5)]
     products, _ = run_silver("products", [{"product_id": "1", "brand": " Voltix ", "product_status": "Discontinued"}])
     assert [(row["brand"], row["product_status"]) for row in products.values()] == [("Voltix", "discontinued")]
     campaigns, _ = run_silver("campaigns", [{"campaign_id": "1", "campaign_type": "Retention"}])

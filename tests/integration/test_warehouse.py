@@ -39,6 +39,7 @@ WAREHOUSE_TABLES = [
     "warehouse.fact_campaign_spend", "warehouse.fact_web_events", "warehouse.fact_conversions",
     "marts.mart_customer_360", "marts.mart_product_sales", "marts.mart_campaign_performance",
     "marts.mart_revenue_daily", "marts.mart_marketing_funnel",
+    "marts.mart_customer_daily_snapshot", "marts.mart_product_daily_snapshot", "marts.mart_campaign_daily_snapshot",
 ]
 JOB_REPORTS = [
     "scd2_quality_report.json", "point_in_time_fact_join_report.json", "scd2_gold_mart_report.json",
@@ -125,8 +126,9 @@ def test_latest_scd2_validation_all_pass():
 def test_reconciliation_all_pass():
     rows = sql("select check_name, status from audit.v_latest_reconciliation_report")
     # 15 checks from before Part J, 7 invalid-reference counts, 3 SCD2 version
-    # counts, the order-total identity and the regional ad-spend sum.
-    assert len(rows) == 27, len(rows)
+    # counts, the order-total identity, the regional ad-spend sum and (K1) the
+    # two refund checks.
+    assert len(rows) == 29, len(rows)
     assert [row for row in rows if row[1] != "PASS"] == []
 
 
@@ -358,7 +360,7 @@ def test_scd2_version_counts_match_gold():
 
 # Part J: real source attributes.
 
-def test_order_status_is_real_and_revenue_counts_completed_orders_only():
+def test_order_status_is_real_and_revenue_counts_orders_that_were_not_cancelled_less_refunds():
     statuses = {row[0]: int(row[1]) for row in sql("select order_status, count(*) from warehouse.fact_orders group by 1")}
     assert set(statuses) == {"completed", "cancelled", "returned"}, statuses
     total = sum(statuses.values())
@@ -367,19 +369,25 @@ def test_order_status_is_real_and_revenue_counts_completed_orders_only():
     assert sql("select count(*) from warehouse.fact_orders f join staging.stg_gold_fact_orders_scd2 s "
                "on s.order_id::TEXT = f.order_id where s.order_status <> f.order_status") == [["0"]]
 
-    completed, not_sold = sql(
-        "select coalesce(sum(net_revenue) filter (where order_status = 'completed'), 0), "
-        "coalesce(sum(net_revenue) filter (where order_status <> 'completed'), 0) from warehouse.fact_orders")[0]
-    assert float(not_sold) > 0
+    # K1: a sale is an order that was not cancelled; a returned order stays a
+    # sale and its refund is subtracted.
+    sold, not_sold, refunds = sql(
+        "select coalesce(sum(net_revenue) filter (where order_status <> 'cancelled'), 0), "
+        "coalesce(sum(net_revenue) filter (where order_status <> 'completed'), 0), sum(refund_amount) "
+        "from warehouse.fact_orders")[0]
+    assert float(not_sold) > 0 and float(refunds) > 0
     daily = sql("select sum(net_revenue), sum(cancelled_amount + returned_amount), sum(order_count), "
-                "sum(cancelled_order_count), sum(returned_order_count) from marts.mart_revenue_daily")[0]
-    assert (daily[0], daily[1]) == (completed, not_sold), "daily revenue is that of completed orders"
-    assert [int(v) for v in daily[2:]] == [statuses["completed"], statuses["cancelled"], statuses["returned"]]
-    # Lifetime value, campaign revenue and product revenue: completed orders only.
+                "sum(cancelled_order_count), sum(returned_order_count), sum(refund_amount), "
+                "sum(net_revenue_after_refunds) from marts.mart_revenue_daily")[0]
+    assert (daily[0], daily[1]) == (sold, not_sold), "daily sales are those of the orders that were not cancelled"
+    assert [int(v) for v in daily[2:5]] == [statuses["completed"] + statuses["returned"], statuses["cancelled"],
+                                            statuses["returned"]]
+    assert daily[5] == refunds and float(daily[6]) == pytest.approx(float(sold) - float(refunds), abs=0.001)
+    # Lifetime value, campaign revenue and product revenue: the same definition.
     assert sql(
         "select count(*) from marts.mart_customer_360 m join (select customer_id, "
-        "coalesce(sum(net_revenue) filter (where order_status = 'completed'), 0) as value, "
-        "count(*) filter (where order_status = 'completed') as orders, "
+        "coalesce(sum(net_revenue) filter (where order_status <> 'cancelled'), 0) - sum(refund_amount) as value, "
+        "count(*) filter (where order_status <> 'cancelled') as orders, "
         "count(*) filter (where order_status = 'cancelled') as cancelled, "
         "count(*) filter (where order_status = 'returned') as returned from warehouse.fact_orders "
         "where customer_sk > 0 group by 1) f using (customer_id) "
@@ -387,13 +395,14 @@ def test_order_status_is_real_and_revenue_counts_completed_orders_only():
         "or m.cancelled_order_count <> f.cancelled or m.returned_order_count <> f.returned") == [["0"]]
     assert sql(
         "select (select sum(attributed_revenue) from marts.mart_campaign_performance where member_type = 'known') = "
-        "(select sum(net_revenue) from warehouse.fact_orders where order_status = 'completed' and campaign_sk > 0), "
+        "(select sum(net_revenue) filter (where order_status <> 'cancelled') - sum(refund_amount) "
+        " from warehouse.fact_orders where campaign_sk > 0), "
         "(select sum(product_revenue) from marts.mart_product_sales where member_type = 'known') = "
-        "(select sum(i.line_revenue) from warehouse.fact_order_items i join warehouse.fact_orders o using (order_sk) "
-        " where o.order_status = 'completed' and i.product_sk > 0), "
+        "(select sum(i.line_revenue) filter (where o.order_status <> 'cancelled') - sum(i.refund_amount) "
+        " from warehouse.fact_order_items i join warehouse.fact_orders o using (order_sk) where i.product_sk > 0), "
         "(select sum(units_sold) from marts.mart_product_sales where member_type = 'known') = "
         "(select sum(i.quantity) from warehouse.fact_order_items i join warehouse.fact_orders o using (order_sk) "
-        " where o.order_status = 'completed' and i.product_sk > 0)") == [["t", "t", "t"]]
+        " where o.order_status <> 'cancelled' and i.product_sk > 0)") == [["t", "t", "t"]]
     # Route B: the Gold marts agree with the warehouse on completed revenue.
     import duckdb
 
@@ -401,7 +410,7 @@ def test_order_status_is_real_and_revenue_counts_completed_orders_only():
     clv = duckdb.sql(f"select sum(total_revenue), sum(cancelled_amount + returned_amount) "
                      f"from read_parquet('{gold}/mart_customer_lifetime_value_scd2/*.parquet') "
                      "where member_type = 'known'").fetchone()
-    valid_customer = sql("select sum(net_revenue) filter (where order_status = 'completed'), "
+    valid_customer = sql("select sum(net_revenue) filter (where order_status <> 'cancelled') - sum(refund_amount), "
                          "sum(net_revenue) filter (where order_status <> 'completed') "
                          "from warehouse.fact_orders where customer_sk > 0")[0]
     assert [round(v, 2) for v in clv] == [float(v) for v in valid_customer]
@@ -871,16 +880,18 @@ def test_every_mart_has_flagged_member_rows_and_ties_out_to_the_facts():
                    f"and {key} in ('UNKNOWN', 'INVALID')") == [["0"]]
     assert sql("select distinct member_type from marts.mart_marketing_funnel where campaign_id in ('UNKNOWN', 'INVALID') "
                "order by 1") == [["invalid_reference"], ["unknown_member"]]
-    sold = "from warehouse.fact_orders where order_status = 'completed'"
+    # Revenue after refunds: the orders that were not cancelled, less refunds (K1).
+    sold = "from warehouse.fact_orders where order_status <> 'cancelled'"
     sold_items = ("from warehouse.fact_order_items i join warehouse.fact_orders o using (order_sk) "
-                  "where o.order_status = 'completed'")
+                  "where o.order_status <> 'cancelled'")
     totals = sql(
-        f"select (select sum(net_revenue) {sold}), (select sum(i.line_revenue) {sold_items}), "
+        f"select (select sum(net_revenue) {sold}) - (select sum(refund_amount) from warehouse.fact_orders), "
+        f"(select sum(i.line_revenue) {sold_items}) - (select sum(refund_amount) from warehouse.fact_order_items), "
         f"(select sum(i.quantity) {sold_items}), (select sum(spend_amount) from warehouse.fact_campaign_spend)")[0]
     marts = sql(
         "select (select sum(lifetime_value) from marts.mart_customer_360), "
         "(select sum(attributed_revenue) from marts.mart_campaign_performance), "
-        "(select sum(net_revenue) from marts.mart_revenue_daily), "
+        "(select sum(net_revenue_after_refunds) from marts.mart_revenue_daily), "
         "(select sum(product_revenue) from marts.mart_product_sales), "
         "(select sum(units_sold) from marts.mart_product_sales), "
         "(select sum(total_units_purchased) from marts.mart_customer_360), "
@@ -891,7 +902,9 @@ def test_every_mart_has_flagged_member_rows_and_ties_out_to_the_facts():
     for name in ("customer_lifetime_value_matches_fact_orders", "customer_units_match_fact_order_items",
                  "campaign_revenue_matches_fact_orders", "product_units_match_fact_order_items",
                  "product_revenue_matches_fact_order_items", "campaign_spend_matches_fact_campaign_spend",
-                 "campaign_platform_results_match_fact_campaign_spend", "daily_revenue_matches_fact_orders"):
+                 "campaign_platform_results_match_fact_campaign_spend", "daily_revenue_matches_fact_orders",
+                 "daily_refunds_match_fact_orders", "customer_refunds_match_fact_orders",
+                 "campaign_refunds_match_fact_orders", "product_refunds_match_fact_order_items"):
         assert checks[name] == "PASS", name
     # Route B: the Gold marts tie out to the Gold facts in the same way.
     report = json.loads((PROJECT_ROOT / "logs" / "scd2_gold_mart_report.json").read_text(encoding="utf-8"))
@@ -917,10 +930,11 @@ def test_total_amount_means_the_charged_amount_in_every_layer():
                "on s.order_id::TEXT = f.order_id where f.total_amount <> s.total_amount::NUMERIC(18, 2) "
                "or f.net_revenue <> s.cart_value::NUMERIC(18, 2)") == [["0"]]
     assert sql("select sum(total_amount) = (select sum(total_amount) from warehouse.fact_orders "
-               "where order_status = 'completed') from marts.mart_revenue_daily") == [["t"]]
+               "where order_status <> 'cancelled') from marts.mart_revenue_daily") == [["t"]]
     # Revenue in the Gold marts is the net value (cart_value), never the charged amount.
     clv = duckdb.sql(f"select sum(total_revenue) from read_parquet('{data}/gold/mart_customer_lifetime_value_scd2/*.parquet')").fetchone()[0]
-    assert round(clv, 2) == float(sql("select sum(net_revenue) from warehouse.fact_orders where order_status = 'completed'")[0][0])
+    assert round(clv, 2) == float(sql("select sum(net_revenue) filter (where order_status <> 'cancelled') - sum(refund_amount) "
+                                      "from warehouse.fact_orders")[0][0])
 
 
 # What Project 4 and Project 5 read from this warehouse, recorded from their
@@ -999,6 +1013,25 @@ CONSUMER_CONTRACT = {
         },
     },
 }
+# K1: relations this warehouse offers consumers and no consumer reads yet. They
+# are held to the same rules, so a consumer that starts reading one is safe.
+# A daily snapshot has the columns of its lifetime mart as they were at the
+# end of snapshot_date (nothing after that date is in a row), plus the sales
+# and the refunds that make up its revenue.
+AVAILABLE_RELATIONS = {
+    f"marts.{snapshot}": {
+        "consumer": f"available: {mart} as of each business date, for time-based train/test splits (P4)",
+        "grain": f"one row per {key} and business date, from the first activity to the last date in the data",
+        "key": [key, "snapshot_date"],
+        "columns": {"snapshot_date": "date", **CONSUMER_CONTRACT[f"marts.{mart}"]["columns"],
+                    "member_type": "text", "net_sales": "numeric", "refund_amount": "numeric"},
+    }
+    for snapshot, mart, key in (
+        ("mart_customer_daily_snapshot", "mart_customer_360", "customer_id"),
+        ("mart_product_daily_snapshot", "mart_product_sales", "product_id"),
+        ("mart_campaign_daily_snapshot", "mart_campaign_performance", "campaign_id"),
+    )
+}
 # P5 reads no relation yet: it verifies that the database has these schemas
 # before it activates a source (its adapter says it does not extract rows yet).
 CONSUMER_SCHEMAS = {"P5 contracts/project2_project3_sources.yaml": ["staging", "warehouse", "marts", "audit"]}
@@ -1033,7 +1066,9 @@ def test_the_consumer_contract_of_p4_and_p5_holds():
     ):
         columns.setdefault(f"{schema}.{table}", {})[column] = data_type
     row_counts, duplicate_keys = {}, {}
-    for relation, expected in CONSUMER_CONTRACT.items():
+    contract = {**CONSUMER_CONTRACT, **AVAILABLE_RELATIONS}
+    assert len(contract) == len(CONSUMER_CONTRACT) + 3
+    for relation, expected in contract.items():
         if relation not in columns:
             continue
         key = ", ".join(expected["key"])
@@ -1041,12 +1076,12 @@ def test_the_consumer_contract_of_p4_and_p5_holds():
         duplicate_keys[relation] = int(sql(
             f"select (select count(*) from (select {key} from {relation} group by {key} having count(*) > 1) d) "
             f"+ (select count(*) from {relation} where ({key}) is null)")[0][0])
-    assert contract_violations(CONSUMER_CONTRACT, columns, row_counts, duplicate_keys) == []
+    assert contract_violations(contract, columns, row_counts, duplicate_keys) == []
     schemas = {row[0] for row in sql("select nspname from pg_namespace")}
     for consumer, expected in CONSUMER_SCHEMAS.items():
         assert set(expected) <= schemas, consumer
     # The read-only role the consumers are told to use can read every contract relation.
-    assert sql("select count(*) from (values " + ", ".join(f"('{r}')" for r in CONSUMER_CONTRACT) + ") v(r) "
+    assert sql("select count(*) from (values " + ", ".join(f"('{r}')" for r in contract) + ") v(r) "
                "where not has_table_privilege('p2_reader', v.r, 'SELECT')") == [["0"]]
 
 
@@ -1059,3 +1094,160 @@ def test_customer_value_segments_are_thirds_of_the_buying_customers():
     assert max(high[0], medium[0], low[0]) - min(high[0], medium[0], low[0]) <= 1, "thirds"
     assert high[1] >= medium[2] and medium[1] >= low[2] and low[1] > 0, "ordered by lifetime value"
     assert segments["No Purchase Yet"][2] == 0
+
+
+# Part K1: order lifecycle, revenue with refunds, leak-free daily snapshots.
+
+def test_an_order_whose_status_changed_later_is_delivered_again_and_kept_once():
+    import duckdb
+
+    data = PROJECT_ROOT / "data"
+    bronze = f"read_parquet('{data}/bronze/bronze_orders/**/*.parquet', hive_partitioning=true, union_by_name=true)"
+    # Delivered as completed by one batch, and again by a later batch once it was cancelled or returned.
+    again = duckdb.sql(
+        f"select order_id, count(distinct ingestion_date), count(distinct order_status), max(updated_at) > min(updated_at) "
+        f"from {bronze} where try_cast(order_id as bigint) % 100000 < 99900 "
+        f"group by 1 having count(distinct ingestion_date) > 1 and count(distinct order_status) > 1").fetchall()
+    assert len(again) >= 3, "no order changed status after the batch that delivered it"
+    assert all(row[3] for row in again), "the later version has the later updated_at"
+    ids = ", ".join(f"'{int(float(row[0]))}'" for row in again)
+    # Silver, Gold and the warehouse keep the latest version, once.
+    silver = duckdb.sql(f"select order_id, order_status, refund_amount from "
+                        f"read_parquet('{data}/silver/silver_orders/**/*.parquet', hive_partitioning=false, union_by_name=true) "
+                        f"where order_id in ({ids.replace(chr(39), '')})").fetchall()
+    assert len(silver) == len(again) and all(status in ("cancelled", "returned") for _, status, _ in silver)
+    warehouse = sql(f"select order_id, order_status, refund_amount, status_timestamp > order_timestamp "
+                    f"from warehouse.fact_orders where order_id in ({ids})")
+    assert sorted((int(order_id), status, float(refund)) for order_id, status, refund, _ in warehouse) == \
+        sorted((int(order_id), status, round(float(refund), 2)) for order_id, status, refund in silver)
+    assert all(later == "t" for *_, later in warehouse)
+    assert sql("select count(*) from (select order_id from warehouse.fact_orders group by 1 having count(*) > 1) d") == [["0"]]
+
+    # The lifecycle is consistent in the facts, and an item carries its share of the refund.
+    assert sql("select count(*) from warehouse.fact_orders where status_timestamp < order_timestamp "
+               "or (order_status = 'returned') <> (refund_amount > 0) or refund_amount > net_revenue "
+               "or (order_status = 'completed' and status_timestamp <> order_timestamp)") == [["0"]]
+    assert sql("select count(*) from (select o.order_sk from warehouse.fact_orders o join warehouse.fact_order_items i "
+               "using (order_sk) group by o.order_sk, o.refund_amount having sum(i.refund_amount) <> o.refund_amount) d") == [["0"]]
+    assert sql("select count(*) > 0, count(*) filter (where refund_amount < net_revenue) > 0 "
+               "from warehouse.fact_orders where order_status = 'returned'") == [["t", "t"]], "full and partial refunds"
+    # The impossible lifecycles of the source are in quarantine with their reasons.
+    reasons = {row[0] for row in duckdb.sql(
+        f"select distinct quarantine_reason from read_parquet('{data}/quarantine/quarantine_orders/**/*.parquet', "
+        f"hive_partitioning=false, union_by_name=true)").fetchall()}
+    assert {"Invalid order record: status_timestamp is before order_timestamp",
+            "Invalid order record: refund_amount is more than the order's net value",
+            "Invalid order record: refund_amount on an order that was not returned"} <= reasons
+
+
+def test_refunds_are_recognised_on_the_return_date_and_tie_out_in_every_mart():
+    refunds = sql("select sum(refund_amount) from warehouse.fact_orders")[0][0]
+    assert float(refunds) > 0
+    assert sql("select (select sum(refund_amount) from marts.mart_revenue_daily), "
+               "(select sum(refund_amount) from marts.mart_customer_360), "
+               "(select sum(refund_amount) from marts.mart_campaign_performance), "
+               "(select sum(refund_amount) from marts.mart_product_sales)")[0] == [refunds] * 4
+    # Day by day: sales on the order date, refunds on the date of the return.
+    assert sql(
+        "with sales as (select warehouse.business_date(order_timestamp) as day, sum(net_revenue) as net, "
+        "    sum(gross_amount) as gross, sum(discount_amount) as discount from warehouse.fact_orders "
+        "    where order_status <> 'cancelled' group by 1), "
+        "returns as (select warehouse.business_date(status_timestamp) as day, sum(refund_amount) as refund, count(*) as orders "
+        "    from warehouse.fact_orders where order_status = 'returned' group by 1) "
+        "select count(*) from marts.mart_revenue_daily m left join sales s on s.day = m.revenue_date "
+        "left join returns r on r.day = m.revenue_date "
+        "where m.net_revenue <> coalesce(s.net, 0) or m.gross_revenue <> coalesce(s.gross, 0) "
+        "or m.discount_amount <> coalesce(s.discount, 0) or m.refund_amount <> coalesce(r.refund, 0) "
+        "or m.returned_order_count <> coalesce(r.orders, 0) "
+        "or m.net_revenue_after_refunds <> coalesce(s.net, 0) - coalesce(r.refund, 0)") == [["0"]]
+    assert sql("select count(*) from warehouse.fact_orders where order_status = 'returned' "
+               "and warehouse.business_date(status_timestamp) not in (select revenue_date from marts.mart_revenue_daily)") == [["0"]]
+    assert sql("select count(*) > 0 from marts.mart_revenue_daily where refund_amount > 0 and order_count = 0 "
+               "or net_revenue_after_refunds < net_revenue") == [["t"]]
+
+
+SNAPSHOT_MARTS = (("mart_customer_daily_snapshot", "mart_customer_360", "customer_id"),
+                  ("mart_product_daily_snapshot", "mart_product_sales", "product_id"),
+                  ("mart_campaign_daily_snapshot", "mart_campaign_performance", "campaign_id"))
+# An order as it was known at the end of a business date {day}.
+ORDERS_AS_OF = (
+    "select o.*, case when warehouse.business_date(o.status_timestamp) <= {day} then o.order_status else 'completed' end as status_then, "
+    "case when warehouse.business_date(o.status_timestamp) <= {day} then o.refund_amount else 0 end as refund_then "
+    "from warehouse.fact_orders o where warehouse.business_date(o.order_timestamp) <= {day}")
+
+
+def member_facts(alias: str, entity: str) -> str:
+    """The facts of a mart row: a known entity's by its ID, the two special members' by their key."""
+    return (f"((s.member_type = 'known' and {alias}.{entity}_sk > 0 and {alias}.{entity}_id = s.{entity}_id) "
+            f"or (s.member_type = 'unknown_member' and {alias}.{entity}_sk = 0) "
+            f"or (s.member_type = 'invalid_reference' and {alias}.{entity}_sk = -1))")
+
+
+def test_every_snapshot_row_equals_the_facts_filtered_to_its_date():
+    last = sql("select max(full_date) from warehouse.dim_date where date_sk <> 0")[0][0]
+    first = sql("select min(full_date) from warehouse.dim_date where date_sk <> 0")[0][0]
+    for snapshot, mart, key in SNAPSHOT_MARTS:
+        # One row per entity and date, without gaps, from its first activity to the last date in the data.
+        assert sql(f"select count(*) from (select {key} from marts.{snapshot} group by 1 "
+                   f"having count(*) <> max(snapshot_date) - min(snapshot_date) + 1 or max(snapshot_date) <> date '{last}') d") == [["0"]]
+        assert sql(f"select min(snapshot_date), max(snapshot_date) from marts.{snapshot}") == [[first, last]]
+        # The last date's snapshot is the lifetime mart, column for column.
+        assert sql(
+            f"select (select count(*) from marts.{snapshot} s where s.snapshot_date = date '{last}' and "
+            f"to_jsonb(s) - 'snapshot_date' - 'days_since_last_order' not in (select to_jsonb(m) - 'days_since_last_order' from marts.{mart} m)), "
+            f"(select count(*) from marts.{snapshot} where snapshot_date = date '{last}') = (select count(distinct {key}) from marts.{snapshot})"
+        ) == [["0", "t"]], snapshot
+        # The members that tie the marts out are in the snapshots too.
+        assert sql(f"select count(distinct {key}) from marts.{snapshot} where member_type <> 'known'") [0][0] in ("1", "2"), snapshot
+
+    # Recomputed from the facts filtered to each row's own date, for every
+    # entity on a spread of dates: every tenth date and each of the last eight
+    # (where the status changes of the latest orders fall).
+    day = "s.snapshot_date"
+    dates = f"((s.snapshot_date - date '{first}') % 10 = 0 or s.snapshot_date >= date '{last}' - 7) and ("
+    assert int(sql(f"select count(distinct s.snapshot_date) from marts.mart_customer_daily_snapshot s where {dates} true)")[0][0]) >= 15
+    assert sql(
+        f"select count(*) from marts.mart_customer_daily_snapshot s left join lateral ("
+        f"  select count(*) filter (where status_then <> 'cancelled') as orders, "
+        f"         coalesce(sum(net_revenue) filter (where status_then <> 'cancelled'), 0) as sales, "
+        f"         coalesce(sum(refund_then), 0) as refunds, count(*) filter (where status_then = 'cancelled') as cancelled, "
+        f"         count(*) filter (where status_then = 'returned') as returned, "
+        f"         max(order_timestamp) filter (where status_then <> 'cancelled') as last_order "
+        f"  from ({ORDERS_AS_OF.format(day=day)} and {member_facts('o', 'customer')}) known) f on true "
+        f"left join lateral (select count(*) as events from warehouse.fact_web_events e "
+        f"  where {member_facts('e', 'customer')} and warehouse.business_date(e.event_timestamp) <= {day}) w on true "
+        f"where {dates} s.total_order_count <> f.orders or s.net_sales <> f.sales or s.refund_amount <> f.refunds "
+        f"or s.lifetime_value <> f.sales - f.refunds or s.cancelled_order_count <> f.cancelled "
+        f"or s.returned_order_count <> f.returned or s.last_order_timestamp is distinct from f.last_order "
+        f"or s.web_event_count <> w.events "
+        f"or s.days_since_last_order is distinct from s.snapshot_date - warehouse.business_date(f.last_order))") == [["0"]]
+    assert sql(
+        f"select count(*) from marts.mart_campaign_daily_snapshot s left join lateral ("
+        f"  select count(*) filter (where status_then <> 'cancelled') as orders, "
+        f"         coalesce(sum(net_revenue) filter (where status_then <> 'cancelled'), 0) as sales, "
+        f"         coalesce(sum(refund_then), 0) as refunds "
+        f"  from ({ORDERS_AS_OF.format(day=day)} and {member_facts('o', 'campaign')}) known) f on true "
+        f"left join lateral (select coalesce(sum(c.spend_amount), 0) as spend, coalesce(sum(c.impressions), 0) as impressions "
+        f"  from warehouse.fact_campaign_spend c join warehouse.dim_date d on d.date_sk = c.spend_date_sk "
+        f"  where {member_facts('c', 'campaign')} and d.full_date <= {day}) c on true "
+        f"where {dates} s.order_count <> f.orders or s.net_sales <> f.sales or s.refund_amount <> f.refunds "
+        f"or s.attributed_revenue <> f.sales - f.refunds or s.total_spend <> c.spend or s.impressions <> c.impressions)") == [["0"]]
+    assert sql(
+        f"select count(*) from marts.mart_product_daily_snapshot s left join lateral ("
+        f"  select coalesce(sum(i.quantity) filter (where known.status_then <> 'cancelled'), 0) as units, "
+        f"         coalesce(sum(i.line_revenue) filter (where known.status_then <> 'cancelled'), 0) as sales, "
+        f"         coalesce(sum(case when known.refund_then > 0 then i.refund_amount else 0 end), 0) as refunds, "
+        f"         coalesce(sum(i.quantity) filter (where known.status_then = 'returned'), 0) as returned "
+        f"  from ({ORDERS_AS_OF.format(day=day)}) known join warehouse.fact_order_items i using (order_sk) "
+        f"  where {member_facts('i', 'product')}) f on true "
+        f"where {dates} s.units_sold <> f.units or s.net_sales <> f.sales or s.refund_amount <> f.refunds "
+        f"or s.product_revenue <> f.sales - f.refunds or s.returned_units <> f.returned)") == [["0"]]
+
+    # The refunds and status changes that happened later are really absent earlier:
+    # the snapshots differ from the lifetime mart on the way.
+    assert sql("select count(*) > 0 from marts.mart_customer_daily_snapshot s join marts.mart_customer_360 m using (customer_id) "
+               "where s.refund_amount < m.refund_amount or s.total_order_count > m.total_order_count") == [["t"]]
+    # A dimension version that started after a date is not in that date's row.
+    assert sql("select count(*) from marts.mart_customer_daily_snapshot s where not exists (select 1 from warehouse.dim_customer d "
+               "where d.customer_id = s.customer_id and warehouse.business_date(d.effective_from) <= s.snapshot_date) "
+               "and s.member_type = 'known' and s.customer_name is not null") == [["0"]]

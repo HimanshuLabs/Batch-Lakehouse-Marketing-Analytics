@@ -101,6 +101,19 @@ def write_mart(df: DataFrame, output_path: Path) -> None:
 COMPLETED, CANCELLED, RETURNED = "completed", "cancelled", "returned"
 
 
+def when_sold(value: F.Column) -> F.Column:
+    """value for the orders (or items of orders) that are sales: every order that was not cancelled.
+
+    A sale is recognised when the order is placed. A returned order stays a
+    sale; its refund_amount is subtracted, so revenue is net of refunds.
+    """
+    return F.when(F.col("order_status") != CANCELLED, value)
+
+
+def refunds(column: str = "refund_amount") -> F.Column:
+    return F.coalesce(F.sum(F.coalesce(F.col(column), F.lit(0.0))), F.lit(0.0))
+
+
 def when_status(status: str, value: F.Column) -> F.Column:
     """value for the orders (or items of orders) with this status, else NULL."""
     return F.when(F.col("order_status") == status, value)
@@ -158,12 +171,14 @@ def build_campaign_performance_mart(
         fact_orders
         .groupBy("campaign_sk")
         .agg(
-            F.countDistinct(when_status(COMPLETED, F.col("order_id"))).alias("orders_count"),
-            F.countDistinct(when_status(COMPLETED, F.col("customer_sk"))).alias("customers_count"),
-            F.sum(when_status(COMPLETED, F.col("cart_value"))).alias("total_revenue"),
-            F.avg(when_status(COMPLETED, F.col("cart_value"))).alias("avg_order_value"),
-            F.min(when_status(COMPLETED, F.col("order_date"))).alias("first_order_date"),
-            F.max(when_status(COMPLETED, F.col("order_date"))).alias("last_order_date"),
+            F.countDistinct(when_sold(F.col("order_id"))).alias("orders_count"),
+            F.countDistinct(when_sold(F.col("customer_sk"))).alias("customers_count"),
+            (F.coalesce(F.sum(when_sold(F.col("cart_value"))), F.lit(0.0)) - refunds()).alias("total_revenue"),
+            F.sum(when_sold(F.col("cart_value"))).alias("net_sales"),
+            refunds().alias("refund_amount"),
+            F.avg(when_sold(F.col("cart_value"))).alias("avg_order_value"),
+            F.min(when_sold(F.col("order_date"))).alias("first_order_date"),
+            F.max(when_sold(F.col("order_date"))).alias("last_order_date"),
             F.countDistinct(when_status(CANCELLED, F.col("order_id"))).alias("cancelled_orders_count"),
             F.sum(when_status(CANCELLED, F.col("cart_value"))).alias("cancelled_amount"),
             F.countDistinct(when_status(RETURNED, F.col("order_id"))).alias("returned_orders_count"),
@@ -201,6 +216,8 @@ def build_campaign_performance_mart(
                 "impressions": 0,
                 "clicks": 0,
                 "spend_records_count": 0,
+                "net_sales": 0.0,
+                "refund_amount": 0.0,
                 "cancelled_orders_count": 0,
                 "cancelled_amount": 0.0,
                 "returned_orders_count": 0,
@@ -267,12 +284,14 @@ def build_customer_lifetime_value_mart(
             "member_type",
         )
         .agg(
-            F.countDistinct(when_status(COMPLETED, F.col("order_id"))).alias("total_orders"),
-            F.coalesce(F.sum(when_status(COMPLETED, F.col("cart_value"))), F.lit(0.0)).alias("total_revenue"),
-            F.coalesce(F.avg(when_status(COMPLETED, F.col("cart_value"))), F.lit(0.0)).alias("avg_order_value"),
-            F.min(when_status(COMPLETED, F.col("order_date"))).alias("first_order_date"),
-            F.max(when_status(COMPLETED, F.col("order_date"))).alias("last_order_date"),
-            F.countDistinct(when_status(COMPLETED, F.col("campaign_sk"))).alias("campaigns_touched"),
+            F.countDistinct(when_sold(F.col("order_id"))).alias("total_orders"),
+            (F.coalesce(F.sum(when_sold(F.col("cart_value"))), F.lit(0.0)) - refunds()).alias("total_revenue"),
+            F.coalesce(F.sum(when_sold(F.col("cart_value"))), F.lit(0.0)).alias("net_sales"),
+            refunds().alias("refund_amount"),
+            F.coalesce(F.avg(when_sold(F.col("cart_value"))), F.lit(0.0)).alias("avg_order_value"),
+            F.min(when_sold(F.col("order_date"))).alias("first_order_date"),
+            F.max(when_sold(F.col("order_date"))).alias("last_order_date"),
+            F.countDistinct(when_sold(F.col("campaign_sk"))).alias("campaigns_touched"),
             F.countDistinct(when_status(CANCELLED, F.col("order_id"))).alias("cancelled_orders"),
             F.coalesce(F.sum(when_status(CANCELLED, F.col("cart_value"))), F.lit(0.0)).alias("cancelled_amount"),
             F.countDistinct(when_status(RETURNED, F.col("order_id"))).alias("returned_orders"),
@@ -333,13 +352,15 @@ def build_product_performance_mart(
             "member_type",
         )
         .agg(
-            F.coalesce(F.sum(when_status(COMPLETED, F.col("quantity"))), F.lit(0)).alias("units_sold"),
-            F.coalesce(F.sum(when_status(COMPLETED, F.col("line_amount"))), F.lit(0.0)).alias("total_revenue"),
-            F.avg(when_status(COMPLETED, F.col("unit_price"))).alias("avg_selling_price"),
-            F.countDistinct(when_status(COMPLETED, F.col("order_id"))).alias("order_count"),
-            F.countDistinct(when_status(COMPLETED, F.col("order_item_id"))).alias("order_item_count"),
-            F.min(when_status(COMPLETED, F.col("order_date"))).alias("first_sold_date"),
-            F.max(when_status(COMPLETED, F.col("order_date"))).alias("last_sold_date"),
+            F.coalesce(F.sum(when_sold(F.col("quantity"))), F.lit(0)).alias("units_sold"),
+            (F.coalesce(F.sum(when_sold(F.col("line_amount"))), F.lit(0.0)) - refunds()).alias("total_revenue"),
+            F.coalesce(F.sum(when_sold(F.col("line_amount"))), F.lit(0.0)).alias("net_sales"),
+            refunds().alias("refund_amount"),
+            F.avg(when_sold(F.col("unit_price"))).alias("avg_selling_price"),
+            F.countDistinct(when_sold(F.col("order_id"))).alias("order_count"),
+            F.countDistinct(when_sold(F.col("order_item_id"))).alias("order_item_count"),
+            F.min(when_sold(F.col("order_date"))).alias("first_sold_date"),
+            F.max(when_sold(F.col("order_date"))).alias("last_sold_date"),
             F.coalesce(F.sum(when_status(CANCELLED, F.col("quantity"))), F.lit(0)).alias("cancelled_units"),
             F.coalesce(F.sum(when_status(RETURNED, F.col("quantity"))), F.lit(0)).alias("returned_units"),
             F.coalesce(F.sum(when_status(RETURNED, F.col("line_amount"))), F.lit(0.0)).alias("returned_amount"),
@@ -442,23 +463,31 @@ def validate_marts(
     mart_product_performance: DataFrame,
     mart_marketing_funnel: DataFrame,
 ) -> Dict[str, object]:
-    # Revenue is that of completed orders. Every mart has a row for the
+    # Revenue is that of the orders that were not cancelled, less refunds. Every mart has a row for the
     # unknown and for the invalid-reference member, so each mart total equals
     # the fact total: nothing is left out of a mart.
-    sold_orders = fact_orders.filter(F.col("order_status") == COMPLETED)
-    all_completed_revenue = get_sum(sold_orders, "cart_value")
+    sold_orders = fact_orders.filter(F.col("order_status") != CANCELLED)
+    order_refunds = get_sum(fact_orders, "refund_amount")
+    # Revenue: the net value of the orders that were not cancelled, less refunds.
+    all_completed_revenue = get_sum(sold_orders, "cart_value") - order_refunds
     fact_order_revenue = all_completed_revenue
     campaign_order_revenue = all_completed_revenue
     campaign_mart_revenue = get_sum(mart_campaign_performance, "total_revenue")
     clv_mart_revenue = get_sum(mart_customer_lifetime_value, "total_revenue")
 
     sold_items = fact_order_items.join(sold_orders.select("order_id"), "order_id", "left_semi")
-    fact_item_revenue = get_sum(sold_items, "line_amount")
+    item_refunds = get_sum(fact_order_items, "refund_amount")
+    fact_item_revenue = get_sum(sold_items, "line_amount") - item_refunds
     product_mart_revenue = get_sum(mart_product_performance, "total_revenue")
 
     fact_spend = get_sum(fact_campaign_spend, "spend_amount")
     campaign_mart_spend = get_sum(mart_campaign_performance, "total_spend")
     not_sold = get_sum(fact_orders.filter(F.col("order_status") != COMPLETED), "cart_value")
+    mart_refunds = {
+        "campaign": get_sum(mart_campaign_performance, "refund_amount"),
+        "customer": get_sum(mart_customer_lifetime_value, "refund_amount"),
+        "product": get_sum(mart_product_performance, "refund_amount"),
+    }
     mart_not_sold = (get_sum(mart_customer_lifetime_value, "cancelled_amount")
                      + get_sum(mart_customer_lifetime_value, "returned_amount"))
     valid_customer_not_sold = not_sold
@@ -476,6 +505,9 @@ def validate_marts(
         "campaign_spend_reconciles_to_fact_campaign_spend": abs(fact_spend - campaign_mart_spend) <= tolerance,
         "clv_cancelled_and_returned_reconcile_to_fact_orders": abs(valid_customer_not_sold - mart_not_sold) <= tolerance,
         "product_units_reconcile_to_fact_order_items": abs(sold_units - product_mart_units) <= tolerance,
+        "campaign_refunds_reconcile_to_fact_orders": abs(order_refunds - mart_refunds["campaign"]) <= tolerance,
+        "clv_refunds_reconcile_to_fact_orders": abs(order_refunds - mart_refunds["customer"]) <= tolerance,
+        "product_refunds_reconcile_to_fact_order_items": abs(item_refunds - mart_refunds["product"]) <= tolerance,
         "campaign_mart_has_rows": get_count(mart_campaign_performance) > 0,
         "clv_mart_has_rows": get_count(mart_customer_lifetime_value) > 0,
         "product_mart_has_rows": get_count(mart_product_performance) > 0,
@@ -487,13 +519,17 @@ def validate_marts(
         "checks": checks,
         "metrics": {
             "completed_order_revenue": all_completed_revenue,
+            "order_refunds": order_refunds,
+            "item_refunds": item_refunds,
             "cancelled_and_returned_order_amount": not_sold,
             "fact_order_revenue": fact_order_revenue,
             "campaign_fact_order_revenue": campaign_order_revenue,
             "unknown_or_invalid_campaign_order_revenue": all_completed_revenue
-            - get_sum(with_valid_member(sold_orders, "campaign_sk"), "cart_value"),
+            - (get_sum(with_valid_member(sold_orders, "campaign_sk"), "cart_value")
+               - get_sum(with_valid_member(fact_orders, "campaign_sk"), "refund_amount")),
             "invalid_customer_order_revenue": all_completed_revenue
-            - get_sum(with_valid_member(sold_orders, "customer_sk"), "cart_value"),
+            - (get_sum(with_valid_member(sold_orders, "customer_sk"), "cart_value")
+               - get_sum(with_valid_member(fact_orders, "customer_sk"), "refund_amount")),
             "campaign_mart_revenue": campaign_mart_revenue,
             "clv_mart_revenue": clv_mart_revenue,
             "fact_item_revenue": fact_item_revenue,

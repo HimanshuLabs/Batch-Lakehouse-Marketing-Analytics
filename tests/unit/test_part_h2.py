@@ -429,16 +429,17 @@ def test_a_build_refuses_to_leave_a_consumer_view_on_the_old_warehouse(pg, tmp_p
 
 BAD_REFERENCES = """
 INSERT INTO staging.stg_gold_fact_orders_scd2 VALUES
-    (3, 99, 77, '2026-06-11 10:00', 300.00, 'UPI', '2026-06-18', 'completed', 54.00, 499.00, 853.00),
-    (4, 7, 5, '2026-06-12 10:00', 150.00, 'UPI', '2026-06-18', 'cancelled', 27.00, 499.00, 676.00),
-    (5, 7, 5, '2026-06-13 10:00', 50.00, 'UPI', '2026-06-18', 'returned', 9.00, 499.00, 558.00);
+    (3, 99, 77, '2026-06-11 10:00', 300.00, 'UPI', '2026-06-18', 'completed', 54.00, 499.00, 853.00, '2026-06-11 10:00', 0),
+    (4, 7, 5, '2026-06-12 10:00', 150.00, 'UPI', '2026-06-18', 'cancelled', 27.00, 499.00, 676.00, '2026-06-12 10:30', 0),
+    (5, 7, 5, '2026-06-13 10:00', 50.00, 'UPI', '2026-06-18', 'returned', 9.00, 499.00, 558.00, '2026-06-15 10:00', 50.00);
 INSERT INTO staging.stg_gold_fact_order_items_scd2 VALUES
-    (30, 3, 44, 3, 120.00, 100.00, 300.00, '2026-06-18'), (40, 4, 4, 1, 150.00, 150.00, 150.00, '2026-06-18'),
-    (50, 5, 4, 1, 50.00, 50.00, 50.00, '2026-06-18');
+    (30, 3, 44, 3, 120.00, 100.00, 300.00, '2026-06-18', 0), (40, 4, 4, 1, 150.00, 150.00, 150.00, '2026-06-18', 0),
+    (50, 5, 4, 1, 50.00, 50.00, 50.00, '2026-06-18', 50.00);
 INSERT INTO staging.stg_gold_fact_campaign_spend_scd2 VALUES
     (3, 77, 'google', '2026-06-10', 80.00, 2000, 40, '2026-06-18', 4, 900.00, 'India', 'Kerala', 80.00);
 INSERT INTO staging.stg_gold_fact_web_events VALUES
-    ('e3', 's3', 99, 44, 77, '2026-06-11 09:55', 'purchase', 'google', 300.00, '2026-06-18');
+    ('e3', 's3', 99, 44, 77, '2026-06-11 09:55', 'purchase', 'google', 300.00, '2026-06-18'),
+    ('e5', 's5', 7, 4, 5, '2026-06-13 09:55', 'purchase', 'facebook', 50.00, '2026-06-18');
 """
 NOW_VALID = """
 INSERT INTO staging.stg_gold_dim_customers_scd2 VALUES (99, 'Ravi', '1900-01-01', '9999-12-31', true, '2026-06-20');
@@ -473,7 +474,7 @@ def test_a_fact_with_a_bad_reference_is_kept_and_resolves_once_the_dimension_row
                       "event": (-1, -1, -1, "99", "44", "77"), "conversion": (-1, -1, -1)}
     assert pg.execute("SELECT (SELECT count(*) FROM warehouse.fact_orders), (SELECT count(*) FROM warehouse.fact_order_items), "
                       "(SELECT count(*) FROM warehouse.fact_campaign_spend), (SELECT count(*) FROM warehouse.fact_web_events)"
-                      ).fetchone() == (5, 5, 3, 3), "no fact is rejected or dropped"
+                      ).fetchone() == (5, 5, 3, 4), "no fact is rejected or dropped"
     assert pg.execute("SELECT to_regclass('audit.fact_web_events_rejects')").fetchone()[0] is None
     # A missing key is the unknown member (0), not the invalid one: order 2 is organic.
     assert pg.execute("SELECT campaign_sk, campaign_id FROM warehouse.fact_orders WHERE order_id = '2'").fetchone() == (0, "UNKNOWN")
@@ -495,33 +496,34 @@ def test_a_fact_with_a_bad_reference_is_kept_and_resolves_once_the_dimension_row
     assert versions == {"customer_dimension_versions": "(2,2)", "product_dimension_versions": "(1,1)",
                         "campaign_dimension_versions": "(1,1)"}
 
-    # Revenue counts completed orders only, and the revenue of the order with
-    # the bad references is not lost: it is in the daily mart.
+    # A sale is an order that was not cancelled (K1): the returned order 5 is a
+    # sale of 50 with a refund of 50. The revenue of the order with the bad
+    # references is not lost: it is in the daily mart.
     daily = pg.execute("SELECT sum(order_count), sum(net_revenue), sum(tax_amount), sum(shipping_amount), sum(total_amount), "
                        "sum(cancelled_order_count), sum(cancelled_amount), sum(returned_order_count), sum(returned_amount) "
                        "FROM marts.mart_revenue_daily").fetchone()
-    assert [float(value) for value in daily] == [3, 600.0, 108.0, 998.0, 1706.0, 1, 150.0, 1, 50.0]
+    assert [float(value) for value in daily] == [4, 650.0, 117.0, 1497.0, 2264.0, 1, 150.0, 1, 50.0]
     customer = pg.execute("SELECT total_order_count, lifetime_value, cancelled_order_count, cancelled_amount, "
                           "returned_order_count, returned_amount, total_units_purchased FROM marts.mart_customer_360 "
                           "WHERE customer_id = '7'").fetchone()
-    assert [float(value) for value in customer] == [2, 300.0, 1, 150.0, 1, 50.0, 3]
+    assert [float(value) for value in customer] == [3, 300.0, 1, 150.0, 1, 50.0, 4]
     campaign = pg.execute("SELECT order_count, attributed_revenue, cancelled_order_count, returned_order_count, "
                           "ad_platform_conversions, platform_attributed_revenue, campaign_type "
                           "FROM marts.mart_campaign_performance WHERE campaign_id = '5'").fetchone()
-    assert campaign[:6] == (1, 200, 1, 1, 3, 450) and campaign[6] == "conversion"
+    assert campaign[:6] == (2, 200, 1, 1, 3, 450) and campaign[6] == "conversion"
     product = pg.execute("SELECT units_sold, product_revenue, cancelled_units, returned_units, returned_amount, brand, "
                          "product_status FROM marts.mart_product_sales WHERE product_id = '4'").fetchone()
-    assert product == (3, 300, 1, 1, 50, "Voltix", "active")
+    assert product == (4, 300, 1, 1, 50, "Voltix", "active")
     # J3: every mart has a flagged row for the unknown and for the invalid-reference
     # member, so it ties out to the facts: the 300 of order 3 is on the invalid row.
     assert pg.execute("SELECT customer_id, member_type, lifetime_value, total_units_purchased FROM marts.mart_customer_360 "
-                      "ORDER BY 1").fetchall() == [("7", "known", 300, 3), ("INVALID", "invalid_reference", 300, 3),
+                      "ORDER BY 1").fetchall() == [("7", "known", 300, 4), ("INVALID", "invalid_reference", 300, 3),
                                                    ("UNKNOWN", "unknown_member", 0, 0)]
     assert pg.execute("SELECT campaign_id, member_type, attributed_revenue, total_spend FROM marts.mart_campaign_performance "
                       "ORDER BY 1").fetchall() == [("5", "known", 200, 50), ("INVALID", "invalid_reference", 300, 80),
                                                    ("UNKNOWN", "unknown_member", 100, 0)]
     assert pg.execute("SELECT product_id, member_type, product_revenue, units_sold FROM marts.mart_product_sales "
-                      "ORDER BY 1").fetchall() == [("4", "known", 300, 3), ("INVALID", "invalid_reference", 300, 3),
+                      "ORDER BY 1").fetchall() == [("4", "known", 300, 4), ("INVALID", "invalid_reference", 300, 3),
                                                    ("UNKNOWN", "unknown_member", 0, 0)]
     ties = dict(pg.execute("SELECT check_name, status FROM audit.mart_validation_report").fetchall())
     assert {ties[name] for name in ("customer_lifetime_value_matches_fact_orders", "campaign_revenue_matches_fact_orders",
@@ -585,7 +587,7 @@ def test_timestamps_are_instants_and_do_not_depend_on_the_session_time_zone(pg, 
     pg.execute("DROP SCHEMA staging CASCADE; CREATE SCHEMA staging")
     pg.execute(STAGING_ROWS)
     # An order at 00:30 IST on 11 May (19:00 UTC on the 10th).
-    pg.execute("UPDATE staging.stg_gold_fact_orders_scd2 SET order_timestamp = '2026-05-10 19:00' WHERE order_id = 1")
+    pg.execute("UPDATE staging.stg_gold_fact_orders_scd2 SET order_timestamp = '2026-05-10 19:00', status_timestamp = '2026-05-10 19:00' WHERE order_id = 1")
     build(tmp_path)
 
     naive = pg.execute("SELECT table_schema, table_name, column_name FROM information_schema.columns "

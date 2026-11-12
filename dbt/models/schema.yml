@@ -42,6 +42,9 @@ sources:
       - name: mart_product_sales
       - name: mart_revenue_daily
       - name: mart_marketing_funnel
+      - name: mart_customer_daily_snapshot
+      - name: mart_product_daily_snapshot
+      - name: mart_campaign_daily_snapshot
 
   - name: warehouse_audit
     description: "Audit schema containing reconciliation and warehouse trust checks."
@@ -313,6 +316,36 @@ models:
     description: "Daily revenue BI mart for trend reporting."
     columns:
       - name: revenue_date
+        tests:
+          - not_null
+
+  - name: mart_customer_daily_snapshot
+    description: "mart_customer_360 as of the end of each business date, from each customer's first activity: computed only from what was known on that date."
+    columns:
+      - name: snapshot_date
+        tests:
+          - not_null
+      - name: customer_id
+        tests:
+          - not_null
+
+  - name: mart_product_daily_snapshot
+    description: "mart_product_sales as of the end of each business date, from each product's first activity: computed only from what was known on that date."
+    columns:
+      - name: snapshot_date
+        tests:
+          - not_null
+      - name: product_id
+        tests:
+          - not_null
+
+  - name: mart_campaign_daily_snapshot
+    description: "mart_campaign_performance as of the end of each business date, from each campaign's first activity: computed only from what was known on that date."
+    columns:
+      - name: snapshot_date
+        tests:
+          - not_null
+      - name: campaign_id
         tests:
           - not_null
 

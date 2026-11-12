@@ -75,14 +75,15 @@ INSERT INTO staging.stg_gold_dim_campaigns_scd2 VALUES
     (5, 'Summer', 'facebook', '1900-01-01', '9999-12-31', true, '2026-03-01', 'conversion');
 CREATE TABLE staging.stg_gold_fact_orders_scd2 (order_id int, customer_id int, campaign_id int,
     order_timestamp timestamp, cart_value numeric, payment_method text, ingestion_date date,
-    order_status text, tax_amount numeric, shipping_amount numeric, total_amount numeric);
+    order_status text, tax_amount numeric, shipping_amount numeric, total_amount numeric,
+    status_timestamp timestamp, refund_amount numeric);
 INSERT INTO staging.stg_gold_fact_orders_scd2 VALUES
-    (1, 7, 5, '2026-05-10 10:00', 200.00, 'UPI', '2026-05-18', 'completed', 36.00, 0.00, 236.00),
-    (2, 7, NULL, '2026-06-10 10:00', 100.00, 'COD', '2026-06-18', 'completed', 18.00, 499.00, 617.00);
+    (1, 7, 5, '2026-05-10 10:00', 200.00, 'UPI', '2026-05-18', 'completed', 36.00, 0.00, 236.00, '2026-05-10 10:00', 0),
+    (2, 7, NULL, '2026-06-10 10:00', 100.00, 'COD', '2026-06-18', 'completed', 18.00, 499.00, 617.00, '2026-06-10 10:00', 0);
 CREATE TABLE staging.stg_gold_fact_order_items_scd2 (order_item_id int, order_id int, product_id int, quantity int,
-    original_price numeric, discounted_price numeric, line_amount numeric, ingestion_date date);
+    original_price numeric, discounted_price numeric, line_amount numeric, ingestion_date date, refund_amount numeric);
 INSERT INTO staging.stg_gold_fact_order_items_scd2 VALUES
-    (10, 1, 4, 2, 120.00, 100.00, 200.00, '2026-05-18'), (20, 2, 4, 1, 120.00, 100.00, 100.00, '2026-06-18');
+    (10, 1, 4, 2, 120.00, 100.00, 200.00, '2026-05-18', 0), (20, 2, 4, 1, 120.00, 100.00, 100.00, '2026-06-18', 0);
 CREATE TABLE staging.stg_gold_fact_campaign_spend_scd2 (spend_id int, campaign_id int, traffic_source text,
     spend_date date, spend_amount numeric, impressions bigint, clicks bigint, ingestion_date date,
     conversions bigint, attributed_revenue numeric, country text, state text, campaign_day_spend numeric);
@@ -546,8 +547,8 @@ def test_every_database_test_uses_the_one_gate_and_ci_runs_them_in_both_time_zon
                  if path.name != "conftest.py" and re.search(r"environ\.get\(.P2_F_SANDBOX.\)", path.read_text(encoding="utf-8"))]
     assert own_gates == [], "a private skip rule would not fail in CI"
     gated = [path.name for path in (tests / "unit").glob("test_*.py") if "require_sandbox_database()" in path.read_text(encoding="utf-8")]
-    assert sorted(gated) == ["test_generator_sessions_budgets.py", "test_part_f.py", "test_part_g.py", "test_part_h.py",
-                             "test_part_h2.py"]
+    assert sorted(gated) == ["test_generator_sessions_budgets.py", "test_order_lifecycle.py", "test_part_f.py",
+                             "test_part_g.py", "test_part_h.py", "test_part_h2.py"]
 
     workflow = (CODE_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     unit_job = workflow[workflow.index("\n  unit:\n"):workflow.index("\n  integration:\n")]
@@ -597,7 +598,7 @@ def test_the_dbt_counts_in_the_docs_are_the_projects_and_explain_the_grant_hook(
     singular = len(list((dbt / "tests").glob("*.sql")))
     tests = in_yaml + singular
     hooks = list_items(dbt / "dbt_project.yml", "on-run-end")
-    assert (models, tests, hooks) == (21, 74, 1)
+    assert (models, tests, hooks) == (24, 80, 1)
 
     readme = (CODE_ROOT / "README.md").read_text(encoding="utf-8")
     state = (CODE_ROOT / "docs" / "warehouse" / "airflow_working_state.md").read_text(encoding="utf-8")

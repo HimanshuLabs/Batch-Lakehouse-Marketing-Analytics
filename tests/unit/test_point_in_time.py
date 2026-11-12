@@ -158,9 +158,9 @@ def write_project(spark, root, orders: list[tuple], items: list[tuple],
             .write.mode("overwrite").partitionBy("processed_date").parquet(str(silver / name))
 
     silver_table("silver_orders", spark.createDataFrame(
-        [(o, c, k, t, "UPI", totals[o], 0.1, "India", "Pune") for o, c, k, t in orders],
+        [(o, c, k, t, "UPI", totals[o], 0.1, "India", "Pune", 0.0) for o, c, k, t in orders],
         "order_id int, user_id int, campaign_id int, order_timestamp string, payment_method string, "
-        "cart_value double, fraud_score double, country string, city string",
+        "cart_value double, fraud_score double, country string, city string, refund_amount double",
     ).withColumn("order_timestamp", F.to_timestamp("order_timestamp")))
     silver_table("silver_order_items", spark.createDataFrame(
         [(i, o, p, "Speaker", "Fitness", 1, 100.0, 0.0, 100.0, 100.0) for i, o, p in items],

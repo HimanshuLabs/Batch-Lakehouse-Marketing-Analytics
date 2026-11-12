@@ -28,7 +28,7 @@ This project demonstrates practical Data Engineering and Analytics Engineering c
 | Historical correctness | SCD Type 2 customer/product/campaign dimensions and point-in-time fact joins |
 | Reproducibility | Deterministic, incremental batches; reruns of a batch leave the lake and the warehouse unchanged |
 | BI readiness | Revenue, campaign, product, customer, and funnel marts built for reporting |
-| Analytics engineering | 21 dbt models and 74 dbt tests, docs, lineage, and exposures |
+| Analytics engineering | 24 dbt models and 80 dbt tests, docs, lineage, and exposures |
 | Orchestration | One Airflow 3 DAG of 20 tasks covering lakehouse, warehouse, dbt, and reporting |
 | Reporting | Power BI Online dashboard assets, screenshots, CSV exports, and refresh flow documentation |
 | Infrastructure | Terraform for the S3 layer that serves the Power BI CSVs |
@@ -261,11 +261,17 @@ mart_marketing_funnel            mart_marketing_funnel_scd2
 
 The `_scd2` facts join each row to the dimension version that was valid at the event time. A fact is never dropped because its dimension reference is bad. A missing key (an organic order has no campaign) is the unknown member. A key that is present but has no valid dimension row, for example a campaign that Silver quarantined, is the invalid-reference member (`INVALID` in Gold, key `-1` in the warehouse): the fact is kept with its own natural ID and resolves to the real member as soon as the dimension row is valid. A fact is rejected to `data/quarantine/` only for its own defect, such as an item whose order does not exist. The point-in-time report counts the invalid references per fact and key and checks that Silver rows = valid rows + rejected rows.
 
-**Real source attributes.** The generator delivers, and every layer carries: an order's status (`completed`, `cancelled`, `returned`), tax (18% of the net value), shipping (free from INR 4,999, else INR 99) and `total_amount` (`net + tax + shipping`, the same name and meaning in Silver, Gold, the warehouse, the marts and the exports; the net value is `cart_value` in the lake and `net_revenue` in the warehouse); the ad platform's feed per campaign, day and region (spend, impressions, clicks, and the platform's own conversions and attributed revenue, related by realistic cost per click, click-through rate and return on ad spend); a product's brand and status (`active`, `discontinued`; a status change opens a new SCD2 version); and a campaign's objective (`campaign_type`: awareness, consideration, conversion, retention). Silver validates each one, and each batch contains one deliberately dirty row per attribute that must be quarantined. Only a completed order is a sale: revenue, order counts, average order value, lifetime value, attributed revenue and units in every mart count completed orders, and the marts show cancelled and returned orders in columns of their own.
+**Real source attributes.** The generator delivers, and every layer carries: an order's status (`completed`, `cancelled`, `returned`), tax (18% of the net value), shipping (free from INR 4,999, else INR 99) and `total_amount` (`net + tax + shipping`, the same name and meaning in Silver, Gold, the warehouse, the marts and the exports; the net value is `cart_value` in the lake and `net_revenue` in the warehouse); the ad platform's feed per campaign, day and region (spend, impressions, clicks, and the platform's own conversions and attributed revenue, related by realistic cost per click, click-through rate and return on ad spend); a product's brand and status (`active`, `discontinued`; a status change opens a new SCD2 version); and a campaign's objective (`campaign_type`: awareness, consideration, conversion, retention). Silver validates each one, and each batch contains one deliberately dirty row per attribute that must be quarantined. The marts show cancelled and returned orders in columns of their own.
+
+**Order lifecycle and refunds.** An order is placed at `order_timestamp`. A cancelled order has a cancellation time within hours; a returned order has a return time 2 to 20 days later and a refund, full or partial. `status_timestamp` is when the current status took effect and `refund_amount` is what was refunded; `updated_at` is when the source last changed the order. A batch knows only what had happened by the end of its day, so an order that is cancelled or returned later is first delivered as `completed`, and the batch that covers the change delivers the order again with its new status and a later `updated_at`, as an order system does. Silver keeps the latest version of each order (by `updated_at`, then the later batch) and quarantines impossible lifecycles: a return before the order, a refund above the order's net value, a refund on an order that was not returned. Gold and the warehouse carry `order_status`, `status_timestamp` and `refund_amount`; an order's refund is split over its items in whole paise (`fact_order_items.refund_amount`).
+
+**Revenue with refunds.** A sale is an order that was not cancelled, recognised on the order date. A refund is recognised on the date of the return. `mart_revenue_daily` shows `gross_revenue`, `discount_amount`, `net_revenue` (sales), `refund_amount` and `net_revenue_after_refunds` per business date; its returned orders and amounts are those of the date of the return. The customer, campaign and product marts use the same definitions: `net_sales`, `refund_amount`, and `lifetime_value`, `attributed_revenue` and `product_revenue` as net sales less refunds. The reconciliation and the mart validation require the refunds in every mart to equal the refunds in the facts exactly.
+
+**Daily snapshots (no leakage).** `marts.mart_customer_daily_snapshot`, `marts.mart_product_daily_snapshot` and `marts.mart_campaign_daily_snapshot` have one row per entity and business date, from the entity's first activity to the last date in the data. A row holds the columns of the lifetime mart (`mart_customer_360`, `mart_product_sales`, `mart_campaign_performance`) as they were at the end of `snapshot_date`: orders placed up to that date, each order's status as of that date (an order returned later is still a completed sale), refunds up to it, spend and web events up to it, and the dimension versions in force on it. `days_since_last_order` is counted to `snapshot_date`. Each snapshot is built by running the lifetime mart's own query on as-of copies of the facts, so a measure has one definition, and the build checks that the last date's snapshot equals the lifetime mart. For a time-based split, take features from the snapshot at the cutoff date and outcomes from what happened after it; the lifetime marts contain the whole history and must not be used as features for a past date. The snapshots are in the consumer contract as available relations and in dbt.
 
 **Regional ad spend.** Each campaign targets two to five states. `fact_campaign_spend` has one row per campaign, day and region; a campaign's spend, and what is compared with its budget, is the sum over its regions. Each feed row repeats the platform's total for the campaign-day, and a reconciliation check requires the regional rows to sum to it. Spend and return on ad spend by channel and by region are two queries at the end of `sql/warehouse/dashboard_query_pack.sql`; the route B exports of the spend and order facts carry the same columns. Product prices are in a realistic INR range per category and most order lines are one unit, so the average order value is a few thousand rupees and platform and warehouse ROAS are both in single digits.
 
-**Marts tie out.** Every mart has one row for the unknown member and one for the invalid-reference member, flagged in `member_type` (`known`, `unknown_member`, `invalid_reference`); filter `member_type = 'known'` for real customers, products or campaigns only. With those rows each mart's completed-order revenue, spend and units equal the fact totals, and the mart validation checks exactly that.
+**Marts tie out.** Every mart has one row for the unknown member and one for the invalid-reference member, flagged in `member_type` (`known`, `unknown_member`, `invalid_reference`); filter `member_type = 'known'` for real customers, products or campaigns only. With those rows each mart's revenue (sales less refunds), refunds, spend and units equal the fact totals, and the mart validation checks exactly that.
 
 **Consumer contract.** `tests/integration/test_warehouse.py` records every relation and column that Project 4 and Project 5 read (name, type, grain, key) and the integration run asserts it: adding a column is free; removing, renaming or retyping a recorded one, emptying the relation or breaking its key fails the run.
 
@@ -324,7 +330,7 @@ docs/warehouse/runbook.md
 
 ## 10. dbt Analytics Engineering Layer
 
-The dbt layer organizes warehouse models, marts, tests, docs, lineage, and dashboard exposures: 21 models and 74 tests.
+The dbt layer organizes warehouse models, marts, tests, docs, lineage, and dashboard exposures: 24 models and 80 tests.
 
 Main dbt areas:
 
@@ -354,13 +360,13 @@ cp dbt/profiles.yml.example dbt/profiles.yml   # git-ignored; reads WAREHOUSE_DB
 cd dbt
 ../venv-dbt/bin/dbt debug --profiles-dir .
 ../venv-dbt/bin/dbt parse --profiles-dir . --no-partial-parse
-../venv-dbt/bin/dbt run --profiles-dir .              # 21 models: PASS=22
-../venv-dbt/bin/dbt test --profiles-dir .             # 74 tests:  PASS=75
+../venv-dbt/bin/dbt run --profiles-dir .              # 24 models: PASS=25
+../venv-dbt/bin/dbt test --profiles-dir .             # 80 tests:  PASS=81
 ../venv-dbt/bin/dbt docs generate --profiles-dir .
 cd ..
 ```
 
-dbt's `PASS=` total is one more than the 21 models or the 74 tests (71 in `schema.yml`, 3 in `dbt/tests/`). The extra result is the project's `on-run-end` hook in `dbt/dbt_project.yml`, which grants the read-only role `p2_reader` USAGE on the dbt schemas; dbt runs it at the end of both `dbt run` and `dbt test` and counts it.
+dbt's `PASS=` total is one more than the 24 models or the 80 tests (77 in `schema.yml`, 3 in `dbt/tests/`). The extra result is the project's `on-run-end` hook in `dbt/dbt_project.yml`, which grants the read-only role `p2_reader` USAGE on the dbt schemas; dbt runs it at the end of both `dbt run` and `dbt test` and counts it.
 
 Keep `dbt/profiles.yml` in place: the DAG's dbt tasks need it. `dbt/target/`, `dbt/logs/`, and `dbt/profiles.yml` are git-ignored.
 
@@ -810,7 +816,7 @@ ORDER BY status;
 "
 ```
 
-Expected: `PASS | 27`.
+Expected: `PASS | 29`.
 
 ### Warehouse marts
 

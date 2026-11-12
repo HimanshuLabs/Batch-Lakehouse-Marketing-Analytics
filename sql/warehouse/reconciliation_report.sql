@@ -917,13 +917,13 @@ BEGIN
     ---------------------------------------------------------------------------
     */
 
-    -- Revenue is that of completed orders; cancelled and returned orders are
-    -- in the mart's own columns, compared in the same check (see details).
+    -- Sales are the orders that were not cancelled (on their order date);
+    -- cancelled orders are in the mart's own column, compared in the same check.
     SELECT ROUND(COALESCE(SUM(net_revenue), 0)::NUMERIC, 2)
     INTO source_value
     FROM warehouse.fact_orders;
 
-    SELECT ROUND(COALESCE(SUM(net_revenue + cancelled_amount + returned_amount), 0)::NUMERIC, 2)
+    SELECT ROUND(COALESCE(SUM(net_revenue + cancelled_amount), 0)::NUMERIC, 2)
     INTO target_value
     FROM marts.mart_revenue_daily;
 
@@ -939,15 +939,15 @@ BEGIN
         target_value,
         0.01,
         checked_time,
-        'Compares the net value of every order in fact_orders to mart_revenue_daily net_revenue (completed orders) + cancelled_amount + returned_amount: no order is lost from the mart, whatever its status.'
+        'Compares the net value of every order in fact_orders to mart_revenue_daily net_revenue (orders that were not cancelled) + cancelled_amount: no order is lost from the mart, whatever its status.'
     );
 
-    SELECT ROUND(COALESCE(SUM(foi.line_revenue), 0)::NUMERIC, 2)
+    SELECT ROUND((COALESCE(SUM(foi.line_revenue) FILTER (WHERE fo.order_status <> 'cancelled'), 0)
+                  - COALESCE(SUM(foi.refund_amount), 0))::NUMERIC, 2)
     INTO source_value
     FROM warehouse.fact_order_items foi
     JOIN warehouse.fact_orders fo
-        ON fo.order_sk = foi.order_sk
-       AND fo.order_status = 'completed';
+        ON fo.order_sk = foi.order_sk;
 
     SELECT ROUND(COALESCE(SUM(product_revenue), 0)::NUMERIC, 2)
     INTO target_value
@@ -965,7 +965,62 @@ BEGIN
         target_value,
         0.01,
         checked_time,
-        'Compares fact_order_items.line_revenue to mart_product_sales.product_revenue, for the items of completed orders. The mart has a row for the unknown and for the invalid-reference product member, so it ties out to the fact in full.'
+        'Compares fact_order_items.line_revenue to mart_product_sales.product_revenue, for the items of orders that were not cancelled, less the item refunds. The mart has a row for the unknown and for the invalid-reference product member, so it ties out to the fact in full.'
+    );
+
+    /*
+    ---------------------------------------------------------------------------
+    Refunds
+    ---------------------------------------------------------------------------
+    A refund is an amount on a returned order. The point-in-time job splits
+    it over the order's items; for every order with loaded items the item
+    refunds must sum to exactly the order's refund. And the refunds the daily
+    mart shows (on their return dates) are the refunds of the fact.
+    */
+
+    SELECT COUNT(*)::NUMERIC
+    INTO target_value
+    FROM (
+        SELECT fo.order_sk
+        FROM warehouse.fact_orders fo
+        JOIN warehouse.fact_order_items foi ON foi.order_sk = fo.order_sk
+        GROUP BY fo.order_sk, fo.refund_amount
+        HAVING SUM(foi.refund_amount) <> fo.refund_amount
+    ) mismatched;
+
+    PERFORM audit.record_reconciliation_check(
+        run_id,
+        'Item refunds sum to their order refund',
+        'Warehouse integrity',
+        'expected zero orders whose item refunds do not sum to the order refund',
+        'warehouse.fact_order_items',
+        'orders_with_item_refunds_not_summing',
+        'COUNT',
+        0,
+        target_value,
+        0,
+        checked_time,
+        format('Checked %s returned orders with loaded items.',
+               (SELECT COUNT(DISTINCT fo.order_sk) FROM warehouse.fact_orders fo
+                JOIN warehouse.fact_order_items foi ON foi.order_sk = fo.order_sk WHERE fo.order_status = 'returned'))
+    );
+
+    SELECT COALESCE(SUM(refund_amount), 0)::NUMERIC INTO source_value FROM warehouse.fact_orders;
+    SELECT COALESCE(SUM(refund_amount), 0)::NUMERIC INTO target_value FROM marts.mart_revenue_daily;
+
+    PERFORM audit.record_reconciliation_check(
+        run_id,
+        'Mart refunds equal warehouse fact_orders refunds',
+        'Mart-to-fact amount',
+        'warehouse.fact_orders',
+        'marts.mart_revenue_daily',
+        'refund_amount',
+        'AMOUNT',
+        source_value,
+        target_value,
+        0,
+        checked_time,
+        'Refunds are recognised on the return date. The daily mart total equals the fact total exactly; the customer, campaign and product marts are compared in the mart validation.'
     );
 
     /*
