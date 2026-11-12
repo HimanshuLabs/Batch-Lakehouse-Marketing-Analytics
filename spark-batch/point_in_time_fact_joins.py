@@ -50,20 +50,25 @@ OUTPUT_PATHS = {
     "fact_campaign_spend": GOLD_DIR / "fact_campaign_spend_scd2",
 }
 
-# Every fact key is resolved into exactly one of these. in_range and
-# unknown_member facts are valid; the others are rejected with an exact
-# per-key reason.
+# Every fact key is resolved into exactly one of these. in_range,
+# unknown_member and invalid_reference facts are valid: a fact is never
+# dropped for a bad dimension reference. no_key rejects the fact with an exact
+# per-key reason (its own defect), and no_version_for_time fails the job.
 #   in_range              a dimension version covers the fact time
 #   unknown_member        the fact key is NULL and the join maps NULL to the
 #                         unknown member (only an order's campaign: an organic
 #                         order has no campaign); the surrogate key is 'UNKNOWN'
 #   no_key                the fact key is NULL (any other join)
-#   key_not_in_dimension  the key is in no dimension version
+#   invalid_reference     the key is present but in no dimension version (the
+#                         dimension row was quarantined, or never delivered).
+#                         The fact is kept: it takes the invalid-reference
+#                         member's key and keeps its natural ID, so it resolves
+#                         to the real member once the dimension row is valid.
 #   no_version_for_time   the key exists but no version covers the fact time.
 #                         Versions run from 1900-01-01 to 9999-12-31 without
 #                         gaps, so this means a corrupt dimension: the job fails.
-RESOLUTIONS = ["in_range", "unknown_member", "no_key", "key_not_in_dimension", "no_version_for_time"]
-VALID_RESOLUTIONS = ("in_range", "unknown_member")
+RESOLUTIONS = ["in_range", "unknown_member", "invalid_reference", "no_key", "no_version_for_time"]
+VALID_RESOLUTIONS = ("in_range", "unknown_member", "invalid_reference")
 
 # Business dates are Asia/Kolkata calendar days, like Gold (which derives them
 # in SOURCE_TIMEZONE). The session stays UTC and timestamps stay UTC; only a
@@ -78,6 +83,9 @@ def business_date(timestamp: Column) -> Column:
 # The unknown member's key and display label, the same as the warehouse's.
 UNKNOWN_KEY = "UNKNOWN"
 UNKNOWN_LABEL = "Unknown"
+# The invalid-reference member's key: a fact whose key is present but has no
+# valid dimension row. Distinct from the unknown member (no key at all).
+INVALID_KEY = "INVALID"
 
 ORDER_NOT_IN_FACT_REASON = "order not in fact_orders_scd2"
 
@@ -160,13 +168,14 @@ def normalize_orders(df: DataFrame) -> DataFrame:
     result = add_column_from_candidates(result, "customer_id", ["user_id"])
     result = add_column_from_candidates(result, "order_date", ["order_timestamp", "event_timestamp", "event_time", "processed_timestamp", "ingestion_timestamp"])
     result = add_column_from_candidates(result, "campaign_id", ["campaign"])
-    result = add_column_from_candidates(result, "total_amount", ["cart_value", "discounted_price"], 0.0)
-    result = add_column_from_candidates(result, "order_status", ["event_type"], "completed")
     result = add_column_from_candidates(result, "payment_method", [], UNKNOWN_LABEL)
     result = add_column_from_candidates(result, "region", ["state", "home_state", "city", "home_city"], UNKNOWN_LABEL)
 
     result = result.withColumn("order_date", F.to_timestamp(F.col("order_date")))
-    result = result.withColumn("total_amount", F.col("total_amount").cast("double"))
+    # cart_value is the order's net value (the sum of its lines) and the
+    # revenue the marts count; total_amount is what the customer was charged
+    # (net + tax + shipping), in every layer. Neither is derived here.
+    result = result.withColumn("cart_value", F.col("cart_value").cast("double"))
 
     return result.filter(F.col("order_id").isNotNull() & F.col("order_date").isNotNull())
 
@@ -284,11 +293,12 @@ def point_in_time_join(
             F.when(F.col(f"f.{fact_key}").isNull(), F.lit(null_key_resolution))
             .when(F.col(surrogate_key).isNotNull(), F.lit("in_range"))
             .when(F.col(f"k.known_{dim_key}").isNotNull(), F.lit("no_version_for_time"))
-            .otherwise(F.lit("key_not_in_dimension")),
+            .otherwise(F.lit("invalid_reference")),
         )
         .withColumn(
             surrogate_key,
             F.when(F.col(resolution_column(surrogate_key)) == "unknown_member", F.lit(UNKNOWN_KEY))
+            .when(F.col(resolution_column(surrogate_key)) == "invalid_reference", F.lit(INVALID_KEY))
             .otherwise(F.col(surrogate_key)),
         )
         .drop(f"known_{dim_key}")
@@ -299,7 +309,6 @@ def resolution_reason(surrogate_key: str, fact_key: str, fact_timestamp: str, di
     resolution = F.col(resolution_column(surrogate_key))
     return (
         F.when(resolution == "no_key", F.lit(f"{fact_key} is NULL"))
-        .when(resolution == "key_not_in_dimension", F.lit(f"{fact_key} not in {dim_name}"))
         .when(resolution == "no_version_for_time", F.lit(f"no {dim_name} version covers {fact_timestamp}"))
     )
 
@@ -334,6 +343,12 @@ def write_table(df: DataFrame, output_path: Path, partition_column: str | None =
         writer = writer.partitionBy(partition_column)
 
     writer.parquet(str(output_path))
+
+    # A partitioned write of zero rows leaves only _SUCCESS, which nothing can
+    # read back. A reject table is often empty now (a bad dimension reference
+    # no longer rejects a fact), so it gets one empty file carrying the schema.
+    if not any(output_path.rglob("*.parquet")):
+        df.limit(0).coalesce(1).write.mode("overwrite").parquet(str(output_path))
 
 
 def read_written(spark: SparkSession, path: Path, empty_like: DataFrame) -> DataFrame:
@@ -405,7 +420,7 @@ def order_total_check(
         F.sum("line_amount").alias("line_total"),
     )
     per_order = (
-        orders.select("order_id", F.col(order_amount_column).alias("order_total"))
+        orders.select("order_id", F.col(order_amount_column).alias("order_net"))
         .join(bronze, "order_id", "left")
         .join(lines, "order_id", "left")
         .withColumn(
@@ -417,8 +432,8 @@ def order_total_check(
                 F.lit("incomplete"),
             )
             .when(
-                F.col("order_total").isNull()
-                | (F.abs(F.col("order_total") - F.col("line_total")) > ORDER_TOTAL_TOLERANCE),
+                F.col("order_net").isNull()
+                | (F.abs(F.col("order_net") - F.col("line_total")) > ORDER_TOTAL_TOLERANCE),
                 F.lit("mismatched"),
             )
             .otherwise(F.lit("matched")),
@@ -807,7 +822,7 @@ def main() -> None:
                 read_written(spark, OUTPUT_PATHS["fact_orders"], valid_fact_orders),
                 read_written(spark, OUTPUT_PATHS["fact_order_items"], valid_fact_order_items),
                 read_parquet(spark, BRONZE_ORDER_ITEMS_PATH),
-                "total_amount",
+                "cart_value",
             )
         else:
             order_totals = {"status": "FAIL", "error": f"missing input: {BRONZE_ORDER_ITEMS_PATH}"}

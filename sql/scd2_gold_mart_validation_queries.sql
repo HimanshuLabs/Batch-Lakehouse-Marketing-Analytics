@@ -5,7 +5,7 @@
 
 SELECT
     'fact_orders_scd2' AS source_name,
-    SUM(total_amount) AS total_revenue
+    SUM(cart_value) FILTER (WHERE order_status = 'completed') AS total_revenue
 FROM fact_orders_scd2
 
 UNION ALL
@@ -20,7 +20,7 @@ FROM mart_campaign_performance_scd2;
 
 SELECT
     'fact_orders_scd2' AS source_name,
-    SUM(total_amount) AS total_revenue
+    SUM(cart_value) FILTER (WHERE order_status = 'completed') AS total_revenue
 FROM fact_orders_scd2
 
 UNION ALL
@@ -101,7 +101,6 @@ SELECT
     product_id,
     product_name,
     category,
-    brand,
     units_sold,
     total_revenue,
     avg_selling_price,

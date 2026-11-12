@@ -110,7 +110,7 @@ This proves the product drilldown path is using the product foreign-key index.
 
 ### Demo 3: Campaign Spend and ROAS Lookup
 
-This query chooses an active campaign from `warehouse.fact_campaign_spend`, then calculates spend, attributed revenue, and ROAS.
+This query chooses an active campaign from `warehouse.fact_campaign_spend`, then sums its spend, impressions, and clicks (the ad platform feed carries no revenue, so the table has no revenue column).
 
 Observed local proof:
 

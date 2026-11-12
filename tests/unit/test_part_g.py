@@ -21,7 +21,7 @@ import os
 
 import pytest
 
-from conftest import CODE_ROOT
+from conftest import CODE_ROOT, begin_build, build_step, require_sandbox_database, reset_sandbox
 
 SILVER_JOB = "spark-batch/silver_transformations.py"
 BRONZE_JOB = "spark-batch/bronze_ingestion.py"
@@ -182,17 +182,16 @@ def test_a_missing_staging_table_fails_the_warehouse_build():
 
 
 def test_a_missing_staging_table_fails_the_build_in_postgres():
-    if os.environ.get("P2_F_SANDBOX") != "1":
-        pytest.skip("requires the disposable PostgreSQL sandbox on localhost:5546")
+    require_sandbox_database()
     import psycopg
     with psycopg.connect(host="127.0.0.1", port=5546, user="project2", password="project2",
                          dbname="marketing_analytics", autocommit=True) as conn:
-        conn.execute("DROP SCHEMA IF EXISTS marts CASCADE; DROP SCHEMA IF EXISTS warehouse CASCADE; "
-                     "DROP SCHEMA IF EXISTS audit CASCADE; DROP SCHEMA IF EXISTS staging CASCADE; "
+        reset_sandbox(conn)
+        conn.execute(""
                      "CREATE SCHEMA staging")
-        sql = (CODE_ROOT / "sql" / "warehouse" / "create_warehouse_tables.sql").read_text(encoding="utf-8")
+        sql = begin_build() + build_step("create_warehouse_tables") + "COMMIT;"
         with pytest.raises(psycopg.errors.RaiseException, match="Missing staging table: no customer dimension"):
             conn.execute(sql)
-        conn.execute("ROLLBACK")  # the build's own BEGIN ... COMMIT was aborted
+        conn.execute("ROLLBACK")  # the build transaction was aborted
         assert conn.execute("SELECT to_regclass('warehouse.dim_customer')").fetchone()[0] is None, \
             "nothing is left behind: the build is one transaction"

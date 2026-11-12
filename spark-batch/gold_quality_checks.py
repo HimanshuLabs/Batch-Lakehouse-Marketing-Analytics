@@ -169,7 +169,7 @@ def order_total_check(
         F.sum("line_amount").alias("line_total"),
     )
     per_order = (
-        orders.select("order_id", F.col(order_amount_column).alias("order_total"))
+        orders.select("order_id", F.col(order_amount_column).alias("order_net"))
         .join(bronze, "order_id", "left")
         .join(lines, "order_id", "left")
         .withColumn(
@@ -181,8 +181,8 @@ def order_total_check(
                 F.lit("incomplete"),
             )
             .when(
-                F.col("order_total").isNull()
-                | (F.abs(F.col("order_total") - F.col("line_total")) > ORDER_TOTAL_TOLERANCE),
+                F.col("order_net").isNull()
+                | (F.abs(F.col("order_net") - F.col("line_total")) > ORDER_TOTAL_TOLERANCE),
                 F.lit("mismatched"),
             )
             .otherwise(F.lit("matched")),

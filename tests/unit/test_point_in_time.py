@@ -2,9 +2,11 @@
 
 P2-02 (fixed in fa6f11a): a fact with no covering dimension version silently
 took the current version's key. Every fact key now resolves explicitly to
-in_range / no_key / key_not_in_dimension / no_version_for_time; only in_range
-facts are valid, the rest are rejected with a reason, and no_version_for_time
-(a corrupt dimension) fails the job.
+in_range / unknown_member / invalid_reference / no_key / no_version_for_time.
+Part J: a key that is present but in no dimension version (invalid_reference)
+no longer rejects the fact; it is kept on the invalid-reference member. Only a
+missing required key (no_key) rejects a fact, and no_version_for_time (a
+corrupt dimension) fails the job.
 P2-05 (fixed in fa6f11a): order items whose order was rejected were filtered
 out silently; they are rejected with a reason, and the job checks that every
 Silver row is a valid fact or a reject.
@@ -98,11 +100,15 @@ def test_every_fact_key_resolves_exactly_once(spark, pit):
     rows = {row["order_id"]: row.asDict() for row in joined.collect()}
     assert joined.count() == 4, "the join must not drop or duplicate facts"
     assert {k: v["customer_sk_resolution"] for k, v in rows.items()} == {
-        1: "in_range", 2: "no_key", 3: "key_not_in_dimension", 4: "no_version_for_time",
+        1: "in_range", 2: "no_key", 3: "invalid_reference", 4: "no_version_for_time",
     }
+    # A key that is present but in no dimension version: the fact is kept on the
+    # invalid-reference member, with its natural ID.
+    assert (rows[3]["customer_sk"], rows[3]["customer_id"]) == ("INVALID", 999999)
+    assert pit.INVALID_KEY == "INVALID" != pit.UNKNOWN_KEY
 
 
-def test_rejects_name_every_failing_key(spark, pit):
+def test_a_bad_reference_is_kept_and_only_the_facts_own_defect_is_rejected(spark, pit):
     facts = join_customers(pit, spark, [
         (1, 5, "2026-06-01 00:00:00"),
         (2, 999999, "2026-06-01 00:00:00"),
@@ -116,37 +122,13 @@ def test_rejects_name_every_failing_key(spark, pit):
         ("customer_sk", "customer_id", "order_date", "dim_customers_scd2"),
         ("campaign_sk", "campaign_id", "order_date", "dim_campaigns_scd2"),
     ])
-    assert [row["order_id"] for row in valid.collect()] == [1]
+    # Order 2's customer is in no dimension version: it is still a fact.
+    kept = {row["order_id"]: (row["customer_sk"], row["customer_id"]) for row in valid.collect()}
+    assert kept == {1: ("customer-5-v2", 5), 2: ("INVALID", 999999)}
     assert "customer_sk_resolution" not in valid.columns, "valid facts keep their original schema"
+    # Order 3 lacks a required key of its own: that, and only that, rejects it.
     reasons = {row["order_id"]: row["reject_reason"] for row in rejected.collect()}
-    assert reasons == {
-        2: "customer_id not in dim_customers_scd2",
-        3: "customer_id not in dim_customers_scd2; campaign_id is NULL",
-    }
-
-
-def test_a_null_campaign_resolves_to_the_unknown_member(spark, pit):
-    facts = join_customers(pit, spark, [
-        (1, 5, "2026-06-01 10:00:00"),
-        (2, 5, "2026-06-01 10:00:00"),
-        (3, None, "2026-06-01 10:00:00"),
-    ]).withColumn("campaign_id", F.when(F.col("order_id") == 1, F.lit(4)).otherwise(F.lit(None).cast("int")))
-    facts = pit.point_in_time_join(
-        fact_df=facts, dim_df=campaigns(spark), fact_key="campaign_id", dim_key="campaign_id",
-        fact_timestamp="order_date", surrogate_key="campaign_sk", null_key_to_unknown_member=True,
-    )
-    rows = {row["order_id"]: row.asDict() for row in facts.collect()}
-    assert {k: (v["campaign_sk"], v["campaign_sk_resolution"]) for k, v in rows.items()} == {
-        1: ("campaign-4-v1", "in_range"), 2: ("UNKNOWN", "unknown_member"), 3: ("UNKNOWN", "unknown_member"),
-    }
-
-    valid, rejected = pit.split_valid_and_rejected_facts(facts, resolved_keys=[
-        ("customer_sk", "customer_id", "order_date", "dim_customers_scd2"),
-        ("campaign_sk", "campaign_id", "order_date", "dim_campaigns_scd2"),
-    ])
-    assert sorted(row["order_id"] for row in valid.collect()) == [1, 2]
-    # A NULL customer is still a reject, whatever its campaign.
-    assert {row["order_id"]: row["reject_reason"] for row in rejected.collect()} == {3: "customer_id is NULL"}
+    assert reasons == {3: "campaign_id is NULL"}
 
 
 # --- the job end to end, in a temporary project ----------------------------
@@ -206,22 +188,37 @@ def read_rejects(spark, root, name):
     return {row[0]: row.asDict() for row in spark.read.parquet(str(root / "data" / "quarantine" / name)).collect()}
 
 
-def test_the_job_rejects_items_of_rejected_orders_and_conserves_rows(spark, pit, project_root, no_stop):
+def test_the_job_keeps_facts_with_a_bad_reference_and_rejects_only_items_without_an_order(
+        spark, pit, project_root, no_stop):
+    # Order 2's customer is in no dimension version (for example quarantined in
+    # Silver). Item 30's order does not exist: the item's own defect.
     write_project(spark, project_root,
                   orders=[(1, 5, 4, "2026-06-01 10:00:00"), (2, 999999, 4, "2026-06-01 10:00:00")],
-                  items=[(10, 1, 4), (20, 2, 4)])
+                  items=[(10, 1, 4), (20, 2, 4), (30, 3, 4)])
     pit.main()
+
+    orders = {row["order_id"]: (row["customer_sk"], row["customer_id"]) for row in
+              spark.read.parquet(str(project_root / "data" / "gold" / "fact_orders_scd2")).collect()}
+    assert orders == {1: ("customer-5-v2", 5), 2: ("INVALID", 999999)}, "a bad reference must not drop the order"
+    items = {row["order_item_id"] for row in
+             spark.read.parquet(str(project_root / "data" / "gold" / "fact_order_items_scd2")).collect()}
+    assert items == {10, 20}, "the item of an order with a bad reference is a fact too"
+    order_rejects = spark.read.parquet(str(project_root / "data" / "quarantine" / "fact_orders_scd2_rejects"))
+    assert order_rejects.count() == 0 and "reject_reason" in order_rejects.columns, "empty, and still readable"
 
     item_rejects = spark.read.parquet(str(project_root / "data" / "quarantine" / "fact_order_items_scd2_rejects"))
     reasons = {row["order_item_id"]: row["reject_reason"] for row in item_rejects.collect()}
-    assert reasons == {20: "order not in fact_orders_scd2"}, "the item of a rejected order must be a reject"
+    assert reasons == {30: "order not in fact_orders_scd2"}, "an item without its order is the only reject"
 
     report = json.loads((project_root / "logs" / "point_in_time_fact_join_report.json").read_text())
     assert report["overall_status"] == "PASS"
     for fact in ("fact_orders_scd2", "fact_order_items_scd2", "fact_campaign_spend_scd2"):
         conservation = report["facts"][fact]["conservation"]
         assert conservation["status"] == "PASS" and conservation["unaccounted_rows"] == 0, (fact, conservation)
-    assert report["facts"]["fact_orders_scd2"]["resolutions"]["customer_sk"]["key_not_in_dimension"] == 1
+    # The count per fact and dimension is in the report.
+    assert report["facts"]["fact_orders_scd2"]["fact_resolutions"]["customer_sk"]["invalid_reference"] == 1
+    assert report["facts"]["fact_orders_scd2"]["fact_resolutions"]["campaign_sk"]["invalid_reference"] == 0
+    assert report["facts"]["fact_orders_scd2"]["rejected_rows"] == 0
 
 
 def test_the_job_keeps_organic_orders_on_the_unknown_campaign(spark, pit, project_root, no_stop):
@@ -245,9 +242,9 @@ def test_the_job_keeps_organic_orders_on_the_unknown_campaign(spark, pit, projec
 
 
 def test_organic_orders_are_counted_among_the_facts_not_among_the_rejects(spark, pit, project_root, no_stop):
-    # Order 3 is organic but its customer is not in the dimension (for example
-    # one quarantined in Silver): a reject. It must not be counted as an order on
-    # the unknown campaign, which the warehouse and data_quality_summary report.
+    # Order 3 is organic and its customer is not in the dimension (for example
+    # one quarantined in Silver). It is a fact all the same: on the unknown
+    # campaign (no key) and on the invalid-reference customer (a bad key).
     write_project(spark, project_root,
                   orders=[(1, 5, 4, "2026-06-01 10:00:00"), (2, 5, None, "2026-06-01 10:00:00"),
                           (3, 999999, None, "2026-06-01 10:00:00")],
@@ -259,8 +256,9 @@ def test_organic_orders_are_counted_among_the_facts_not_among_the_rejects(spark,
     report = json.loads((project_root / "logs" / "point_in_time_fact_join_report.json").read_text())
     orders = report["facts"]["fact_orders_scd2"]
     assert orders["resolutions"]["campaign_sk"]["unknown_member"] == 2, "every Silver row stays accounted for"
-    assert orders["fact_resolutions"]["campaign_sk"]["unknown_member"] == organic_facts == 1
-    assert orders["fact_resolutions"]["customer_sk"]["key_not_in_dimension"] == 0
+    assert orders["fact_resolutions"]["campaign_sk"]["unknown_member"] == organic_facts == 2
+    assert orders["fact_resolutions"]["customer_sk"]["invalid_reference"] == 1
+    assert orders["conservation"]["rejected_rows"] == 0
     assert sum(orders["fact_resolutions"]["campaign_sk"].values()) == orders["conservation"]["valid_rows"]
 
 

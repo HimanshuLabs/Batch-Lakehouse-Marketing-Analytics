@@ -129,18 +129,22 @@ def test_dimension_is_built_from_silver_history(spark, scd2, project_root, no_st
     write("silver_customers_history", both)
     write("silver_customers", both.filter(F.col("updated_at") == F.to_timestamp(F.lit(V2_TIME))))
 
+    # The second row changes only the status: an SCD2-tracked attribute, so it
+    # opens a new version (the price, name and category are the same).
     product = spark.createDataFrame(
-        [(4, "Bluetooth Speaker", "Fitness", 15192.99, 13673.69, 1938, V1_TIME)],
-        "product_id int, product_name string, category string, original_price double, discounted_price double, "
-        "inventory_remaining int, updated_at string",
+        [(4, "Bluetooth Speaker", "Fitness", "Stridex", "active", 15192.99, 13673.69, 1938, V1_TIME),
+         (4, "Bluetooth Speaker", "Fitness", "Stridex", "discontinued", 15192.99, 13673.69, 0, V2_TIME)],
+        "product_id int, product_name string, category string, brand string, product_status string, "
+        "original_price double, discounted_price double, inventory_remaining int, updated_at string",
     ).withColumn("updated_at", F.to_timestamp("updated_at"))
     write("silver_products_history", product)
     write("silver_products", product)
 
     campaign = spark.createDataFrame(
-        [(5, "Facebook Campaign 5", "facebook", "B", "Enterprise", 232331.86, "completed", "2026-05-07", "2026-07-24",
-          V1_TIME)],
-        "campaign_id int, campaign_name string, traffic_source string, ab_test_group string, target_segment string, "
+        [(5, "Facebook Campaign 5", "facebook", "retention", "B", "Enterprise", 232331.86, "completed", "2026-05-07",
+          "2026-07-24", V1_TIME)],
+        "campaign_id int, campaign_name string, traffic_source string, campaign_type string, ab_test_group string, "
+        "target_segment string, "
         "budget double, campaign_status string, start_date string, end_date string, updated_at string",
     ).withColumn("start_date", F.to_date("start_date")).withColumn("end_date", F.to_date("end_date")) \
      .withColumn("updated_at", F.to_timestamp("updated_at"))
@@ -154,19 +158,28 @@ def test_dimension_is_built_from_silver_history(spark, scd2, project_root, no_st
     assert [v["loyalty_tier"] for v in versions] == ["Gold", "Platinum"], \
         "the dimension must keep the version that is only in Silver history"
 
-    products = spark.read.parquet(str(project_root / "data" / "gold" / "dim_products_scd2")).collect()
-    assert [(r["original_price"], r["inventory_remaining"]) for r in products] == [(15192.99, 1938)]
+    products = spark.read.parquet(str(project_root / "data" / "gold" / "dim_products_scd2")) \
+        .orderBy("effective_from").collect()
+    assert [(r["brand"], r["status"], r["inventory_remaining"], r["is_current"]) for r in products] == [
+        ("Stridex", "active", 1938, False), ("Stridex", "discontinued", 0, True)], \
+        "a status change must open a new product version; brand is carried"
+    assert products[0]["product_sk"] != products[1]["product_sk"]
     campaigns = spark.read.parquet(str(project_root / "data" / "gold" / "dim_campaigns_scd2")).collect()
-    assert [(r["campaign_status"], r["ab_test_group"]) for r in campaigns] == [("completed", "B")]
+    assert [(r["campaign_status"], r["campaign_type"], r["ab_test_group"]) for r in campaigns] == [
+        ("completed", "retention", "B")]
 
 
 def test_each_dimension_carries_its_untracked_source_attributes(scd2):
     carried = {name: config.get("carried_columns") for name, config in scd2.DIMENSION_CONFIGS.items()}
     assert carried == {
         "customers": ["gender", "age", "preferred_language", "loyalty_points", "is_prime_user"],
-        "products": ["original_price", "inventory_remaining"],
-        "campaigns": ["ab_test_group"],
+        "products": ["brand", "original_price", "inventory_remaining"],
+        "campaigns": ["campaign_type", "ab_test_group"],
     }
+    # A product's status (active / discontinued) is tracked: a change opens a version.
+    products = scd2.DIMENSION_CONFIGS["products"]
+    assert "status" in products["tracked_columns"] and products["column_map"]["status"] == "product_status"
+    assert products["untracked_optional"] == [], "no NULL placeholder column is left"
     # campaign_status is a tracked (hashed) campaign attribute already.
     assert "campaign_status" in scd2.DIMENSION_CONFIGS["campaigns"]["tracked_columns"]
 

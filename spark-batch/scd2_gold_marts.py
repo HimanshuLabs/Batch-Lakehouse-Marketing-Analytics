@@ -44,6 +44,9 @@ def business_date(timestamp: Column) -> Column:
 # Organic orders carry campaign_sk 'UNKNOWN': they count in every mart except
 # campaign performance, which lists real campaigns only (as the warehouse does).
 UNKNOWN_KEY = "UNKNOWN"
+# The invalid-reference member: a fact whose key is present but has no valid
+# dimension row (spark-batch/point_in_time_fact_joins.py).
+INVALID_KEY = "INVALID"
 UNKNOWN_LABEL = "Unknown"
 
 OUTPUT_PATHS = {
@@ -92,6 +95,45 @@ def write_mart(df: DataFrame, output_path: Path) -> None:
     )
 
 
+# A cancelled or returned order is not a sale: revenue, order counts, average
+# order value and units are those of completed orders. The marts show the
+# cancelled and returned orders beside them.
+COMPLETED, CANCELLED, RETURNED = "completed", "cancelled", "returned"
+
+
+def when_status(status: str, value: F.Column) -> F.Column:
+    """value for the orders (or items of orders) with this status, else NULL."""
+    return F.when(F.col("order_status") == status, value)
+
+
+def with_valid_member(df: DataFrame, surrogate_key: str) -> DataFrame:
+    """Facts whose key is a real dimension member (not the unknown or the invalid-reference member)."""
+    return df.filter(~F.col(surrogate_key).isin(UNKNOWN_KEY, INVALID_KEY))
+
+
+MEMBER_KNOWN, MEMBER_UNKNOWN, MEMBER_INVALID = "known", "unknown_member", "invalid_reference"
+INVALID_LABEL = "Invalid reference"
+
+
+def with_member_rows(dim: DataFrame, surrogate_key: str, label_column: str) -> DataFrame:
+    """The dimension rows plus one row each for the unknown and the invalid-reference member.
+
+    Every mart carries those two rows, flagged in member_type, so its revenue,
+    spend and units equal the fact totals; a consumer who wants real members
+    only filters member_type = 'known'. The two rows have the member's key and
+    label and NULL in every other attribute.
+    """
+    members = None
+    for key, label, member_type in ((UNKNOWN_KEY, UNKNOWN_LABEL, MEMBER_UNKNOWN), (INVALID_KEY, INVALID_LABEL, MEMBER_INVALID)):
+        row = dim.sparkSession.range(1).select(*[
+            (F.lit(key) if field.name == surrogate_key else F.lit(label) if field.name == label_column
+             else F.lit(None)).cast(field.dataType).alias(field.name)
+            for field in dim.schema.fields
+        ]).withColumn("member_type", F.lit(member_type))
+        members = row if members is None else members.unionByName(row)
+    return dim.withColumn("member_type", F.lit(MEMBER_KNOWN)).unionByName(members)
+
+
 def build_campaign_performance_mart(
     fact_orders: DataFrame,
     fact_campaign_spend: DataFrame,
@@ -101,6 +143,7 @@ def build_campaign_performance_mart(
         "campaign_sk",
         "campaign_id",
         "campaign_name",
+        "campaign_type",
         "channel",
         "target_segment",
         "budget",
@@ -109,17 +152,22 @@ def build_campaign_performance_mart(
         "end_date",
         "is_current",
     )
+    campaign_dim = with_member_rows(campaign_dim, "campaign_sk", "campaign_name")
 
     order_metrics = (
         fact_orders
         .groupBy("campaign_sk")
         .agg(
-            F.countDistinct("order_id").alias("orders_count"),
-            F.countDistinct("customer_sk").alias("customers_count"),
-            F.sum(F.col("total_amount")).alias("total_revenue"),
-            F.avg(F.col("total_amount")).alias("avg_order_value"),
-            F.min(F.col("order_date")).alias("first_order_date"),
-            F.max(F.col("order_date")).alias("last_order_date"),
+            F.countDistinct(when_status(COMPLETED, F.col("order_id"))).alias("orders_count"),
+            F.countDistinct(when_status(COMPLETED, F.col("customer_sk"))).alias("customers_count"),
+            F.sum(when_status(COMPLETED, F.col("cart_value"))).alias("total_revenue"),
+            F.avg(when_status(COMPLETED, F.col("cart_value"))).alias("avg_order_value"),
+            F.min(when_status(COMPLETED, F.col("order_date"))).alias("first_order_date"),
+            F.max(when_status(COMPLETED, F.col("order_date"))).alias("last_order_date"),
+            F.countDistinct(when_status(CANCELLED, F.col("order_id"))).alias("cancelled_orders_count"),
+            F.sum(when_status(CANCELLED, F.col("cart_value"))).alias("cancelled_amount"),
+            F.countDistinct(when_status(RETURNED, F.col("order_id"))).alias("returned_orders_count"),
+            F.sum(when_status(RETURNED, F.col("cart_value"))).alias("returned_amount"),
         )
     )
 
@@ -130,6 +178,9 @@ def build_campaign_performance_mart(
             F.sum(F.col("spend_amount")).alias("total_spend"),
             F.sum(F.col("impressions")).alias("impressions"),
             F.sum(F.col("clicks")).alias("clicks"),
+            # What the ad platform itself reports, beside the orders measured above.
+            F.sum(F.col("conversions")).alias("ad_platform_conversions"),
+            F.sum(F.col("attributed_revenue")).alias("platform_attributed_revenue"),
             F.countDistinct("spend_id").alias("spend_records_count"),
             F.min(F.col("spend_date")).alias("first_spend_date"),
             F.max(F.col("spend_date")).alias("last_spend_date"),
@@ -150,9 +201,16 @@ def build_campaign_performance_mart(
                 "impressions": 0,
                 "clicks": 0,
                 "spend_records_count": 0,
+                "cancelled_orders_count": 0,
+                "cancelled_amount": 0.0,
+                "returned_orders_count": 0,
+                "returned_amount": 0.0,
+                "ad_platform_conversions": 0,
+                "platform_attributed_revenue": 0.0,
             }
         )
         .withColumn("roas", safe_divide(F.col("total_revenue"), F.col("total_spend")))
+        .withColumn("platform_roas", safe_divide(F.col("platform_attributed_revenue"), F.col("total_spend")))
         .withColumn("ctr", safe_divide(F.col("clicks"), F.col("impressions")))
         .withColumn("cost_per_click", safe_divide(F.col("total_spend"), F.col("clicks")))
         .withColumn("cost_per_acquisition", safe_divide(F.col("total_spend"), F.col("orders_count")))
@@ -187,6 +245,7 @@ def build_customer_lifetime_value_mart(
         "customer_segment",
         "loyalty_tier",
     )
+    customer_dim = with_member_rows(customer_dim, "customer_sk", "customer_name")
 
     return (
         clean_fact_orders
@@ -205,14 +264,19 @@ def build_customer_lifetime_value_mart(
             "country",
             "customer_segment",
             "loyalty_tier",
+            "member_type",
         )
         .agg(
-            F.countDistinct("order_id").alias("total_orders"),
-            F.sum(F.col("total_amount")).alias("total_revenue"),
-            F.avg(F.col("total_amount")).alias("avg_order_value"),
-            F.min(F.col("order_date")).alias("first_order_date"),
-            F.max(F.col("order_date")).alias("last_order_date"),
-            F.countDistinct("campaign_sk").alias("campaigns_touched"),
+            F.countDistinct(when_status(COMPLETED, F.col("order_id"))).alias("total_orders"),
+            F.coalesce(F.sum(when_status(COMPLETED, F.col("cart_value"))), F.lit(0.0)).alias("total_revenue"),
+            F.coalesce(F.avg(when_status(COMPLETED, F.col("cart_value"))), F.lit(0.0)).alias("avg_order_value"),
+            F.min(when_status(COMPLETED, F.col("order_date"))).alias("first_order_date"),
+            F.max(when_status(COMPLETED, F.col("order_date"))).alias("last_order_date"),
+            F.countDistinct(when_status(COMPLETED, F.col("campaign_sk"))).alias("campaigns_touched"),
+            F.countDistinct(when_status(CANCELLED, F.col("order_id"))).alias("cancelled_orders"),
+            F.coalesce(F.sum(when_status(CANCELLED, F.col("cart_value"))), F.lit(0.0)).alias("cancelled_amount"),
+            F.countDistinct(when_status(RETURNED, F.col("order_id"))).alias("returned_orders"),
+            F.coalesce(F.sum(when_status(RETURNED, F.col("cart_value"))), F.lit(0.0)).alias("returned_amount"),
         )
         .withColumnRenamed("dim_customer_id", "customer_id")
         .withColumn(
@@ -227,7 +291,9 @@ def build_customer_lifetime_value_mart(
 def build_product_performance_mart(
     fact_order_items: DataFrame,
     dim_products: DataFrame,
+    fact_orders: DataFrame,
 ) -> DataFrame:
+    # An item is sold when its order is completed; the order's status is on the order.
     clean_fact_order_items = fact_order_items.drop(
         "product_id",
         "product_name",
@@ -235,7 +301,8 @@ def build_product_performance_mart(
         "brand",
         "price",
         "status",
-    )
+        "order_status",
+    ).join(fact_orders.select("order_id", "order_status"), on="order_id", how="left")
 
     product_dim = dim_products.select(
         "product_sk",
@@ -246,6 +313,7 @@ def build_product_performance_mart(
         "price",
         "status",
     )
+    product_dim = with_member_rows(product_dim, "product_sk", "product_name")
 
     return (
         clean_fact_order_items
@@ -262,15 +330,19 @@ def build_product_performance_mart(
             "brand",
             "price",
             "status",
+            "member_type",
         )
         .agg(
-            F.sum(F.col("quantity")).alias("units_sold"),
-            F.sum(F.col("line_amount")).alias("total_revenue"),
-            F.avg(F.col("unit_price")).alias("avg_selling_price"),
-            F.countDistinct("order_id").alias("order_count"),
-            F.countDistinct("order_item_id").alias("order_item_count"),
-            F.min(F.col("order_date")).alias("first_sold_date"),
-            F.max(F.col("order_date")).alias("last_sold_date"),
+            F.coalesce(F.sum(when_status(COMPLETED, F.col("quantity"))), F.lit(0)).alias("units_sold"),
+            F.coalesce(F.sum(when_status(COMPLETED, F.col("line_amount"))), F.lit(0.0)).alias("total_revenue"),
+            F.avg(when_status(COMPLETED, F.col("unit_price"))).alias("avg_selling_price"),
+            F.countDistinct(when_status(COMPLETED, F.col("order_id"))).alias("order_count"),
+            F.countDistinct(when_status(COMPLETED, F.col("order_item_id"))).alias("order_item_count"),
+            F.min(when_status(COMPLETED, F.col("order_date"))).alias("first_sold_date"),
+            F.max(when_status(COMPLETED, F.col("order_date"))).alias("last_sold_date"),
+            F.coalesce(F.sum(when_status(CANCELLED, F.col("quantity"))), F.lit(0)).alias("cancelled_units"),
+            F.coalesce(F.sum(when_status(RETURNED, F.col("quantity"))), F.lit(0)).alias("returned_units"),
+            F.coalesce(F.sum(when_status(RETURNED, F.col("line_amount"))), F.lit(0.0)).alias("returned_amount"),
         )
         .withColumnRenamed("dim_product_id", "product_id")
         .withColumn(
@@ -370,16 +442,28 @@ def validate_marts(
     mart_product_performance: DataFrame,
     mart_marketing_funnel: DataFrame,
 ) -> Dict[str, object]:
-    fact_order_revenue = get_sum(fact_orders, "total_amount")
-    campaign_order_revenue = get_sum(fact_orders.filter(F.col("campaign_sk") != UNKNOWN_KEY), "total_amount")
+    # Revenue is that of completed orders. Every mart has a row for the
+    # unknown and for the invalid-reference member, so each mart total equals
+    # the fact total: nothing is left out of a mart.
+    sold_orders = fact_orders.filter(F.col("order_status") == COMPLETED)
+    all_completed_revenue = get_sum(sold_orders, "cart_value")
+    fact_order_revenue = all_completed_revenue
+    campaign_order_revenue = all_completed_revenue
     campaign_mart_revenue = get_sum(mart_campaign_performance, "total_revenue")
     clv_mart_revenue = get_sum(mart_customer_lifetime_value, "total_revenue")
 
-    fact_item_revenue = get_sum(fact_order_items, "line_amount")
+    sold_items = fact_order_items.join(sold_orders.select("order_id"), "order_id", "left_semi")
+    fact_item_revenue = get_sum(sold_items, "line_amount")
     product_mart_revenue = get_sum(mart_product_performance, "total_revenue")
 
     fact_spend = get_sum(fact_campaign_spend, "spend_amount")
     campaign_mart_spend = get_sum(mart_campaign_performance, "total_spend")
+    not_sold = get_sum(fact_orders.filter(F.col("order_status") != COMPLETED), "cart_value")
+    mart_not_sold = (get_sum(mart_customer_lifetime_value, "cancelled_amount")
+                     + get_sum(mart_customer_lifetime_value, "returned_amount"))
+    valid_customer_not_sold = not_sold
+    sold_units = get_sum(sold_items, "quantity")
+    product_mart_units = get_sum(mart_product_performance, "units_sold")
 
     tolerance = 0.01
 
@@ -390,6 +474,8 @@ def validate_marts(
         "clv_revenue_reconciles_to_fact_orders": abs(fact_order_revenue - clv_mart_revenue) <= tolerance,
         "product_revenue_reconciles_to_fact_order_items": abs(fact_item_revenue - product_mart_revenue) <= tolerance,
         "campaign_spend_reconciles_to_fact_campaign_spend": abs(fact_spend - campaign_mart_spend) <= tolerance,
+        "clv_cancelled_and_returned_reconcile_to_fact_orders": abs(valid_customer_not_sold - mart_not_sold) <= tolerance,
+        "product_units_reconcile_to_fact_order_items": abs(sold_units - product_mart_units) <= tolerance,
         "campaign_mart_has_rows": get_count(mart_campaign_performance) > 0,
         "clv_mart_has_rows": get_count(mart_customer_lifetime_value) > 0,
         "product_mart_has_rows": get_count(mart_product_performance) > 0,
@@ -400,9 +486,14 @@ def validate_marts(
         "status": "PASS" if all(checks.values()) else "FAIL",
         "checks": checks,
         "metrics": {
+            "completed_order_revenue": all_completed_revenue,
+            "cancelled_and_returned_order_amount": not_sold,
             "fact_order_revenue": fact_order_revenue,
             "campaign_fact_order_revenue": campaign_order_revenue,
-            "unknown_campaign_order_revenue": fact_order_revenue - campaign_order_revenue,
+            "unknown_or_invalid_campaign_order_revenue": all_completed_revenue
+            - get_sum(with_valid_member(sold_orders, "campaign_sk"), "cart_value"),
+            "invalid_customer_order_revenue": all_completed_revenue
+            - get_sum(with_valid_member(sold_orders, "customer_sk"), "cart_value"),
             "campaign_mart_revenue": campaign_mart_revenue,
             "clv_mart_revenue": clv_mart_revenue,
             "fact_item_revenue": fact_item_revenue,
@@ -459,6 +550,7 @@ def main() -> None:
         mart_product_performance = build_product_performance_mart(
             fact_order_items=fact_order_items,
             dim_products=dim_products,
+            fact_orders=fact_orders,
         )
 
         print("Building mart_marketing_funnel_scd2")

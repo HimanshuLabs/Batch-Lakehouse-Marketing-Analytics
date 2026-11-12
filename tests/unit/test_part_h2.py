@@ -32,7 +32,7 @@ import threading
 
 import pytest
 
-from conftest import CODE_ROOT
+from conftest import CODE_ROOT, begin_build, build_step, require_sandbox_database, reset_sandbox
 from test_part_h import STAGING_ROWS
 
 WAREHOUSE_DIR = CODE_ROOT / "sql" / "warehouse"
@@ -68,13 +68,11 @@ def build(tmp_path):
 
 @pytest.fixture
 def pg(tmp_path):
-    if os.environ.get("P2_F_SANDBOX") != "1":
-        pytest.skip("requires the disposable PostgreSQL sandbox on localhost:5546")
+    require_sandbox_database()
     import psycopg
     with psycopg.connect(host="127.0.0.1", port=5546, user="project2", password="project2",
                          dbname="marketing_analytics", autocommit=True) as conn:
-        for (schema,) in conn.execute("SELECT nspname FROM pg_namespace WHERE nspname ~ %s", (GENERATION_SCHEMAS,)).fetchall():
-            conn.execute(f'DROP SCHEMA "{schema}" CASCADE')
+        reset_sandbox(conn)
         conn.execute("SELECT set_config('p2.run_id', 'part-h2-test', false)")
         result = run_sql_files(tmp_path, "create_schemas")
         assert result.returncode == 0, result.stdout + result.stderr
@@ -327,6 +325,243 @@ def test_the_staging_loader_fills_staging_next_and_the_build_publishes_it(pg, tm
     assert pg.execute("SELECT count(*) FROM audit.v_gold_to_staging_latest_counts").fetchone()[0] >= 1
 
 
+# Part I: the build files run only inside the build transaction ------------------
+
+@pytest.mark.parametrize("name", BUILD_FILES[1:])
+def test_each_build_file_checks_for_the_build_transaction_before_anything_else(name):
+    code = sql_code(WAREHOUSE_DIR / f"{name}.sql")
+    guard = code.index("IF current_setting('p2.build_txid', true) IS DISTINCT FROM txid_current()::TEXT THEN")
+    first_change = re.search(r"^(DROP|CREATE|INSERT|UPDATE|DELETE|ALTER|TRUNCATE)\b", code, re.M).start()
+    assert code.index("\nBEGIN;") < guard < first_change, "the check must be the first statement of the transaction"
+    assert f"RAISE EXCEPTION '{name}.sql runs only inside the warehouse build transaction" in code
+    assert "PERFORM set_config('p2.build_txid', txid_current()::TEXT, true);" in sql_code(WAREHOUSE_DIR / "begin_generation.sql")
+
+
+def published(pg):
+    """What a reader can see: the live schemas, every table in them and its row count."""
+    tables = pg.execute(
+        "SELECT c.oid, n.nspname || '.' || c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE n.nspname IN ('warehouse', 'marts', 'audit') AND c.relkind IN ('r', 'v') ORDER BY 2").fetchall()
+    return {"generation": pg.execute("SELECT to_regnamespace('warehouse')::oid, to_regnamespace('marts')::oid, "
+                                     "to_regnamespace('audit')::oid").fetchone(),
+            "tables": tables,
+            "rows": {name: pg.execute(f"SELECT count(*) FROM {name}").fetchone()[0] for _, name in tables}}
+
+
+@pytest.mark.parametrize("name", BUILD_FILES[1:])
+def test_a_build_file_refuses_to_run_outside_the_build_transaction(pg, tmp_path, name):
+    import psycopg
+
+    pg.execute("DROP SCHEMA staging CASCADE; CREATE SCHEMA staging")
+    pg.execute(STAGING_ROWS)
+    build(tmp_path)
+    before = published(pg)
+    assert before["rows"]["warehouse.fact_orders"] == 2
+
+    # Through the runner, on its own (it used to drop and rebuild the live tables).
+    alone = run_sql_files(tmp_path, name)
+    assert alone.returncode != 0, alone.stdout[-1500:]
+    assert f"{name}.sql runs only inside the warehouse build transaction started by sql/warehouse/begin_generation.sql" \
+        in alone.stdout + alone.stderr
+    assert published(pg) == before, "the file changed the live warehouse"
+
+    # Pasted into a session, even one that is inside a transaction of its own.
+    text = (WAREHOUSE_DIR / f"{name}.sql").read_text(encoding="utf-8")
+    for prefix in ("", "BEGIN; SELECT set_config('p2.build_txid', '1', true);"):
+        with pytest.raises(psycopg.errors.RaiseException, match="runs only inside the warehouse build transaction"):
+            pg.execute(prefix + text)
+        pg.execute("ROLLBACK")
+    assert published(pg) == before
+
+
+# Part I: a consumer's view on the warehouse can never go silently stale ----------
+
+def test_the_pipeline_schema_list_of_the_view_check_matches_dbt():
+    generation = (WAREHOUSE_DIR / "begin_generation.sql").read_text(encoding="utf-8")
+    pattern = re.search(r"pipeline_schema CONSTANT TEXT := '([^']*)';", generation).group(1)
+    project = (CODE_ROOT / "dbt" / "dbt_project.yml").read_text(encoding="utf-8")
+    profile = (CODE_ROOT / "dbt" / "profiles.yml.example").read_text(encoding="utf-8")
+    dbt_schemas = re.findall(r"\+schema: (\w+)", project) + re.findall(r"^\s+schema: (\w+)", profile, re.M)
+    assert sorted(dbt_schemas) == ["dbt", "dbt_audit", "dbt_marts", "dbt_staging", "dbt_warehouse"]
+    for schema in [*dbt_schemas, "staging", "warehouse", "marts", "audit", "staging_next", "marts_retired_812", "pg_temp_3"]:
+        assert re.search(pattern, schema), schema
+    for schema in ("public", "consumer", "dbt_other", "reporting", "warehouse_copy"):
+        assert not re.search(pattern, schema), schema
+
+
+def test_a_build_refuses_to_leave_a_consumer_view_on_the_old_warehouse(pg, tmp_path):
+    pg.execute("DROP SCHEMA staging CASCADE; CREATE SCHEMA staging")
+    pg.execute(STAGING_ROWS)
+    build(tmp_path)
+    # The pipeline's own views (dbt) are replaced by dbt run: they do not stop a build.
+    pg.execute("CREATE SCHEMA dbt_marts; CREATE VIEW dbt_marts.mart_revenue_daily AS SELECT * FROM marts.mart_revenue_daily")
+    build(tmp_path)
+
+    # Views that somebody else made on the warehouse: nothing would ever replace them.
+    pg.execute("DROP SCHEMA IF EXISTS consumer CASCADE; CREATE SCHEMA consumer; "
+               "CREATE VIEW consumer.my_revenue AS SELECT revenue_date, net_revenue FROM marts.mart_revenue_daily; "
+               "CREATE MATERIALIZED VIEW consumer.order_days AS "
+               "SELECT order_id, warehouse.business_date(order_timestamp) AS day FROM warehouse.fact_orders; "
+               "CREATE VIEW public.p2_test_on_a_dbt_view AS SELECT * FROM dbt_marts.mart_revenue_daily")
+    try:
+        before = published(pg)
+        retired = schemas(pg, r"_retired_\d+$")
+        refused = run_sql_files(tmp_path, *BUILD_FILES)
+        output = refused.stdout + refused.stderr
+        assert refused.returncode != 0, "the build left consumer views on the retired warehouse: silently stale"
+        assert "Warehouse build refused: 2 view(s) outside the pipeline's schemas read the warehouse" in output
+        assert "consumer.my_revenue (reads marts.mart_revenue_daily)" in output
+        assert "consumer.order_days (reads warehouse.business_date(), warehouse.fact_orders)" in output
+        assert "p2_test_on_a_dbt_view" not in output, "a view on a dbt view is replaced with it, by dbt"
+        assert "Drop these views, run the build, then create them again" in output
+        assert published(pg) == before and schemas(pg, r"_retired_\d+$") == retired, "a refused build changes nothing"
+        assert pg.execute("SELECT count(*) FROM consumer.my_revenue").fetchone()[0] == before["rows"]["marts.mart_revenue_daily"]
+
+        # Without them the same build runs.
+        pg.execute("DROP SCHEMA consumer CASCADE")
+        build(tmp_path)
+        assert published(pg)["generation"] != before["generation"]
+    finally:
+        pg.execute("DROP SCHEMA IF EXISTS consumer CASCADE; DROP VIEW IF EXISTS public.p2_test_on_a_dbt_view")
+
+
+# Part J: a fact is never dropped for a bad dimension reference -------------------
+
+BAD_REFERENCES = """
+INSERT INTO staging.stg_gold_fact_orders_scd2 VALUES
+    (3, 99, 77, '2026-06-11 10:00', 300.00, 'UPI', '2026-06-18', 'completed', 54.00, 499.00, 853.00),
+    (4, 7, 5, '2026-06-12 10:00', 150.00, 'UPI', '2026-06-18', 'cancelled', 27.00, 499.00, 676.00),
+    (5, 7, 5, '2026-06-13 10:00', 50.00, 'UPI', '2026-06-18', 'returned', 9.00, 499.00, 558.00);
+INSERT INTO staging.stg_gold_fact_order_items_scd2 VALUES
+    (30, 3, 44, 3, 120.00, 100.00, 300.00, '2026-06-18'), (40, 4, 4, 1, 150.00, 150.00, 150.00, '2026-06-18'),
+    (50, 5, 4, 1, 50.00, 50.00, 50.00, '2026-06-18');
+INSERT INTO staging.stg_gold_fact_campaign_spend_scd2 VALUES
+    (3, 77, 'google', '2026-06-10', 80.00, 2000, 40, '2026-06-18', 4, 900.00, 'India', 'Kerala', 80.00);
+INSERT INTO staging.stg_gold_fact_web_events VALUES
+    ('e3', 's3', 99, 44, 77, '2026-06-11 09:55', 'purchase', 'google', 300.00, '2026-06-18');
+"""
+NOW_VALID = """
+INSERT INTO staging.stg_gold_dim_customers_scd2 VALUES (99, 'Ravi', '1900-01-01', '9999-12-31', true, '2026-06-20');
+INSERT INTO staging.stg_gold_dim_products_scd2 VALUES
+    (44, 'Lamp', 'Home', '1900-01-01', '9999-12-31', true, '2026-06-20', 'Casaro', 'active');
+INSERT INTO staging.stg_gold_dim_campaigns_scd2 VALUES
+    (77, 'Monsoon', 'google', '1900-01-01', '9999-12-31', true, '2026-06-20', 'retention');
+"""
+
+
+def test_a_fact_with_a_bad_reference_is_kept_and_resolves_once_the_dimension_row_is_valid(pg, tmp_path):
+    pg.execute("DROP SCHEMA staging CASCADE; CREATE SCHEMA staging")
+    pg.execute(STAGING_ROWS + BAD_REFERENCES)   # customer 99, product 44 and campaign 77 are in no dimension
+    build(tmp_path)
+
+    def keys():
+        return {
+            "order": pg.execute("SELECT customer_sk, campaign_sk, customer_id, campaign_id FROM warehouse.fact_orders "
+                                "WHERE order_id = '3'").fetchone(),
+            "item": pg.execute("SELECT product_sk, product_id FROM warehouse.fact_order_items "
+                               "WHERE order_item_nk = '30'").fetchone(),
+            "spend": pg.execute("SELECT campaign_sk, campaign_id FROM warehouse.fact_campaign_spend "
+                                "WHERE campaign_spend_nk = '3'").fetchone(),
+            "event": pg.execute("SELECT customer_sk, product_sk, campaign_sk, customer_id, product_id, campaign_id "
+                                "FROM warehouse.fact_web_events WHERE event_id = 'e3'").fetchone(),
+            "conversion": pg.execute("SELECT customer_sk, product_sk, campaign_sk FROM warehouse.fact_conversions "
+                                     "WHERE event_id = 'e3'").fetchone(),
+        }
+
+    # Every fact is loaded, on the invalid-reference member (-1), with its natural ID.
+    assert keys() == {"order": (-1, -1, "99", "77"), "item": (-1, "44"), "spend": (-1, "77"),
+                      "event": (-1, -1, -1, "99", "44", "77"), "conversion": (-1, -1, -1)}
+    assert pg.execute("SELECT (SELECT count(*) FROM warehouse.fact_orders), (SELECT count(*) FROM warehouse.fact_order_items), "
+                      "(SELECT count(*) FROM warehouse.fact_campaign_spend), (SELECT count(*) FROM warehouse.fact_web_events)"
+                      ).fetchone() == (5, 5, 3, 3), "no fact is rejected or dropped"
+    assert pg.execute("SELECT to_regclass('audit.fact_web_events_rejects')").fetchone()[0] is None
+    # A missing key is the unknown member (0), not the invalid one: order 2 is organic.
+    assert pg.execute("SELECT campaign_sk, campaign_id FROM warehouse.fact_orders WHERE order_id = '2'").fetchone() == (0, "UNKNOWN")
+    members = pg.execute("SELECT customer_sk, customer_id, customer_name FROM warehouse.dim_customer "
+                         "WHERE customer_sk <= 0 ORDER BY 1").fetchall()
+    assert members == [(-1, "INVALID", "Invalid reference"), (0, "UNKNOWN", "Unknown")]
+
+    # The counts per fact and dimension are in the reconciliation (all PASS: the build was published).
+    counts = dict(pg.execute("SELECT metric_name, target_count::int FROM audit.v_latest_reconciliation_report "
+                             "WHERE check_category = 'Invalid references' AND status = 'PASS'").fetchall())
+    assert counts == {
+        "invalid_customer_references_in_fact_orders": 1, "invalid_campaign_references_in_fact_orders": 1,
+        "invalid_product_references_in_fact_order_items": 1, "invalid_campaign_references_in_fact_campaign_spend": 1,
+        "invalid_customer_references_in_fact_web_events": 1, "invalid_product_references_in_fact_web_events": 1,
+        "invalid_campaign_references_in_fact_web_events": 1}
+    # D: the SCD2 version counts of Gold and the warehouse are compared, without the two special members.
+    versions = dict(pg.execute("SELECT metric_name, (source_count::int, target_count::int)::text "
+                               "FROM audit.v_latest_reconciliation_report WHERE metric_name LIKE '%_dimension_versions'").fetchall())
+    assert versions == {"customer_dimension_versions": "(2,2)", "product_dimension_versions": "(1,1)",
+                        "campaign_dimension_versions": "(1,1)"}
+
+    # Revenue counts completed orders only, and the revenue of the order with
+    # the bad references is not lost: it is in the daily mart.
+    daily = pg.execute("SELECT sum(order_count), sum(net_revenue), sum(tax_amount), sum(shipping_amount), sum(total_amount), "
+                       "sum(cancelled_order_count), sum(cancelled_amount), sum(returned_order_count), sum(returned_amount) "
+                       "FROM marts.mart_revenue_daily").fetchone()
+    assert [float(value) for value in daily] == [3, 600.0, 108.0, 998.0, 1706.0, 1, 150.0, 1, 50.0]
+    customer = pg.execute("SELECT total_order_count, lifetime_value, cancelled_order_count, cancelled_amount, "
+                          "returned_order_count, returned_amount, total_units_purchased FROM marts.mart_customer_360 "
+                          "WHERE customer_id = '7'").fetchone()
+    assert [float(value) for value in customer] == [2, 300.0, 1, 150.0, 1, 50.0, 3]
+    campaign = pg.execute("SELECT order_count, attributed_revenue, cancelled_order_count, returned_order_count, "
+                          "ad_platform_conversions, platform_attributed_revenue, campaign_type "
+                          "FROM marts.mart_campaign_performance WHERE campaign_id = '5'").fetchone()
+    assert campaign[:6] == (1, 200, 1, 1, 3, 450) and campaign[6] == "conversion"
+    product = pg.execute("SELECT units_sold, product_revenue, cancelled_units, returned_units, returned_amount, brand, "
+                         "product_status FROM marts.mart_product_sales WHERE product_id = '4'").fetchone()
+    assert product == (3, 300, 1, 1, 50, "Voltix", "active")
+    # J3: every mart has a flagged row for the unknown and for the invalid-reference
+    # member, so it ties out to the facts: the 300 of order 3 is on the invalid row.
+    assert pg.execute("SELECT customer_id, member_type, lifetime_value, total_units_purchased FROM marts.mart_customer_360 "
+                      "ORDER BY 1").fetchall() == [("7", "known", 300, 3), ("INVALID", "invalid_reference", 300, 3),
+                                                   ("UNKNOWN", "unknown_member", 0, 0)]
+    assert pg.execute("SELECT campaign_id, member_type, attributed_revenue, total_spend FROM marts.mart_campaign_performance "
+                      "ORDER BY 1").fetchall() == [("5", "known", 200, 50), ("INVALID", "invalid_reference", 300, 80),
+                                                   ("UNKNOWN", "unknown_member", 100, 0)]
+    assert pg.execute("SELECT product_id, member_type, product_revenue, units_sold FROM marts.mart_product_sales "
+                      "ORDER BY 1").fetchall() == [("4", "known", 300, 3), ("INVALID", "invalid_reference", 300, 3),
+                                                   ("UNKNOWN", "unknown_member", 0, 0)]
+    ties = dict(pg.execute("SELECT check_name, status FROM audit.mart_validation_report").fetchall())
+    assert {ties[name] for name in ("customer_lifetime_value_matches_fact_orders", "campaign_revenue_matches_fact_orders",
+                                    "customer_units_match_fact_order_items", "product_units_match_fact_order_items",
+                                    "product_revenue_matches_fact_order_items", "campaign_spend_matches_fact_campaign_spend",
+                                    "campaign_platform_results_match_fact_campaign_spend")} == {"PASS"}
+    # The regional rows of campaign 5 sum to its campaign-day total (30 + 20 = 50).
+    assert pg.execute("SELECT status FROM audit.v_latest_reconciliation_report "
+                      "WHERE check_name = 'Regional ad spend rows sum to the campaign-day total'").fetchone()[0] == "PASS"
+    assert pg.execute("SELECT r.state, f.spend_amount FROM warehouse.fact_campaign_spend f JOIN warehouse.dim_region r "
+                      "USING (region_sk) WHERE f.campaign_id = '5' ORDER BY 1").fetchall() == [("Kerala", 30), ("Punjab", 20)]
+
+    # The dimension rows arrive valid in a later batch: the same facts resolve to the real members.
+    pg.execute(NOW_VALID)
+    build(tmp_path)
+    resolved = keys()
+    assert all(key > 0 for key in resolved["order"][:2] + resolved["item"][:1] + resolved["spend"][:1]
+               + resolved["event"][:3] + resolved["conversion"]), resolved
+    assert pg.execute("SELECT c.customer_name, k.campaign_name, k.campaign_type FROM warehouse.fact_orders f "
+                      "JOIN warehouse.dim_customer c USING (customer_sk) JOIN warehouse.dim_campaign k USING (campaign_sk) "
+                      "WHERE f.order_id = '3'").fetchone() == ("Ravi", "Monsoon", "retention")
+    assert pg.execute("SELECT sum(target_count)::int FROM audit.v_latest_reconciliation_report "
+                      "WHERE check_category = 'Invalid references'").fetchone()[0] == 0
+    assert pg.execute("SELECT attributed_revenue, ad_platform_conversions FROM marts.mart_campaign_performance "
+                      "WHERE campaign_id = '77'").fetchone() == (300, 4)
+
+
+def test_an_order_that_breaks_the_total_identity_fails_the_build(pg, tmp_path):
+    pg.execute("DROP SCHEMA staging CASCADE; CREATE SCHEMA staging")
+    pg.execute(STAGING_ROWS)
+    build(tmp_path)
+    live = pg.execute("SELECT to_regnamespace('warehouse')::oid").fetchone()[0]
+    pg.execute("UPDATE staging.stg_gold_fact_orders_scd2 SET total_amount = total_amount + 1 WHERE order_id = 1")
+    failed = run_sql_files(tmp_path, *BUILD_FILES)
+    output = failed.stdout + failed.stderr
+    assert failed.returncode != 0
+    assert "FAILED CHECK audit.reconciliation_report | Order total equals net revenue plus tax plus shipping for every order" in output
+    assert pg.execute("SELECT to_regnamespace('warehouse')::oid").fetchone()[0] == live, "the build was not published"
+
+
 # --- 2: timestamps are TIMESTAMPTZ; business dates stay IST dates ----------------
 
 @pytest.mark.parametrize("name", ["create_warehouse_tables", "create_marts", "scd2_validation_queries", "reconciliation_report"])
@@ -374,7 +609,7 @@ def test_timestamps_are_instants_and_do_not_depend_on_the_session_time_zone(pg, 
         assert pg.execute(facts).fetchall() == in_utc
         assert pg.execute("SELECT warehouse.business_date('2026-06-17 19:00+00'), "
                           "warehouse.business_date('2026-06-17 18:29:59+00')").fetchone() == (dt.date(2026, 6, 18), dt.date(2026, 6, 17))
-        pg.execute((WAREHOUSE_DIR / "create_warehouse_tables.sql").read_text(encoding="utf-8"))
+        pg.execute(begin_build() + build_step("create_warehouse_tables") + "COMMIT;")
         assert pg.execute(facts).fetchall() == in_utc, "a build in an IST session gave other times, dates, hashes or keys"
     finally:
         pg.execute("SET timezone = 'UTC'")

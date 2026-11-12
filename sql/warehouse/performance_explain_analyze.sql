@@ -169,11 +169,8 @@ SELECT
     tc.campaign_status,
     COUNT(*) AS spend_days,
     SUM(fcs.spend_amount) AS total_spend,
-    SUM(fcs.attributed_revenue) AS attributed_revenue,
-    ROUND(
-        SUM(fcs.attributed_revenue) / NULLIF(SUM(fcs.spend_amount), 0),
-        4
-    ) AS roas
+    SUM(fcs.impressions) AS impressions,
+    SUM(fcs.clicks) AS clicks
 FROM target_campaign tc
 JOIN warehouse.fact_campaign_spend fcs
     ON tc.campaign_sk = fcs.campaign_sk
@@ -182,7 +179,7 @@ GROUP BY
     tc.campaign_name,
     tc.campaign_status
 ORDER BY
-    roas DESC;
+    total_spend DESC;
 
 
 -- ---------------------------------------------------------------------------

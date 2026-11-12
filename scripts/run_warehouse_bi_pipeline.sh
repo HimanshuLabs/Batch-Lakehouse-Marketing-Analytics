@@ -4,6 +4,8 @@ export P2_RUN_ID="${P2_RUN_ID:-warehouse-$(date +%s%N)-$$}"
 
 # The warehouse is rebuilt as one transaction (sql/warehouse/begin_generation.sql):
 # readers see the old warehouse until it commits, then the new one.
+# run_warehouse_sql.sh takes the pipeline run lock for the build, so this
+# cannot overlap a pipeline run (exit code 75: another run owns the lock).
 echo "==> Building the warehouse: facts and dimensions, SCD2 validation, marts, reconciliation"
 env -u PGPORT bash scripts/run_warehouse_sql.sh \
   sql/warehouse/begin_generation.sql \

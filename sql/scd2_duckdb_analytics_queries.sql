@@ -92,8 +92,6 @@ SELECT
     product_id,
     product_name,
     category,
-    brand,
-    status,
     units_sold,
     total_revenue,
     avg_selling_price,
@@ -105,20 +103,18 @@ LIMIT 50;
 
 
 -- ============================================================
--- 6. Product revenue by category and brand
+-- 6. Product revenue by category
 -- ============================================================
 
 SELECT
     COALESCE(category, 'Unknown') AS category,
-    COALESCE(brand, 'Unknown') AS brand,
     COUNT(*) AS product_count,
     SUM(units_sold) AS units_sold,
     SUM(total_revenue) AS total_revenue,
     AVG(avg_selling_price) AS avg_selling_price
 FROM read_parquet('data/gold/mart_product_performance_scd2/*.parquet')
 GROUP BY
-    COALESCE(category, 'Unknown'),
-    COALESCE(brand, 'Unknown')
+    COALESCE(category, 'Unknown')
 ORDER BY total_revenue DESC;
 
 
@@ -182,7 +178,7 @@ ORDER BY purchases DESC;
 
 SELECT
     'fact_orders_scd2' AS object_name,
-    SUM(total_amount) AS amount
+    SUM(cart_value) FILTER (WHERE order_status = 'completed') AS amount
 FROM read_parquet('data/gold/fact_orders_scd2/**/*.parquet')
 
 UNION ALL

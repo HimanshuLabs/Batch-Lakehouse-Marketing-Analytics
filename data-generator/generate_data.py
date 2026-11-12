@@ -6,6 +6,7 @@ import random
 import shutil
 import uuid
 from datetime import date, datetime, timedelta
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
 import pandas as pd
@@ -102,6 +103,72 @@ RECOMMENDATION_ALGORITHMS = ["collaborative_filtering", "content_based", "rankin
 AB_TEST_GROUPS = ["A", "B", "control"]
 COUNTRIES = ["India"]
 
+# Attributes added after the first data set (order status, tax and shipping,
+# ad-platform results, product brand and status, campaign objective). Each value
+# comes from its own random stream, seeded from the row's ID, so none of the
+# draws above changes and a row has the same value in every batch.
+ORDER_STATUSES = ["completed", "cancelled", "returned"]
+ORDER_STATUS_WEIGHTS = [0.88, 0.07, 0.05]
+TAX_RATE = 0.18                      # GST on the net order value
+FREE_SHIPPING_THRESHOLD = 4999.00   # INR: orders from this net value ship free
+SHIPPING_FEE = 99.00
+PRODUCT_STATUSES = ["active", "discontinued"]
+DISCONTINUED_SHARE = 0.06
+PRODUCT_BRANDS = {
+    "Electronics": ["Voltix", "Nexora", "Pixelo"],
+    "Fashion": ["Urbane", "Threadly", "Kairo"],
+    "Home": ["Hearthly", "Nestwell", "Casaro"],
+    "Beauty": ["Lumera", "Velvetine", "Aurae"],
+    "Fitness": ["Stridex", "Corefit", "Pulseon"],
+    "Books": ["Inkwell", "Pageturn", "Leaflet"],
+}
+CAMPAIGN_TYPES = ["awareness", "consideration", "conversion", "retention"]
+
+# Prices: a realistic INR list-price range per category (log-uniform, so cheap
+# products are more common than expensive ones), ending in 9 like a price tag.
+PRICE_RANGES = {
+    "Electronics": (799, 14999),
+    "Fashion": (399, 3999),
+    "Home": (299, 7999),
+    "Beauty": (149, 1499),
+    "Fitness": (299, 4999),
+    "Books": (149, 899),
+}
+# Units per line: most lines are one unit. The generator's 1..5 draw is kept
+# (so no later draw moves) and mapped onto these quantities.
+QUANTITY_OF_DRAW = {1: 1, 2: 1, 3: 1, 4: 2, 5: 3}
+
+# The ad platform's daily feed is one row per campaign, day and region. Each
+# campaign targets a few of these states. Spend comes from the campaign's
+# budget; clicks, impressions, conversions and attributed revenue follow from
+# the spend through the channel's cost per click and click-through rate and a
+# return on ad spend, so the platform's figures agree with each other.
+AD_REGIONS = ["Andhra Pradesh", "Bihar", "Gujarat", "Haryana", "Karnataka", "Kerala", "Madhya Pradesh",
+              "Maharashtra", "Punjab", "Rajasthan", "Tamil Nadu", "Telangana", "Uttar Pradesh", "West Bengal"]
+AD_REGIONS_PER_CAMPAIGN = (2, 5)
+# The states a city can be in (the customer master's states). An order or a web
+# event from the customer's home city is in the customer's home state; any
+# other city is always placed in the same state.
+INDIA_STATES = ["Andhra Pradesh", "Arunachal Pradesh", "Assam", "Bihar", "Chhattisgarh", "Goa", "Gujarat", "Haryana",
+                "Himachal Pradesh", "Jharkhand", "Karnataka", "Kerala", "Madhya Pradesh", "Maharashtra", "Manipur",
+                "Meghalaya", "Mizoram", "Nagaland", "Odisha", "Punjab", "Rajasthan", "Sikkim", "Tamil Nadu",
+                "Telangana", "Tripura", "Uttar Pradesh", "Uttarakhand", "West Bengal"]
+# traffic_source: (cost per click in INR, click-through rate), each a (low, high) range.
+CHANNEL_BENCHMARKS = {
+    "google": ((18.0, 45.0), (0.020, 0.060)),
+    "facebook": ((8.0, 22.0), (0.008, 0.020)),
+    "instagram": ((9.0, 25.0), (0.006, 0.018)),
+    "email": ((6.0, 14.0), (0.020, 0.050)),
+    "affiliate": ((12.0, 30.0), (0.010, 0.030)),
+    "organic": ((5.0, 12.0), (0.010, 0.030)),
+}
+DEFAULT_BENCHMARK = ((10.0, 30.0), (0.010, 0.030))
+# The return on ad spend the platform reports for a campaign-day-region
+# (lognormal: median about 3, rarely above 8), and the value of one conversion.
+PLATFORM_ROAS = (1.1, 0.45)
+PLATFORM_ROAS_CAP = 9.0
+PLATFORM_CONVERSION_VALUE = (2500.0, 9000.0)
+
 
 def random_date(rng: random.Random, anchor: date, start_days_ago: int, end_days_ago: int = 0) -> date:
     days_ago = rng.randint(end_days_ago, start_days_ago)
@@ -181,19 +248,47 @@ def generate_customers(count: int = 500) -> pd.DataFrame:
     return df
 
 
+def product_brand(product_id: int, category: object) -> str:
+    brands = PRODUCT_BRANDS.get(category) or sorted(brand for names in PRODUCT_BRANDS.values() for brand in names)
+    return random.Random(f"brand|{product_id}").choice(brands)
+
+
+def add_product_brand_and_status(df: pd.DataFrame) -> pd.DataFrame:
+    """brand and product_status, inserted after category; their own streams per product."""
+    brand = [product_brand(int(pid), category) for pid, category in zip(df["product_id"], df["category"])]
+    status = [PRODUCT_STATUSES[random.Random(f"product_status|{int(pid)}").random() < DISCONTINUED_SHARE]
+              for pid in df["product_id"]]
+    position = df.columns.get_loc("category") + 1
+    df.insert(position, "brand", brand)
+    df.insert(position + 1, "product_status", status)
+    return df
+
+
+def list_price(category: str, position: float) -> float:
+    """The list price at position 0..1 of the category's range: log-uniform, ending in 9."""
+    low, high = PRICE_RANGES[category]
+    price = low * (high / low) ** position
+    return float(max(low, int(price // 10) * 10 + 9))
+
+
 def generate_products(count: int = 150) -> pd.DataFrame:
     rows = []
 
     for product_id in range(1, count + 1):
-        original_price = round(random.uniform(199, 99999), 2)
+        # The same draws, in the same order, as before prices depended on the
+        # category: the first one now places the price inside its category's range.
+        price_position = (random.uniform(199, 99999) - 199) / (99999 - 199)
         discount_percent = random.choice(DISCOUNT_PERCENTS)
+        product_name = random.choice(PRODUCT_NAMES)
+        category = random.choice(PRODUCT_CATEGORIES)
+        original_price = list_price(category, price_position)
         discounted_price = round(original_price * (1 - discount_percent / 100), 2)
 
         rows.append(
             {
                 "product_id": product_id,
-                "product_name": random.choice(PRODUCT_NAMES),
-                "category": random.choice(PRODUCT_CATEGORIES),
+                "product_name": product_name,
+                "category": category,
                 "original_price": original_price,
                 "discount_percent": discount_percent,
                 "discounted_price": discounted_price,
@@ -205,6 +300,7 @@ def generate_products(count: int = 150) -> pd.DataFrame:
         )
 
     df = pd.DataFrame(rows)
+    df = add_product_brand_and_status(df)
 
     # Dirty records
     df.loc[0, "category"] = None
@@ -232,7 +328,9 @@ def generate_campaigns(count: int = 40) -> pd.DataFrame:
                 "traffic_source": random.choice(TRAFFIC_SOURCES),
                 "ab_test_group": random.choice(AB_TEST_GROUPS),
                 "target_segment": random.choice(USER_SEGMENTS),
-                "budget": round(random.uniform(10000, 500000), 2),
+                # A lifetime budget in INR, sized to the shop: a campaign sells a
+                # few dozen orders of a few thousand rupees each.
+                "budget": round(random.uniform(25000, 300000), 2),
                 "campaign_status": random.choice(CAMPAIGN_STATUSES),
                 "start_date": start_date.isoformat(),
                 "end_date": end_date.isoformat(),
@@ -243,6 +341,9 @@ def generate_campaigns(count: int = 40) -> pd.DataFrame:
         )
 
     df = pd.DataFrame(rows)
+    # The campaign's objective, from its own stream per campaign.
+    df.insert(df.columns.get_loc("traffic_source") + 1, "campaign_type",
+              [random.Random(f"campaign_type|{int(cid)}").choice(CAMPAIGN_TYPES) for cid in df["campaign_id"]])
 
     # budget is a lifetime authorization in INR, not a daily allowance. Changes
     # replace that authorization; SCD2 versions are never additive budgets.
@@ -305,6 +406,8 @@ def apply_product_changes(df: pd.DataFrame, rng: random.Random) -> pd.DataFrame:
         changed["discount_percent"] = 35
         changed["discounted_price"] = round(float(changed["original_price"].iloc[0]) * 0.65, 2)
         changed["inventory_remaining"] = 0
+        # Sold out and withdrawn: a tracked status change in the same version.
+        changed["product_status"] = "discontinued"
         changed["updated_at"] = ANCHOR_CHANGE_TIMESTAMPS["products"]
         return pd.concat([df, changed], ignore_index=True)
 
@@ -319,6 +422,17 @@ def apply_product_changes(df: pd.DataFrame, rng: random.Random) -> pd.DataFrame:
         changed["discounted_price"] = round(float(changed["original_price"].iloc[0]) * (1 - new_discount / 100), 2)
         changed["updated_at"] = f"{BATCH_DATE}T{CHANGE_TIME}"
         changes.append(changed)
+
+    # One more product changes only its status (SCD2-tracked), picked by a
+    # separate stream so the price changes above keep their draws.
+    status_rng = random.Random(f"product_status_change|{BATCH_DATE}")
+    price_changed = {int(change["product_id"].iloc[0]) for change in changes}
+    candidates = sorted(int(value) for value in df["product_id"].dropna().unique()
+                        if int(value) not in NON_CHANGEABLE_IDS["products"] and int(value) not in price_changed)
+    changed = base_row(df, "product_id", status_rng.choice(candidates))
+    changed["product_status"] = "active" if changed["product_status"].iloc[0] == "discontinued" else "discontinued"
+    changed["updated_at"] = f"{BATCH_DATE}T{CHANGE_TIME}"
+    changes.append(changed)
 
     return pd.concat([df, *changes], ignore_index=True)
 
@@ -377,7 +491,7 @@ def generate_web_events(
         event_time = random_datetime(rng, BATCH_DAY, window_days, 0)
         event_type = rng.choice(EVENT_TYPES)
 
-        quantity = rng.randint(1, 5) if event_type in ["add_to_cart", "checkout", "purchase"] else 0
+        quantity = QUANTITY_OF_DRAW[rng.randint(1, 5)] if event_type in ["add_to_cart", "checkout", "purchase"] else 0
         discounted_price = float(product["discounted_price"])
         cart_value = round(quantity * discounted_price, 2)
 
@@ -446,6 +560,10 @@ def generate_web_events(
         events.append(event)
 
     assign_sessions(events, campaigns)
+    # Where the event happened: the state of its city (a field of its own, from
+    # the city alone, so no draw above changes).
+    for event in events:
+        event["state"] = event_state(event)
 
     # Dirty event for quarantine testing
     events.append(
@@ -513,6 +631,15 @@ def generate_web_events(
     )
 
     return events
+
+
+def event_state(event: dict) -> str | None:
+    city = event.get("city")
+    if not isinstance(city, str) or not city:
+        return None
+    if city == event.get("home_city") and isinstance(event.get("home_state"), str):
+        return event["home_state"]
+    return random.Random(f"state|{city}").choice(INDIA_STATES)
 
 
 def assign_sessions(events: list[dict], campaigns: pd.DataFrame) -> None:
@@ -610,6 +737,7 @@ def generate_orders(web_events: list[dict], rng: random.Random, count: int) -> p
                 "fraud_score": event["fraud_score"],
                 "country": event["country"],
                 "city": event["city"],
+                "state": event["state"],
                 "schema_version": SCHEMA_VERSION,
                 "source": "orders_from_purchase_events",
             }
@@ -632,7 +760,7 @@ def generate_order_items(orders: pd.DataFrame, products: pd.DataFrame, rng: rand
 
     for n in range(1, count + 1):
         product = rng.choice(valid_products)
-        quantity = rng.randint(1, 5)
+        quantity = QUANTITY_OF_DRAW[rng.randint(1, 5)]
         discounted_price = float(product["discounted_price"])
         line_amount = round(quantity * discounted_price, 2)
 
@@ -680,6 +808,37 @@ def fill_empty_orders(orders: pd.DataFrame, items: pd.DataFrame, fill_rng: rando
     return items
 
 
+def order_charges(net: float) -> tuple[float, float, float]:
+    """(tax_amount, shipping_amount, total_amount) of an order with this net value."""
+    # Exact decimal arithmetic, rounded half up to the cent, so the amounts are
+    # the same in pandas, Spark and Postgres.
+    cents = Decimal("0.01")
+    net_value = Decimal(str(net))
+    tax = (net_value * Decimal(str(TAX_RATE))).quantize(cents, rounding=ROUND_HALF_UP)
+    shipping = Decimal("0.00") if net >= FREE_SHIPPING_THRESHOLD else Decimal(str(SHIPPING_FEE)).quantize(cents)
+    return float(tax), float(shipping), float((net_value + tax + shipping).quantize(cents, rounding=ROUND_HALF_UP))
+
+
+def add_order_status_and_charges(orders: pd.DataFrame) -> pd.DataFrame:
+    """order_status, tax_amount, shipping_amount and total_amount, inserted after cart_value.
+
+    cart_value stays the net value (the sum of the lines); total_amount is what
+    the customer was charged: net + tax + shipping. It has that meaning in
+    every layer (Silver, Gold, the warehouse, the marts and the exports). The status comes from its
+    own stream per order ID, so a duplicated order ID has one status.
+    """
+    orders = orders.copy()
+    status = [random.Random(f"order_status|{int(order_id)}").choices(ORDER_STATUSES, ORDER_STATUS_WEIGHTS)[0]
+              for order_id in orders["order_id"]]
+    charges = [order_charges(float(net)) for net in orders["cart_value"]]
+    position = orders.columns.get_loc("cart_value") + 1
+    orders.insert(position, "tax_amount", [tax for tax, _, _ in charges])
+    orders.insert(position + 1, "shipping_amount", [shipping for _, shipping, _ in charges])
+    orders.insert(position + 2, "total_amount", [total for _, _, total in charges])
+    orders.insert(orders.columns.get_loc("payment_method"), "order_status", status)
+    return orders
+
+
 def generate_orders_and_items(
     web_events: list[dict],
     products: pd.DataFrame,
@@ -701,6 +860,7 @@ def generate_orders_and_items(
 
     totals = items.groupby("order_id")["line_amount"].sum().round(2)
     orders["cart_value"] = orders["order_id"].map(totals).astype(float)
+    orders = add_order_status_and_charges(orders)
 
     # Dirty order records
     orders.loc[2, "cart_value"] = -500
@@ -720,9 +880,30 @@ def delivery_surge(campaign_id: int, spend_day: date) -> bool:
     return random.Random(f"surge|{campaign_id}|{spend_day}").random() < 0.08
 
 
+def campaign_regions(campaign_id: int) -> list[tuple[str, float]]:
+    """The states a campaign targets and the share of its spend each one gets."""
+    rng = random.Random(f"regions|{campaign_id}")
+    regions = sorted(rng.sample(AD_REGIONS, rng.randint(*AD_REGIONS_PER_CAMPAIGN)))
+    weights = [rng.uniform(0.5, 2.0) for _ in regions]
+    return [(region, weight / sum(weights)) for region, weight in zip(regions, weights)]
+
+
+def split_spend(amount: float, shares: list[float]) -> list[float]:
+    """amount in whole paise per share; the last part takes the rounding remainder, so the parts sum to amount."""
+    cents = int(round(amount * 100))
+    parts = [int(cents * share) for share in shares[:-1]]
+    parts.append(cents - sum(parts))
+    return [part / 100 for part in parts]
+
+
 def generate_ad_spend(campaigns: pd.DataFrame, rng: random.Random, window_days: int, count: int) -> pd.DataFrame:
-    # One observed campaign-day charge, in INR. Only the stated lifetime
-    # period is eligible; budget revisions replace the cap, not add daily caps.
+    # The ad platform's feed: one row per campaign, day and targeted region, in
+    # INR. count is the number of sampled campaign-days; every region of a
+    # sampled campaign-day is in the feed, and campaign_day_spend repeats the
+    # platform's total for the campaign-day on each of its rows, so a missing
+    # or altered regional row is detectable. Only the stated lifetime period
+    # is eligible; budget revisions replace the cap, not add daily caps. The
+    # budget is compared with the spend summed over regions and days.
     # Non-anchor windows are (batch_date-window_days, batch_date], so adjacent
     # configured 14-day windows cannot bill their shared boundary twice.
     days = window_days + 1 if IS_ANCHOR_BATCH else window_days
@@ -742,36 +923,95 @@ def generate_ad_spend(campaigns: pd.DataFrame, rng: random.Random, window_days: 
     if len(selected) < 4:
         raise ValueError("At least four eligible campaign-days are needed for spend fixtures")
     rows = []
-    for n, (campaign_id, spend_day, campaign, period_days) in enumerate(selected, 1):
+    for campaign_id, spend_day, campaign, period_days in selected:
         daily_rng = random.Random(f"delivery|{campaign_id}|{spend_day}")
         # Overlapping distributions: surge truth is NOT a spend>budget label.
         # Normal stochastic delivery can also overspend; neither is clipped.
         surge = delivery_surge(campaign_id, spend_day)
         factor = daily_rng.lognormvariate(-0.3, 0.7) * (1.8 if surge else 1.0)
-        amount = round(float(campaign["budget"]) / period_days * factor, 2)
-        impressions = daily_rng.randint(1000, 500000)
-        rows.append({
-            "spend_id": fact_id(n), "campaign_id": campaign_id,
-            "traffic_source": campaign["traffic_source"], "spend_date": spend_day.isoformat(),
-            "impressions": impressions, "clicks": daily_rng.randint(10, impressions),
-            "spend_amount": amount, "schema_version": SCHEMA_VERSION,
-            "source": "marketing_ad_platform",
-        })
+        amount = max(round(float(campaign["budget"]) / period_days * factor, 2), 1.0)
+        (cpc_range, ctr_range) = CHANNEL_BENCHMARKS.get(campaign["traffic_source"], DEFAULT_BENCHMARK)
+        regions = campaign_regions(campaign_id)
+        # A little day-to-day movement between the regions, renormalized.
+        shares = [share * daily_rng.uniform(0.85, 1.15) for _, share in regions]
+        shares = [share / sum(shares) for share in shares]
+        for (region, _), regional_spend in zip(regions, split_spend(amount, shares)):
+            # Clicks from the spend and the channel's cost per click; impressions
+            # from the clicks and its click-through rate; conversions and their
+            # value from the return the platform reports on that spend.
+            clicks = max(1, round(regional_spend / daily_rng.uniform(*cpc_range)))
+            impressions = max(clicks, round(clicks / daily_rng.uniform(*ctr_range)))
+            roas = min(daily_rng.lognormvariate(*PLATFORM_ROAS), PLATFORM_ROAS_CAP)
+            value = daily_rng.uniform(*PLATFORM_CONVERSION_VALUE)
+            # A whole number of conversions with the expected value spend x ROAS /
+            # value: the fraction decides whether one more conversion happened.
+            expected = regional_spend * roas / value
+            conversions = min(clicks, int(expected) + (daily_rng.random() < expected - int(expected)))
+            rows.append({
+                "spend_id": fact_id(len(rows) + 1), "campaign_id": campaign_id,
+                "traffic_source": campaign["traffic_source"], "spend_date": spend_day.isoformat(),
+                "country": "India", "state": region,
+                "impressions": impressions, "clicks": clicks,
+                "conversions": conversions, "attributed_revenue": round(conversions * value, 2),
+                "spend_amount": regional_spend, "campaign_day_spend": amount,
+                "schema_version": SCHEMA_VERSION, "source": "marketing_ad_platform",
+            })
 
-    df = pd.DataFrame(rows)
-
-    # Dirty records
-    df.loc[0, "spend_amount"] = -100
-    df.loc[1, "clicks"] = df.loc[1, "impressions"] + 100
-    df.loc[2, "campaign_id"] = 999999
-    df.loc[3, "spend_date"] = None
-
-    return df
+    return pd.DataFrame(rows)
 
 
 # ---------------------------------------------------------------------------
 # Atomic write
 # ---------------------------------------------------------------------------
+
+
+def append_dirty(df: pd.DataFrame, source_index: int, **values) -> tuple[pd.DataFrame, int]:
+    """Append a copy of one row with the given values; return the frame and the new row's index."""
+    row = df.iloc[[source_index]].copy()
+    for column, value in values.items():
+        row[column] = value
+    df = pd.concat([df, row], ignore_index=True)
+    return df, len(df) - 1
+
+
+def add_attribute_fixtures(outputs: dict[str, pd.DataFrame]) -> dict[str, dict[int, str]]:
+    """One deliberately dirty row per new attribute, appended to its file.
+
+    They are new rows with IDs of their own (above every generated ID of the
+    batch), added after all facts exist, so no existing row and no draw
+    changes. Silver must quarantine each of them.
+    """
+    fixtures: dict[str, dict[int, str]] = {name: {} for name in outputs}
+
+    def add(name: str, source_index: int, reason: str, **values) -> None:
+        outputs[name], index = append_dirty(outputs[name], source_index, **values)
+        fixtures[name][index] = reason
+
+    stamp = f"{BATCH_DATE}T{CHANGE_TIME}"
+    add("products.csv", 5, "invalid_product_status", product_id=900001, product_status="recalled", updated_at=stamp)
+    add("products.csv", 6, "missing_brand", product_id=900002, brand=None, updated_at=stamp)
+    add("campaigns.csv", 5, "invalid_campaign_type", campaign_id=900001, campaign_type="brand_lift", updated_at=stamp)
+    add("orders.csv", 5, "invalid_order_status", order_id=fact_id(ID_BLOCK - 1), order_status="shipped")
+    add("orders.csv", 6, "negative_tax", order_id=fact_id(ID_BLOCK - 2), tax_amount=-1.0)
+    add("orders.csv", 7, "negative_shipping", order_id=fact_id(ID_BLOCK - 3), shipping_amount=-99.0)
+    add("orders.csv", 8, "total_amount_mismatch", order_id=fact_id(ID_BLOCK - 4),
+        total_amount=round(float(outputs["orders.csv"].loc[8, "total_amount"]) + 10, 2))
+    # Ad spend: every dirty row is an extra row, so each real campaign-day keeps
+    # all its regional rows and still sums to its campaign_day_spend.
+    spend = outputs["ad_spend.csv"]
+    add("ad_spend.csv", 0, "negative_spend", spend_id=fact_id(ID_BLOCK - 1), spend_amount=-100)
+    add("ad_spend.csv", 1, "clicks_exceed_impressions", spend_id=fact_id(ID_BLOCK - 2),
+        clicks=int(spend.loc[1, "impressions"]) + 100)
+    # A campaign nobody has delivered: a valid row with an invalid reference,
+    # kept in the facts on the invalid-reference member. Its own campaign-day.
+    add("ad_spend.csv", 2, "missing_campaign", spend_id=fact_id(ID_BLOCK - 3), campaign_id=999999,
+        campaign_day_spend=float(spend.loc[2, "spend_amount"]))
+    add("ad_spend.csv", 3, "missing_date", spend_id=fact_id(ID_BLOCK - 4), spend_date=None)
+    add("ad_spend.csv", 5, "conversions_exceed_clicks", spend_id=fact_id(ID_BLOCK - 5),
+        conversions=int(spend.loc[5, "clicks"]) + 1)
+    add("ad_spend.csv", 6, "negative_attributed_revenue", spend_id=fact_id(ID_BLOCK - 6), attributed_revenue=-1.0)
+    add("ad_spend.csv", 7, "missing_region", spend_id=fact_id(ID_BLOCK - 7), state=None)
+    return fixtures
 
 
 def write_json_lines(path: Path, records: list[dict]) -> None:
@@ -838,15 +1078,16 @@ def build_batch() -> dict[str, object]:
         web_events, products, fact_rng, fill_rng, counts["orders"], counts["order_items"]
     )
     ad_spend = generate_ad_spend(campaigns, random.Random(f"spend|{BATCH_DATE}"), window_days, counts["ad_spend"])
-    truth = [{"kind": "contract", "generator_version": "session_budget_v1", "currency": CURRENCY,
+    truth = [{"kind": "contract", "generator_version": "session_budget_v3", "currency": CURRENCY,
               "budget_grain": "campaign lifetime authorization, latest known revision replaces prior cap",
               "budget_period": "start_date through end_date inclusive, Asia/Kolkata",
-              "spend_grain": "observed campaign-day; sampled days are not a complete billing ledger",
+              "spend_grain": "observed campaign-day-region; every region of a sampled campaign-day is present; "
+                             "sampled days are not a complete billing ledger",
               "session_timeout_seconds": SESSION_TIMEOUT_SECONDS,
               "session_counters": "observed prefix, not final duration or future events",
               "labels_are_model_inputs": False}]
     for row_index, row in ad_spend.iterrows():
-        if row_index >= 4:
+        if True:
             truth.append({"kind": "delivery_scenario", "spend_id": int(row["spend_id"]),
                           "delivery_surge": delivery_surge(int(row["campaign_id"]), date.fromisoformat(row["spend_date"]))})
     for table, fixtures in {
@@ -855,22 +1096,24 @@ def build_batch() -> dict[str, object]:
         "campaigns.csv": {0: "missing_id", 1: "invalid_channel", 2: "invalid_period"},
         "orders.csv": {0: "duplicate_order_id", 2: "negative_total", 3: "missing_customer", 4: "invalid_timestamp"},
         "order_items.csv": {0: "missing_product", 1: "negative_quantity", 2: "line_amount_mismatch"},
-        "ad_spend.csv": {0: "negative_spend", 1: "clicks_exceed_impressions", 2: "missing_campaign", 3: "missing_date"},
         "web_events.json": {len(web_events)-1: "invalid_event"},
     }.items():
         truth.extend({"kind": "quality_fixture", "table": table, "row_index": index, "reason": reason}
                      for index, reason in fixtures.items())
 
-    return {
+    outputs = {
         "customers.csv": customers,
         "products.csv": products,
         "campaigns.csv": campaigns,
         "orders.csv": orders,
         "order_items.csv": order_items,
         "ad_spend.csv": ad_spend,
-        "web_events.json": web_events,
-        "generation_truth.json": truth,
     }
+    for table, fixtures in add_attribute_fixtures(outputs).items():
+        truth.extend({"kind": "quality_fixture", "table": table, "row_index": index, "reason": reason}
+                     for index, reason in fixtures.items())
+
+    return {**outputs, "web_events.json": web_events, "generation_truth.json": truth}
 
 
 def write_batch(raw_dir: Path, outputs: dict[str, object]) -> None:

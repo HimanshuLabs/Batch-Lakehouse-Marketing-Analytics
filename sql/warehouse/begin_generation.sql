@@ -20,12 +20,15 @@ Until the commit every other session still resolves the names warehouse, marts
 and audit to the old schemas, which nothing has touched: no lock, no wait. From
 the commit on, the same names are the new generation, complete.
 
-Views outside the generation (the dbt views, a consumer's own views) are bound
-to the tables they were created on, so they keep answering from the retired
-generation until they are replaced; dbt run replaces each of its views in its
-own transaction. A retired generation is dropped by a later build, once no view
-outside it reads it. If dbt or the export fails, the old dbt views therefore
-still exist and still work.
+The dbt views are bound to the tables they were created on, so they keep
+answering from the retired generation until dbt run replaces each of them in
+its own transaction. A retired generation is dropped by a later build, once no
+view outside it reads it. If dbt or the export fails, the old dbt views
+therefore still exist and still work. Nobody replaces a view that a consumer
+made on the warehouse, so the build refuses to start while one exists (step 0).
+
+The build files run only in this transaction: this file marks it
+(p2.build_txid), and each of them checks the mark first.
 
 Run it only through the build, which supplies the transaction:
 
@@ -37,6 +40,49 @@ Run it only through the build, which supplies the transaction:
 -- Outside a transaction block this fails, and nothing below runs.
 SAVEPOINT generation_needs_the_build_transaction;
 RELEASE SAVEPOINT generation_needs_the_build_transaction;
+
+-- ---------------------------------------------------------------------------
+-- 0. A view that someone else made on the warehouse (a consumer's own view on
+--    a mart, say) is bound to the tables of the generation it was created on.
+--    After this build it would go on answering from the retired tables, with
+--    no error: silently stale. The pipeline replaces only its own views (the
+--    dbt schemas of dbt/dbt_project.yml), so the build refuses to start while
+--    any other view or materialized view reads a generation, and names them.
+-- ---------------------------------------------------------------------------
+DO $$
+DECLARE
+    generation_schema CONSTANT TEXT := '^(staging|warehouse|marts|audit)(_next|_retired_[0-9]+)?$';
+    pipeline_schema CONSTANT TEXT := '^(staging|warehouse|marts|audit)(_next|_retired_[0-9]+)?$|^dbt(_staging|_warehouse|_marts|_audit)?$|^pg_temp_[0-9]+$';
+    outside_views TEXT;
+    outside_count BIGINT;
+BEGIN
+    SELECT string_agg(reader_name || ' (reads ' || reads || ')', '; ' ORDER BY reader_name), count(*)
+    INTO outside_views, outside_count
+    FROM (
+        SELECT format('%I.%I', reader_schema.nspname, reader.relname) AS reader_name,
+               string_agg(DISTINCT read_object.name, ', ' ORDER BY read_object.name) AS reads
+        FROM pg_depend d
+        JOIN pg_rewrite rule ON d.classid = 'pg_rewrite'::regclass AND rule.oid = d.objid
+        JOIN pg_class reader ON reader.oid = rule.ev_class
+        JOIN pg_namespace reader_schema ON reader_schema.oid = reader.relnamespace
+        JOIN LATERAL (
+            SELECT format('%I.%I', n.nspname, c.relname) AS name
+            FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE d.refclassid = 'pg_class'::regclass AND c.oid = d.refobjid AND n.nspname ~ generation_schema
+            UNION ALL
+            SELECT format('%I.%I()', n.nspname, f.proname)
+            FROM pg_proc f JOIN pg_namespace n ON n.oid = f.pronamespace
+            WHERE d.refclassid = 'pg_proc'::regclass AND f.oid = d.refobjid AND n.nspname ~ generation_schema
+        ) read_object ON TRUE
+        WHERE reader_schema.nspname !~ pipeline_schema
+        GROUP BY 1
+    ) outside;
+
+    IF outside_count > 0 THEN
+        RAISE EXCEPTION 'Warehouse build refused: % view(s) outside the pipeline''s schemas read the warehouse and would silently keep showing the old data after the build: %', outside_count, outside_views
+            USING HINT = 'Drop these views, run the build, then create them again (or read marts.* and the dbt views directly). Nothing was changed.';
+    END IF;
+END $$;
 
 -- ---------------------------------------------------------------------------
 -- 1. Drop the generations retired by earlier builds that nothing reads any
@@ -146,6 +192,9 @@ BEGIN
     IF to_regclass(format('%I.gold_to_staging_load_audit', 'audit' || tag)) IS NOT NULL THEN
         EXECUTE format('ALTER TABLE %I.gold_to_staging_load_audit SET SCHEMA audit', 'audit' || tag);
     END IF;
+
+    -- The build files check this marker; it ends with this transaction.
+    PERFORM set_config('p2.build_txid', txid_current()::TEXT, true);
 
     RAISE NOTICE 'New warehouse generation started; the live one is retired as *%.', tag;
 END $$;

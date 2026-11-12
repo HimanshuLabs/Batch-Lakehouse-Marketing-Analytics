@@ -68,8 +68,6 @@ SELECT
     product_id,
     product_name,
     category,
-    brand,
-    status,
     units_sold,
     total_revenue,
     avg_selling_price,
