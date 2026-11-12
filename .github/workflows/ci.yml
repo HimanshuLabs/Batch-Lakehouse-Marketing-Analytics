@@ -214,13 +214,17 @@ jobs:
             requirements.txt
             requirements-dev.txt
 
-      - name: Install runtime requirements and pytest
+      - name: Install runtime requirements, pytest and Jinja2
         run: |
           set -euo pipefail
 
           python -m pip install -r requirements.txt
-          python -m pip install "$(grep -E '^pytest==' requirements-dev.txt)"
+          # The test-only pins come from requirements-dev.txt (its dbt pins need Python 3.13).
+          python -m pip install \
+            "$(grep -E '^pytest==' requirements-dev.txt)" \
+            "$(grep -E '^Jinja2==' requirements-dev.txt)"
           python -m pytest --version
+          python -c "import jinja2; print('Jinja2', jinja2.__version__)"
           java -version
 
       - name: Unit tests with the machine in UTC
