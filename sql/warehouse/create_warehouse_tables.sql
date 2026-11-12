@@ -186,18 +186,10 @@ AS $$
     SELECT (now() AT TIME ZONE 'Asia/Kolkata')::DATE;
 $$;
 
-CREATE OR REPLACE FUNCTION warehouse.deterministic_sk(prefix TEXT, value TEXT)
-RETURNS BIGINT
-LANGUAGE SQL
-IMMUTABLE
-AS $$
-    SELECT abs(hashtext(coalesce(prefix, 'unknown') || '|' || coalesce(value, 'unknown'))::BIGINT) + 1000000000;
-$$;
-
--- Fact row keys: 64 bits, so collisions stay negligible as fact tables grow
--- (deterministic_sk is 32-bit and stays as it is for the dimension keys).
--- The first 16 hex digits of md5(prefix || '|' || natural_key), masked to 63
--- bits so the key is non-negative, and never 0.
+-- Every surrogate key in the warehouse, dimension or fact, is the same 63-bit
+-- hash, so collisions stay negligible as tables grow: the first 16 hex digits
+-- of md5(prefix || '|' || natural_key), masked to 63 bits so the key is
+-- non-negative, and never 0 (0 is the unknown member).
 CREATE OR REPLACE FUNCTION warehouse.deterministic_fact_sk(prefix TEXT, natural_key TEXT)
 RETURNS BIGINT
 LANGUAGE SQL
@@ -208,6 +200,15 @@ AS $$
         SELECT ('x' || substr(md5(prefix || '|' || natural_key), 1, 16))::BIT(64)::BIGINT
                & 9223372036854775807 AS k
     ) AS hashed;
+$$;
+
+-- Dimension keys (customer, product, campaign, region, channel): the same hash.
+CREATE OR REPLACE FUNCTION warehouse.deterministic_sk(prefix TEXT, value TEXT)
+RETURNS BIGINT
+LANGUAGE SQL
+IMMUTABLE
+AS $$
+    SELECT warehouse.deterministic_fact_sk(coalesce(prefix, 'unknown'), coalesce(value, 'unknown'));
 $$;
 
 CREATE OR REPLACE FUNCTION warehouse.region_nk(city_value TEXT, state_value TEXT, country_value TEXT)
@@ -400,6 +401,9 @@ CREATE TABLE warehouse.fact_orders (
     order_id TEXT NOT NULL UNIQUE,
     customer_sk BIGINT NOT NULL REFERENCES warehouse.dim_customer(customer_sk),
     campaign_sk BIGINT NOT NULL REFERENCES warehouse.dim_campaign(campaign_sk),
+    -- The source natural IDs beside the keys ('UNKNOWN' when the source has none).
+    customer_id TEXT NOT NULL,
+    campaign_id TEXT NOT NULL,
     order_date_sk INTEGER NOT NULL REFERENCES warehouse.dim_date(date_sk),
     region_sk BIGINT NOT NULL REFERENCES warehouse.dim_region(region_sk),
     channel_sk BIGINT NOT NULL REFERENCES warehouse.dim_channel(channel_sk),
@@ -413,6 +417,11 @@ CREATE TABLE warehouse.fact_orders (
     shipping_amount NUMERIC(18, 2) NOT NULL DEFAULT 0,
     net_revenue NUMERIC(18, 2) NOT NULL DEFAULT 0,
     source_record_hash TEXT,
+    -- The batch date (Asia/Kolkata day) of the Bronze batch that last delivered
+    -- the row, and an md5 of the row's business columns. Both come from the
+    -- data only, so a rebuild never changes them.
+    source_updated_at TIMESTAMP,
+    record_hash TEXT,
     warehouse_loaded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT chk_fact_orders_amounts CHECK (
         gross_amount >= 0
@@ -435,6 +444,8 @@ CREATE TABLE warehouse.fact_order_items (
     order_id TEXT,
     customer_sk BIGINT NOT NULL REFERENCES warehouse.dim_customer(customer_sk),
     product_sk BIGINT NOT NULL REFERENCES warehouse.dim_product(product_sk),
+    customer_id TEXT NOT NULL,
+    product_id TEXT NOT NULL,
     order_date_sk INTEGER NOT NULL REFERENCES warehouse.dim_date(date_sk),
     region_sk BIGINT NOT NULL REFERENCES warehouse.dim_region(region_sk),
     channel_sk BIGINT NOT NULL REFERENCES warehouse.dim_channel(channel_sk),
@@ -447,6 +458,11 @@ CREATE TABLE warehouse.fact_order_items (
     gross_amount NUMERIC(18, 2),
     discount_amount NUMERIC(18, 2),
     line_revenue NUMERIC(18, 2) NOT NULL DEFAULT 0,
+    -- The batch date (Asia/Kolkata day) of the Bronze batch that last delivered
+    -- the row, and an md5 of the row's business columns. Both come from the
+    -- data only, so a rebuild never changes them.
+    source_updated_at TIMESTAMP,
+    record_hash TEXT,
     warehouse_loaded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT chk_fact_order_items_metrics CHECK (
         quantity >= 0
@@ -467,6 +483,7 @@ CREATE TABLE warehouse.fact_campaign_spend (
     campaign_spend_sk BIGINT PRIMARY KEY,
     campaign_spend_nk TEXT NOT NULL UNIQUE,
     campaign_sk BIGINT NOT NULL REFERENCES warehouse.dim_campaign(campaign_sk),
+    campaign_id TEXT NOT NULL,
     spend_date_sk INTEGER NOT NULL REFERENCES warehouse.dim_date(date_sk),
     region_sk BIGINT NOT NULL REFERENCES warehouse.dim_region(region_sk),
     channel_sk BIGINT NOT NULL REFERENCES warehouse.dim_channel(channel_sk),
@@ -476,6 +493,11 @@ CREATE TABLE warehouse.fact_campaign_spend (
     clicks BIGINT NOT NULL DEFAULT 0,
     conversions BIGINT NOT NULL DEFAULT 0,
     attributed_revenue NUMERIC(18, 2) NOT NULL DEFAULT 0,
+    -- The batch date (Asia/Kolkata day) of the Bronze batch that last delivered
+    -- the row, and an md5 of the row's business columns. Both come from the
+    -- data only, so a rebuild never changes them.
+    source_updated_at TIMESTAMP,
+    record_hash TEXT,
     warehouse_loaded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT chk_fact_campaign_spend_metrics CHECK (
         spend_amount >= 0
@@ -498,6 +520,9 @@ CREATE TABLE warehouse.fact_web_events (
     customer_sk BIGINT NOT NULL REFERENCES warehouse.dim_customer(customer_sk),
     product_sk BIGINT NOT NULL REFERENCES warehouse.dim_product(product_sk),
     campaign_sk BIGINT NOT NULL REFERENCES warehouse.dim_campaign(campaign_sk),
+    customer_id TEXT NOT NULL,
+    product_id TEXT NOT NULL,
+    campaign_id TEXT NOT NULL,
     event_date_sk INTEGER NOT NULL REFERENCES warehouse.dim_date(date_sk),
     region_sk BIGINT NOT NULL REFERENCES warehouse.dim_region(region_sk),
     channel_sk BIGINT NOT NULL REFERENCES warehouse.dim_channel(channel_sk),
@@ -521,6 +546,11 @@ CREATE TABLE warehouse.fact_web_events (
     fraud_score NUMERIC(18, 6),
     schema_version TEXT,
     source_system TEXT,
+    -- The batch date (Asia/Kolkata day) of the Bronze batch that last delivered
+    -- the row, and an md5 of the row's business columns. Both come from the
+    -- data only, so a rebuild never changes them.
+    source_updated_at TIMESTAMP,
+    record_hash TEXT,
     warehouse_loaded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -558,12 +588,20 @@ CREATE TABLE warehouse.fact_conversions (
     customer_sk BIGINT NOT NULL REFERENCES warehouse.dim_customer(customer_sk),
     product_sk BIGINT NOT NULL REFERENCES warehouse.dim_product(product_sk),
     campaign_sk BIGINT NOT NULL REFERENCES warehouse.dim_campaign(campaign_sk),
+    customer_id TEXT NOT NULL,
+    product_id TEXT NOT NULL,
+    campaign_id TEXT NOT NULL,
     conversion_date_sk INTEGER NOT NULL REFERENCES warehouse.dim_date(date_sk),
     region_sk BIGINT NOT NULL REFERENCES warehouse.dim_region(region_sk),
     channel_sk BIGINT NOT NULL REFERENCES warehouse.dim_channel(channel_sk),
     conversion_timestamp TIMESTAMP,
     conversion_type TEXT NOT NULL,
     conversion_value NUMERIC(18, 2) NOT NULL DEFAULT 0,
+    -- The batch date (Asia/Kolkata day) of the Bronze batch that last delivered
+    -- the row, and an md5 of the row's business columns. Both come from the
+    -- data only, so a rebuild never changes them.
+    source_updated_at TIMESTAMP,
+    record_hash TEXT,
     warehouse_loaded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT chk_fact_conversions_value CHECK (conversion_value >= 0)
 );
@@ -1228,6 +1266,7 @@ BEGIN
                         0
                     ) AS net_revenue,
                     coalesce(nullif(r->>'record_hash', ''), nullif(r->>'source_record_hash', ''), md5(r::TEXT)) AS source_record_hash,
+                    warehouse.safe_date(r->>'ingestion_date')::TIMESTAMP AS source_updated_at,
                     md5(r::TEXT) AS row_fingerprint
                 FROM src
             )
@@ -1235,7 +1274,7 @@ BEGIN
                 order_sk, order_id, customer_sk, campaign_sk, order_date_sk, region_sk, channel_sk,
                 order_timestamp, order_status, payment_method, item_count,
                 gross_amount, discount_amount, tax_amount, shipping_amount, net_revenue,
-                source_record_hash
+                source_record_hash, customer_id, campaign_id, source_updated_at
             )
             SELECT DISTINCT ON (b.order_id)
                 warehouse.deterministic_fact_sk('order', b.order_id) AS order_sk,
@@ -1254,7 +1293,10 @@ BEGIN
                 b.tax_amount,
                 b.shipping_amount,
                 b.net_revenue,
-                b.source_record_hash
+                b.source_record_hash,
+                b.customer_id,
+                b.campaign_id,
+                b.source_updated_at
             FROM base b
             LEFT JOIN LATERAL (
                 SELECT customer_sk
@@ -1298,6 +1340,9 @@ BEGIN
                 shipping_amount = EXCLUDED.shipping_amount,
                 net_revenue = EXCLUDED.net_revenue,
                 source_record_hash = EXCLUDED.source_record_hash,
+                customer_id = EXCLUDED.customer_id,
+                campaign_id = EXCLUDED.campaign_id,
+                source_updated_at = EXCLUDED.source_updated_at,
                 warehouse_loaded_at = CURRENT_TIMESTAMP;
         $sql$, source_table);
     END IF;
@@ -1355,13 +1400,15 @@ BEGIN
                         warehouse.safe_numeric(r->>'line_total'),
                         0
                     ) AS source_line_revenue,
+                    warehouse.safe_date(r->>'ingestion_date')::TIMESTAMP AS source_updated_at,
                     md5(r::TEXT) AS row_fingerprint
                 FROM src
             )
             INSERT INTO warehouse.fact_order_items (
                 order_item_sk, order_item_nk, order_sk, order_id, customer_sk, product_sk,
                 order_date_sk, region_sk, channel_sk, order_timestamp,
-                quantity, unit_price, discount_percent, gross_amount, discount_amount, line_revenue
+                quantity, unit_price, discount_percent, gross_amount, discount_amount, line_revenue,
+                customer_id, product_id, source_updated_at
             )
             SELECT DISTINCT ON (b.order_item_nk)
                 warehouse.deterministic_fact_sk('order_item', b.order_item_nk) AS order_item_sk,
@@ -1385,7 +1432,11 @@ BEGIN
                 CASE
                     WHEN b.source_line_revenue > 0 THEN b.source_line_revenue
                     ELSE b.quantity * b.unit_price
-                END AS line_revenue
+                END AS line_revenue,
+                -- An item has no customer of its own: its order's customer.
+                coalesce(nullif(b.customer_id, 'UNKNOWN'), fo.customer_id, 'UNKNOWN') AS customer_id,
+                b.product_id,
+                b.source_updated_at
             FROM base b
             LEFT JOIN warehouse.fact_orders fo
                 ON fo.order_id = b.order_id
@@ -1427,6 +1478,9 @@ BEGIN
                 gross_amount = EXCLUDED.gross_amount,
                 discount_amount = EXCLUDED.discount_amount,
                 line_revenue = EXCLUDED.line_revenue,
+                customer_id = EXCLUDED.customer_id,
+                product_id = EXCLUDED.product_id,
+                source_updated_at = EXCLUDED.source_updated_at,
                 warehouse_loaded_at = CURRENT_TIMESTAMP;
         $sql$, source_table);
     END IF;
@@ -1525,12 +1579,14 @@ BEGIN
                     coalesce(warehouse.safe_bigint(r->>'clicks'), 0) AS clicks,
                     coalesce(warehouse.safe_bigint(r->>'conversions'), 0) AS conversions,
                     coalesce(warehouse.safe_numeric(r->>'attributed_revenue'), warehouse.safe_numeric(r->>'revenue'), 0) AS attributed_revenue,
+                    warehouse.safe_date(r->>'ingestion_date')::TIMESTAMP AS source_updated_at,
                     md5(r::TEXT) AS row_fingerprint
                 FROM src
             )
             INSERT INTO warehouse.fact_campaign_spend (
                 campaign_spend_sk, campaign_spend_nk, campaign_sk, spend_date_sk, region_sk, channel_sk,
-                spend_date, spend_amount, impressions, clicks, conversions, attributed_revenue
+                spend_date, spend_amount, impressions, clicks, conversions, attributed_revenue,
+                campaign_id, source_updated_at
             )
             SELECT DISTINCT ON (b.campaign_spend_nk)
                 warehouse.deterministic_fact_sk('campaign_spend', b.campaign_spend_nk) AS campaign_spend_sk,
@@ -1544,7 +1600,9 @@ BEGIN
                 b.impressions,
                 b.clicks,
                 b.conversions,
-                b.attributed_revenue
+                b.attributed_revenue,
+                b.campaign_id,
+                b.source_updated_at
             FROM base b
             LEFT JOIN LATERAL (
                 SELECT campaign_sk
@@ -1571,6 +1629,8 @@ BEGIN
                 clicks = EXCLUDED.clicks,
                 conversions = EXCLUDED.conversions,
                 attributed_revenue = EXCLUDED.attributed_revenue,
+                campaign_id = EXCLUDED.campaign_id,
+                source_updated_at = EXCLUDED.source_updated_at,
                 warehouse_loaded_at = CURRENT_TIMESTAMP;
         $sql$, source_table);
     END IF;
@@ -1645,6 +1705,7 @@ BEGIN
                     warehouse.safe_numeric(r->>'fraud_score') AS fraud_score,
                     nullif(r->>'schema_version', '') AS schema_version,
                     coalesce(nullif(r->>'source', ''), nullif(r->>'source_system', '')) AS source_system,
+                    warehouse.safe_date(r->>'ingestion_date')::TIMESTAMP AS source_updated_at,
                     md5(r::TEXT) AS row_fingerprint
                 FROM src
             ),
@@ -1731,7 +1792,8 @@ BEGIN
             traffic_source, search_query, time_on_page_sec, scroll_depth_percent,
             engagement_score, purchase_probability, cart_abandonment_probability,
             event_value, api_latency_ms, page_load_time_ms, fraud_score,
-            schema_version, source_system
+            schema_version, source_system,
+            customer_id, product_id, campaign_id, source_updated_at
         )
         SELECT
             warehouse.deterministic_fact_sk('web_event', b.event_id) AS event_sk,
@@ -1762,7 +1824,11 @@ BEGIN
             b.page_load_time_ms,
             b.fraud_score,
             b.schema_version,
-            b.source_system
+            b.source_system,
+            b.customer_id,
+            b.product_id,
+            b.campaign_id,
+            b.source_updated_at
         FROM web_events_resolved b
         WHERE b.reject_reason IS NULL
         ORDER BY b.event_id
@@ -1794,6 +1860,10 @@ BEGIN
             fraud_score = EXCLUDED.fraud_score,
             schema_version = EXCLUDED.schema_version,
             source_system = EXCLUDED.source_system,
+            customer_id = EXCLUDED.customer_id,
+            product_id = EXCLUDED.product_id,
+            campaign_id = EXCLUDED.campaign_id,
+            source_updated_at = EXCLUDED.source_updated_at,
             warehouse_loaded_at = CURRENT_TIMESTAMP;
     END IF;
 END $$;
@@ -1801,7 +1871,8 @@ END $$;
 INSERT INTO warehouse.fact_conversions (
     conversion_sk, conversion_nk, event_sk, event_id, customer_sk, product_sk, campaign_sk,
     conversion_date_sk, region_sk, channel_sk, conversion_timestamp,
-    conversion_type, conversion_value
+    conversion_type, conversion_value,
+    customer_id, product_id, campaign_id, source_updated_at
 )
 SELECT
     warehouse.deterministic_fact_sk('conversion', 'conversion|' || event_id) AS conversion_sk,
@@ -1816,7 +1887,11 @@ SELECT
     channel_sk,
     event_timestamp,
     event_type AS conversion_type,
-    event_value AS conversion_value
+    event_value AS conversion_value,
+    customer_id,
+    product_id,
+    campaign_id,
+    source_updated_at
 FROM warehouse.fact_web_events
 WHERE lower(event_type) IN (
     'purchase',
@@ -1838,8 +1913,53 @@ ON CONFLICT (conversion_nk) DO UPDATE SET
     conversion_timestamp = EXCLUDED.conversion_timestamp,
     conversion_type = EXCLUDED.conversion_type,
     conversion_value = EXCLUDED.conversion_value,
+    customer_id = EXCLUDED.customer_id,
+    product_id = EXCLUDED.product_id,
+    campaign_id = EXCLUDED.campaign_id,
+    source_updated_at = EXCLUDED.source_updated_at,
     warehouse_loaded_at = CURRENT_TIMESTAMP;
 
+
+-- ---------------------------------------------------------------------------
+-- record_hash: an md5 of each fact row's business columns (natural IDs, times
+-- and measures; no surrogate key, no load time). Computed after every load and
+-- backfill above, so it describes the row as consumers read it, and a rebuild
+-- from the same data gives the same hash. NULL is hashed as the text <NULL>.
+-- ---------------------------------------------------------------------------
+
+UPDATE warehouse.fact_orders SET record_hash = md5(array_to_string(ARRAY[
+    order_id, customer_id, campaign_id, order_timestamp::TEXT, order_status, payment_method, item_count::TEXT,
+    gross_amount::TEXT, discount_amount::TEXT, tax_amount::TEXT, shipping_amount::TEXT, net_revenue::TEXT
+], '|', '<NULL>'));
+
+UPDATE warehouse.fact_order_items SET record_hash = md5(array_to_string(ARRAY[
+    order_item_nk, order_id, customer_id, product_id, order_timestamp::TEXT, quantity::TEXT, unit_price::TEXT,
+    discount_percent::TEXT, gross_amount::TEXT, discount_amount::TEXT, line_revenue::TEXT
+], '|', '<NULL>'));
+
+UPDATE warehouse.fact_campaign_spend SET record_hash = md5(array_to_string(ARRAY[
+    campaign_spend_nk, campaign_id, spend_date::TEXT, spend_amount::TEXT, impressions::TEXT, clicks::TEXT,
+    conversions::TEXT, attributed_revenue::TEXT
+], '|', '<NULL>'));
+
+UPDATE warehouse.fact_web_events SET record_hash = md5(array_to_string(ARRAY[
+    event_id, session_id, customer_id, product_id, campaign_id, event_timestamp::TEXT, event_type,
+    user_journey_stage, device_type, operating_system, browser, network_type, traffic_source, search_query,
+    time_on_page_sec::TEXT, scroll_depth_percent::TEXT, engagement_score::TEXT, purchase_probability::TEXT,
+    cart_abandonment_probability::TEXT, event_value::TEXT, api_latency_ms::TEXT, page_load_time_ms::TEXT,
+    fraud_score::TEXT, schema_version, source_system
+], '|', '<NULL>'));
+
+UPDATE warehouse.fact_conversions SET record_hash = md5(array_to_string(ARRAY[
+    conversion_nk, event_id, customer_id, product_id, campaign_id, conversion_timestamp::TEXT, conversion_type,
+    conversion_value::TEXT
+], '|', '<NULL>'));
+
+ALTER TABLE warehouse.fact_orders ALTER COLUMN record_hash SET NOT NULL;
+ALTER TABLE warehouse.fact_order_items ALTER COLUMN record_hash SET NOT NULL;
+ALTER TABLE warehouse.fact_campaign_spend ALTER COLUMN record_hash SET NOT NULL;
+ALTER TABLE warehouse.fact_web_events ALTER COLUMN record_hash SET NOT NULL;
+ALTER TABLE warehouse.fact_conversions ALTER COLUMN record_hash SET NOT NULL;
 
 -- ---------------------------------------------------------------------------
 -- ---------------------------------------------------------------------------

@@ -77,9 +77,9 @@ def test_forced_scd_collision(pg, dimension, same_natural):
                f"('a', '2026-01-01', '2026-01-01'), "
                f"('{ 'a' if same_natural else 'b'}', '2026-02-01', '2026-02-01')")
     sql = warehouse_sql().replace(
-        "SELECT abs(hashtext(coalesce(prefix, 'unknown') || '|' || coalesce(value, 'unknown'))::BIGINT) + 1000000000;",
+        "SELECT warehouse.deterministic_fact_sk(coalesce(prefix, 'unknown'), coalesce(value, 'unknown'));",
         f"SELECT CASE WHEN prefix = '{dimension}' THEN 1000000001::BIGINT ELSE "
-        "abs(hashtext(coalesce(prefix, 'unknown') || '|' || coalesce(value, 'unknown'))::BIGINT) + 1000000000 END;")
+        "warehouse.deterministic_fact_sk(coalesce(prefix, 'unknown'), coalesce(value, 'unknown')) END;")
     with pytest.raises(psycopg.errors.RaiseException, match='Surrogate-key collision'):
         pg.execute(sql)
 
@@ -95,7 +95,7 @@ def test_duplicate_dimension_rows_are_not_collisions(pg, dimension):
 def test_revenue_check_detects_unknown_date_loss(pg):
     pg.execute(warehouse_sql())
     pg.execute("INSERT INTO warehouse.fact_orders(order_sk,order_id,customer_sk,campaign_sk,order_date_sk,"
-               "region_sk,channel_sk,net_revenue) VALUES (1,'one',0,0,0,0,0,25)")
+               "region_sk,channel_sk,net_revenue,customer_id,campaign_id,record_hash) VALUES (1,'one',0,0,0,0,0,25,'UNKNOWN','UNKNOWN','h1')")
     pg.execute(marts_sql())
     assert pg.execute("SELECT source_value,target_value,status FROM audit.mart_validation_report "
                       "WHERE check_name='daily_revenue_matches_fact_orders'").fetchone() == (25, 0, 'FAIL')
@@ -107,8 +107,9 @@ def test_recency_uses_latest_business_order_date(pg):
                "VALUES (1,'one','2026-01-01','9999-12-31',true),(2,'two','2026-01-01','9999-12-31',true),"
                "(3,'no orders','2026-01-01','9999-12-31',true)")
     pg.execute("INSERT INTO warehouse.fact_orders(order_sk,order_id,customer_sk,campaign_sk,order_date_sk,"
-               "region_sk,channel_sk,order_timestamp) VALUES (1,'one',1,0,0,0,0,'2026-06-17 18:29:59'),"
-               "(2,'two',2,0,0,0,0,'2026-06-17 18:30:00')")
+               "region_sk,channel_sk,order_timestamp,customer_id,campaign_id,record_hash) VALUES "
+               "(1,'one',1,0,0,0,0,'2026-06-17 18:29:59','one','UNKNOWN','h1'),"
+               "(2,'two',2,0,0,0,0,'2026-06-17 18:30:00','two','UNKNOWN','h2')")
     pg.execute(marts_sql())
     for today in ('2026-06-18', '2030-01-01'):
         pg.execute(f"CREATE OR REPLACE FUNCTION warehouse.business_today() RETURNS DATE LANGUAGE SQL STABLE "
@@ -146,9 +147,9 @@ def test_ordinary_dimension_collision_fails_on_primary_key(pg, dimension, source
     pg.execute(f'CREATE TABLE staging.stg_gold_dim_{source} ({column} text)')
     pg.execute(f"INSERT INTO staging.stg_gold_dim_{source} VALUES ('a'), ('b')")
     sql = warehouse_sql().replace(
-        "SELECT abs(hashtext(coalesce(prefix, 'unknown') || '|' || coalesce(value, 'unknown'))::BIGINT) + 1000000000;",
+        "SELECT warehouse.deterministic_fact_sk(coalesce(prefix, 'unknown'), coalesce(value, 'unknown'));",
         f"SELECT CASE WHEN prefix = '{dimension}' THEN 1000000001::BIGINT ELSE "
-        "abs(hashtext(coalesce(prefix, 'unknown') || '|' || coalesce(value, 'unknown'))::BIGINT) + 1000000000 END;")
+        "warehouse.deterministic_fact_sk(coalesce(prefix, 'unknown'), coalesce(value, 'unknown')) END;")
     with pytest.raises(psycopg.errors.UniqueViolation, match=f'dim_{dimension}_pkey'):
         pg.execute(sql)
 

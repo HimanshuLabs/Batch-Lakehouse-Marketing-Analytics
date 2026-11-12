@@ -142,8 +142,19 @@ def add_column_from_candidates(
     return df.withColumn(target_column, F.lit(default_value))
 
 
+def stamp_own_batch_date(df: DataFrame) -> DataFrame:
+    """processed_date is the batch that delivered the row (its Bronze ingestion_date).
+
+    Silver is rewritten in full by every run and stamps every row with that
+    run's BATCH_DATE, so after a backfill all rows carried the backfilled date.
+    """
+    if "ingestion_date" not in df.columns:
+        raise ValueError(f"Silver fact table has no ingestion_date column. Available columns: {', '.join(df.columns)}")
+    return df.withColumn("processed_date", F.col("ingestion_date").cast("date"))
+
+
 def normalize_orders(df: DataFrame) -> DataFrame:
-    result = df
+    result = stamp_own_batch_date(df)
 
     result = add_column_from_candidates(result, "order_id", ["event_id"])
     result = add_column_from_candidates(result, "customer_id", ["user_id"])
@@ -161,7 +172,7 @@ def normalize_orders(df: DataFrame) -> DataFrame:
 
 
 def normalize_order_items(df: DataFrame) -> DataFrame:
-    result = df
+    result = stamp_own_batch_date(df)
 
     result = add_column_from_candidates(result, "order_id", ["event_id"])
     result = add_column_from_candidates(result, "product_id", ["product"])
@@ -199,7 +210,7 @@ def normalize_order_items(df: DataFrame) -> DataFrame:
 
 
 def normalize_ad_spend(df: DataFrame) -> DataFrame:
-    result = df
+    result = stamp_own_batch_date(df)
 
     result = add_column_from_candidates(result, "spend_id", ["event_id"])
     result = add_column_from_candidates(result, "campaign_id", ["campaign"])

@@ -196,7 +196,7 @@ The lakehouse engine processes generated source data through Medallion layers.
 
 ### Batches and BATCH_DATE
 
-Every run processes one batch, named by `BATCH_DATE` (`YYYY-MM-DD`). Each job reads `BATCH_DATE` from the environment and falls back to today's date when it is unset, so always set it explicitly. The Airflow DAG sets it from the run's logical date, or from its `run_after` time when the run has no logical date (UTC in both cases).
+Every run processes one batch, named by `BATCH_DATE` (`YYYY-MM-DD`). Each job reads `BATCH_DATE` from the environment and falls back to today's date when it is unset, so always set it explicitly. The Airflow DAG sets it to the India (Asia/Kolkata) date of the run's logical date, or of its `run_after` time when the run has no logical date. The batch day is the business day: a run at 00:30 IST processes the day that has just started.
 
 The generator is incremental and deterministic:
 
@@ -368,7 +368,7 @@ build_warehouse_tables → run_scd2_validation → build_reporting_marts →
 run_warehouse_reconciliation → dbt_run → dbt_test → dbt_docs → power_bi_export
 ```
 
-The DAG has no schedule and allows one active run. Its tasks use `venv/bin/python` and `venv-dbt/bin/dbt`, and each task gets `BATCH_DATE = {{ (dag_run.logical_date or dag_run.run_after) | ds }}`.
+The DAG has no schedule and allows one active run. Its tasks use `venv/bin/python` and `venv-dbt/bin/dbt`, and each task gets `BATCH_DATE = {{ (dag_run.logical_date or dag_run.run_after).astimezone(macros.dateutil.tz.gettz('Asia/Kolkata')) | ds }}`: the India date of the run. Every task also runs under a run lock (`scripts/pipeline_lock.py`, lock file `logs/pipeline_run.lock`): a task of a second run started by any route fails at once with exit code 75 until the first run finishes or fails; `python scripts/pipeline_lock.py --release --force` clears the lock of a run that died.
 
 **Trigger from the UI.** Set the logical date to the day to process or rerun, at 12:00 on that day, or leave it at now to process today. The CLI's `-l` works the same way. Section 15 also has a scripted REST trigger with a render gate that shows the date before any task runs.
 
@@ -621,7 +621,7 @@ ps -eo pid,args | awk '$2 ~ /venv-airflow\/bin\/python$/ && $3 ~ /venv-airflow\/
 ss -ltnp | grep ':8080 ' | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2 > "$AIRFLOW_HOME/run/api-server.pid"
 ```
 
-**Trigger from the UI.** Open the DAG, choose Trigger, and set **Logical Date** to the day you want to process or rerun, at 12:00 on that day. Noon keeps the day the same in UTC, which `BATCH_DATE` uses, whichever timezone the UI shows. To process today, leave the field at its default, now. The CLI works the same way: `airflow dags trigger batch_lakehouse_marketing_analytics -l 2026-06-18T12:00:00+00:00`, or no `-l` for today. Each logical date can have one run. To rerun a day that already has one, clear that run in the UI or use another time on the same day.
+**Trigger from the UI.** Open the DAG, choose Trigger, and set **Logical Date** to the day you want to process or rerun, at 12:00 on that day. Noon is the same day in India, whose date `BATCH_DATE` uses, whichever timezone the UI shows. To process today, leave the field at its default, now: that is today in India, also between 00:00 and 05:30 IST. The CLI works the same way: `airflow dags trigger batch_lakehouse_marketing_analytics -l 2026-06-18T12:00:00+00:00`, or no `-l` for today. Each logical date can have one run. To rerun a day that already has one, clear that run in the UI or use another time on the same day.
 
 **Scripted option: REST trigger and render gate.** With the DAG paused, trigger through the REST API. For the first run of a date, set `logical_date`. For a rerun of a date that already has a run, send `"logical_date": null` with `run_after` set: without a logical date, `BATCH_DATE` comes from `run_after`.
 
@@ -685,6 +685,20 @@ docker start project2_postgres
 > ```
 
 The `project2` password is a local development default; it is also the default in `.env.example` and `dbt/profiles.yml.example`.
+
+**Read-only access.** Consumers (BI tools, Project 4, Project 5) connect as `p2_reader`, not as the owner. The role is created by `sql/warehouse/create_schemas.sql` on every run. It can `SELECT` from the `warehouse`, `marts` and `audit` schemas and from the dbt schemas (`dbt_staging`, `dbt_warehouse`, `dbt_marts`, `dbt_audit`); it cannot read `staging` and cannot write. Its password comes from `P2_READER_PASSWORD` in `.env` (the local default in `.env.example` is `p2_reader`); without one the role exists but cannot log in.
+
+| Setting | Value |
+|---|---|
+| Host | `localhost` |
+| Port | `5434` |
+| Database | `marketing_analytics` |
+| User | `p2_reader` |
+| Password | the value of `P2_READER_PASSWORD` in `.env` |
+
+```bash
+PGPASSWORD=<SECRET> psql -h localhost -p 5434 -U p2_reader -d marketing_analytics -c "SELECT count(*) FROM marts.mart_revenue_daily;"
+```
 
 ---
 

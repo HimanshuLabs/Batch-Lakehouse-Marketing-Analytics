@@ -220,6 +220,8 @@ def build_fact_web_events(web_events: DataFrame) -> DataFrame:
             "country",
             "schema_version",
             "source_system",
+            # The batch that delivered the event (the warehouse's source_updated_at).
+            "ingestion_date",
         ),
         "fact_web_events",
     )

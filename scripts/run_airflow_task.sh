@@ -41,9 +41,11 @@ case "${TASK_NAME}" in
     export BATCH_DATE="${batch_date}"
     raw_dir="data/raw/batch_date=${batch_date}"
     missing=0
-    for f in customers.csv products.csv campaigns.csv orders.csv order_items.csv ad_spend.csv web_events.json; do
+    # A CSV always has its header; an empty batch has an empty JSON-lines file.
+    for f in customers.csv products.csv campaigns.csv orders.csv order_items.csv ad_spend.csv; do
       [[ -s "${raw_dir}/${f}" ]] || missing=1
     done
+    [[ -f "${raw_dir}/web_events.json" ]] || missing=1
     if [[ "${missing}" -eq 0 ]]; then
       echo "Raw data for batch_date=${batch_date} already complete. Skipping generation."
     else

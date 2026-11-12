@@ -132,8 +132,8 @@ def test_campaign_mart_counts_budget_once_across_days_and_versions():
         conn.execute("INSERT INTO warehouse.dim_campaign(campaign_sk,campaign_id,budget,effective_from,effective_to,is_current) "
                      "VALUES (1,'campaign',1000,'2026-01-01','2026-02-01',false),"
                      "(2,'campaign',1200,'2026-02-01','9999-12-31',true)")
-        conn.execute("INSERT INTO warehouse.fact_campaign_spend(campaign_spend_sk,campaign_spend_nk,campaign_sk,spend_date_sk,region_sk,channel_sk,spend_amount) "
-                     "VALUES (1,'day1',1,0,0,0,700),(2,'day2',2,0,0,0,800)")
+        conn.execute("INSERT INTO warehouse.fact_campaign_spend(campaign_spend_sk,campaign_spend_nk,campaign_sk,spend_date_sk,region_sk,channel_sk,spend_amount,campaign_id,record_hash) "
+                     "VALUES (1,'day1',1,0,0,0,700,'campaign','h1'),(2,'day2',2,0,0,0,800,'campaign','h2')")
         conn.execute((CODE_ROOT / 'sql/warehouse/create_marts.sql').read_text())
         row = conn.execute("SELECT campaign_budget,total_spend,budget_remaining FROM marts.mart_campaign_performance "
                            "WHERE campaign_id='campaign'").fetchone()

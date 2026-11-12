@@ -60,11 +60,11 @@ SELECT 'channel', channel_sk, channel_nk, channel_name, channel_group FROM wareh
 SELECT 'customer', customer_sk, customer_id, effective_from FROM warehouse.dim_customer ORDER BY customer_sk;
 SELECT 'product', product_sk, product_id, effective_from FROM warehouse.dim_product ORDER BY product_sk;
 SELECT 'campaign', campaign_sk, campaign_id, effective_from FROM warehouse.dim_campaign ORDER BY campaign_sk;
-SELECT 'orders', order_id, order_sk, customer_sk, campaign_sk, order_date_sk, region_sk, channel_sk FROM warehouse.fact_orders ORDER BY order_id;
-SELECT 'items', order_item_nk, order_item_sk, order_sk, customer_sk, product_sk, order_date_sk, region_sk, channel_sk FROM warehouse.fact_order_items ORDER BY order_item_nk;
-SELECT 'spend', campaign_spend_nk, campaign_spend_sk, campaign_sk, spend_date_sk, region_sk, channel_sk FROM warehouse.fact_campaign_spend ORDER BY campaign_spend_nk;
-SELECT 'web', event_id, event_sk, customer_sk, product_sk, campaign_sk, event_date_sk, region_sk, channel_sk FROM warehouse.fact_web_events ORDER BY event_id;
-SELECT 'conversions', conversion_nk, conversion_sk, event_sk, customer_sk, product_sk, campaign_sk, conversion_date_sk, region_sk, channel_sk FROM warehouse.fact_conversions ORDER BY conversion_nk;
+SELECT 'orders', order_id, order_sk, customer_sk, campaign_sk, order_date_sk, region_sk, channel_sk, customer_id, campaign_id, source_updated_at, record_hash FROM warehouse.fact_orders ORDER BY order_id;
+SELECT 'items', order_item_nk, order_item_sk, order_sk, customer_sk, product_sk, order_date_sk, region_sk, channel_sk, customer_id, product_id, source_updated_at, record_hash FROM warehouse.fact_order_items ORDER BY order_item_nk;
+SELECT 'spend', campaign_spend_nk, campaign_spend_sk, campaign_sk, spend_date_sk, region_sk, channel_sk, campaign_id, source_updated_at, record_hash FROM warehouse.fact_campaign_spend ORDER BY campaign_spend_nk;
+SELECT 'web', event_id, event_sk, customer_sk, product_sk, campaign_sk, event_date_sk, region_sk, channel_sk, customer_id, product_id, campaign_id, source_updated_at, record_hash FROM warehouse.fact_web_events ORDER BY event_id;
+SELECT 'conversions', conversion_nk, conversion_sk, event_sk, customer_sk, product_sk, campaign_sk, conversion_date_sk, region_sk, channel_sk, customer_id, product_id, campaign_id, source_updated_at, record_hash FROM warehouse.fact_conversions ORDER BY conversion_nk;
 SQL
     psql_db < "$REPO/tests/sql/keyfree.sql" > "$WORK/$tag-keyfree.tsv"
     psql_db < "$REPO/tests/sql/marts_fingerprint.sql" > "$WORK/$tag-marts.tsv"
