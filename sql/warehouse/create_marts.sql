@@ -300,7 +300,9 @@ web_by_campaign AS (
         dc.campaign_id,
         COUNT(*) AS web_event_count,
         COUNT(DISTINCT fwe.session_id) FILTER (WHERE fwe.session_id IS NOT NULL) AS session_count,
-        COUNT(DISTINCT fwe.customer_sk) AS engaged_customer_count,
+        -- People by their natural key: a customer with several SCD versions
+        -- (customer_sk) is one customer.
+        COUNT(DISTINCT fwe.customer_id) AS engaged_customer_count,
         COUNT(*) FILTER (
             WHERE lower(fwe.event_type) IN ('purchase', 'conversion', 'order_completed')
                OR lower(COALESCE(fwe.user_journey_stage, '')) LIKE '%purchase%'
@@ -773,7 +775,7 @@ WITH event_enriched AS (
 
         fwe.event_id,
         fwe.session_id,
-        fwe.customer_sk,
+        fwe.customer_id,
         fwe.event_type,
         fwe.user_journey_stage,
         fwe.engagement_score,
@@ -810,7 +812,8 @@ SELECT
 
     COUNT(*) AS total_event_count,
     COUNT(DISTINCT session_id) FILTER (WHERE session_id IS NOT NULL) AS session_count,
-    COUNT(DISTINCT customer_sk) AS engaged_customer_count,
+    -- By natural key, as in mart_campaign_performance.
+    COUNT(DISTINCT customer_id) AS engaged_customer_count,
 
     COUNT(*) FILTER (
         WHERE stage_norm LIKE '%awareness%'

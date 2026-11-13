@@ -1290,7 +1290,8 @@ def test_the_second_batch_exercises_scd_types_0_1_and_2():
     kept = versions(row["user_id"])
     assert len(kept) == 1 and kept[0][1] == first[row["user_id"]]["signup_date"], kept
     report = json.loads((PROJECT_ROOT / "logs" / "scd2_quality_report.json").read_text(encoding="utf-8"))
-    assert report["dimensions"]["customers"]["type0_changes_ignored"] == {"signup_date": 1}
+    # One customer's signup date is restated in every batch after the first.
+    assert report["dimensions"]["customers"]["type0_changes_ignored"] == {"signup_date": len(batches) - 1}
     assert report["dimensions"]["customers"]["scd_types"]["signup_date"]["type"] == 0
 
     # Type 1: the corrected email is on every version of the customer, and no version was opened for it.
@@ -1313,3 +1314,29 @@ def test_the_second_batch_exercises_scd_types_0_1_and_2():
     assert sql("select count(*) from (select customer_id from warehouse.dim_customer group by 1 "
                "having count(distinct signup_date) > 1 or count(distinct email) > 1 or count(distinct loyalty_points) > 1) d") == [["0"]]
     assert sql("select count(*) > 0 from (select customer_id from warehouse.dim_customer group by 1 having count(*) > 1) d") == [["t"]]
+
+
+def test_the_funnel_conversion_rate_has_one_definition_in_both_routes():
+    import duckdb
+
+    # Route B (the Gold funnel mart): purchase sessions / sessions, between 0 and 1, row by row.
+    gold = PROJECT_ROOT / "data" / "gold" / "mart_marketing_funnel_scd2"
+    rows, wrong, purchase_sessions, sessions = duckdb.sql(
+        f"select count(*), count(*) filter (where overall_conversion_rate < 0 or overall_conversion_rate > 1 "
+        f"or abs(overall_conversion_rate - case when sessions_count = 0 then 0 else purchase_sessions::double / sessions_count end) > 1e-9), "
+        f"sum(purchase_sessions), sum(sessions_count) from read_parquet('{gold}/*.parquet')").fetchone()
+    assert rows > 0 and wrong == 0
+    # Route A (the warehouse mart): the same ratio as a percentage, row by row.
+    assert sql("select count(*) from marts.mart_marketing_funnel "
+               "where funnel_conversion_rate_pct < 0 or funnel_conversion_rate_pct > 100") == [["0"]]
+    # Overall, the two routes agree. (A session belongs to one campaign and channel, so Route B's rows add up
+    # to the distinct sessions; Route A's rows are per day, so the overall figure is taken from the events it reads.)
+    warehouse = sql("select count(distinct session_id) filter (where event_type = 'purchase'), count(distinct session_id) "
+                    "from warehouse.fact_web_events")[0]
+    assert [int(purchase_sessions), int(sessions)] == [int(value) for value in warehouse]
+    route_a = float(sql("select round(count(distinct session_id) filter (where event_type = 'purchase')::numeric "
+                        "/ count(distinct session_id) * 100, 2) from warehouse.fact_web_events")[0][0])
+    assert round(purchase_sessions / sessions * 100, 2) == route_a
+    report = json.loads((PROJECT_ROOT / "logs" / "scd2_gold_mart_report.json").read_text(encoding="utf-8"))
+    validation = report["validation"] if "validation" in report else report["marts"]["validation"]
+    assert validation["checks"]["funnel_conversion_rate_is_purchase_sessions_over_sessions"] is True

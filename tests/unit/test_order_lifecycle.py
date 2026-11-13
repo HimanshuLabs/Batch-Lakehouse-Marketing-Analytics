@@ -523,3 +523,27 @@ def test_nothing_after_its_date_reaches_a_snapshot_row(pg, tmp_path):
                                     AND warehouse.business_date(o.status_timestamp) <= s.snapshot_date)
            OR s.last_order_timestamp >= ((s.snapshot_date + 1)::timestamp AT TIME ZONE 'Asia/Kolkata')""").fetchone()[0]
     assert leaks == 0
+
+
+def test_a_customer_with_two_scd_versions_who_engages_with_one_campaign_counts_once(pg, tmp_path):
+    # Customer 7 has two versions (the second from 1 June 00:00 UTC, 05:30 IST) and visits campaign 5 under both:
+    # e1 on 10 May (version 1), e3 on 11 June (version 2), and twice on the business date 1 June, at 04:30 IST
+    # (version 1) and 06:30 IST (version 2). engaged_customer_count counted customer_sk, so it said two customers.
+    pg.execute("""
+        INSERT INTO staging.stg_gold_fact_web_events VALUES
+            ('f1', 'sf1', 7, 4, 5, '2026-05-31 23:00', 'page_view', 'facebook', 0, '2026-06-18'),
+            ('f2', 'sf2', 7, 4, 5, '2026-06-01 01:00', 'page_view', 'facebook', 0, '2026-06-18')""")
+    build(tmp_path)
+    versions = pg.execute("SELECT count(DISTINCT f.customer_sk), count(DISTINCT f.customer_id) FROM warehouse.fact_web_events f "
+                          "WHERE f.campaign_id = '5'").fetchone()
+    assert versions == (2, 1), "the events sit on two versions of one customer"
+
+    assert pg.execute("SELECT engaged_customer_count FROM marts.mart_campaign_performance WHERE campaign_id = '5'").fetchone()[0] == 1
+    assert pg.execute("SELECT engaged_customer_count, total_event_count FROM marts.mart_marketing_funnel "
+                      "WHERE campaign_id = '5' AND event_date = '2026-06-01'").fetchone() == (1, 2)
+    assert pg.execute("SELECT max(engaged_customer_count) FROM marts.mart_marketing_funnel").fetchone()[0] == 1
+    # The daily campaign snapshot runs the lifetime mart's query: one customer on every date.
+    assert pg.execute("SELECT DISTINCT engaged_customer_count FROM marts.mart_campaign_daily_snapshot "
+                      "WHERE campaign_id = '5' AND snapshot_date >= '2026-05-10'").fetchall() == [(1,)]
+    assert pg.execute("SELECT status FROM audit.mart_validation_report "
+                      "WHERE check_name = 'campaign_snapshot_last_date_matches_lifetime_mart'").fetchone()[0] == "PASS"

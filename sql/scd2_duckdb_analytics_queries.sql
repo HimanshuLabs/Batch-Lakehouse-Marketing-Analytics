@@ -135,8 +135,10 @@ SELECT
     add_to_cart,
     checkout,
     purchases,
+    purchase_sessions,
     view_to_cart_rate,
     cart_to_purchase_rate,
+    -- purchase sessions / sessions: between 0 and 1
     overall_conversion_rate
 FROM read_parquet('data/gold/mart_marketing_funnel_scd2/*.parquet')
 ORDER BY purchases DESC, overall_conversion_rate DESC;
@@ -155,6 +157,7 @@ SELECT
     SUM(add_to_cart) AS add_to_cart,
     SUM(checkout) AS checkout,
     SUM(purchases) AS purchases,
+    SUM(purchase_sessions) AS purchase_sessions,
     CASE
         WHEN SUM(page_views) = 0 THEN 0
         ELSE SUM(add_to_cart)::DOUBLE / SUM(page_views)
@@ -163,9 +166,10 @@ SELECT
         WHEN SUM(add_to_cart) = 0 THEN 0
         ELSE SUM(purchases)::DOUBLE / SUM(add_to_cart)
     END AS cart_to_purchase_rate,
+    -- The project's one funnel conversion rate: purchase sessions / sessions.
     CASE
-        WHEN SUM(page_views) = 0 THEN 0
-        ELSE SUM(purchases)::DOUBLE / SUM(page_views)
+        WHEN SUM(sessions_count) = 0 THEN 0
+        ELSE SUM(purchase_sessions)::DOUBLE / SUM(sessions_count)
     END AS overall_conversion_rate
 FROM read_parquet('data/gold/mart_marketing_funnel_scd2/*.parquet')
 GROUP BY channel
