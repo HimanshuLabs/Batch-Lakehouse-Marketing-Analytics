@@ -27,13 +27,13 @@ Observed local row counts:
 
 | Table | Row Count |
 |---|---:|
-| `warehouse.dim_campaign` | 41 |
-| `warehouse.dim_customer` | 505 |
-| `warehouse.dim_date` | 151 |
-| `warehouse.dim_product` | 153 |
-| `warehouse.fact_campaign_spend` | 1,182 |
-| `warehouse.fact_order_items` | 5,810 |
-| `warehouse.fact_orders` | 2,373 |
+| `warehouse.dim_campaign` | 55 |
+| `warehouse.dim_customer` | 506 |
+| `warehouse.dim_date` | 153 |
+| `warehouse.dim_product` | 156 |
+| `warehouse.fact_campaign_spend` | 4,284 |
+| `warehouse.fact_order_items` | 1,805 |
+| `warehouse.fact_orders` | 1,630 |
 
 Because these tables are small, PostgreSQL may choose sequential scans even when useful indexes exist. That is normal optimizer behavior. A sequential scan over a tiny table can be cheaper than walking an index and then fetching heap pages.
 
@@ -83,9 +83,9 @@ Observed local behavior:
 
 - PostgreSQL used sequential scans on the small local tables.
 - This is acceptable because:
-  - `warehouse.fact_orders` has only 2,373 rows,
-  - `warehouse.dim_date` has only 151 rows,
-  - `warehouse.dim_customer` has only 505 rows.
+  - `warehouse.fact_orders` has only 1,630 rows,
+  - `warehouse.dim_date` has only 153 rows,
+  - `warehouse.dim_customer` has only 506 rows.
 
 The query is still index-eligible through:
 
@@ -102,20 +102,19 @@ This query chooses a product that actually appears in `warehouse.fact_order_item
 
 Observed local proof:
 
-- `Index Only Scan using idx_fact_order_items_product`
-- `Index Scan using idx_fact_order_items_product`
-- `rows=2975`
+- `Index Only Scan using idx_fact_order_items_product` (`rows=1805`, to pick the product)
+- `Index Scan using idx_fact_order_items_product` (`rows=33`, the chosen product's items)
 
 This proves the product drilldown path is using the product foreign-key index.
 
 ### Demo 3: Campaign Spend and ROAS Lookup
 
-This query chooses an active campaign from `warehouse.fact_campaign_spend`, then sums its spend, impressions, and clicks (the ad platform feed carries no revenue, so the table has no revenue column).
+This query chooses an active campaign from `warehouse.fact_campaign_spend`, then sums its spend, impressions, and clicks.
 
 Observed local proof:
 
-- `Index Scan using idx_fact_campaign_spend_campaign_date`
-- `rows=739`
+- `Index Only Scan using idx_fact_campaign_spend_campaign_date` (`rows=4284`, to pick the campaign)
+- `Bitmap Index Scan on idx_fact_campaign_spend_campaign_date` (`rows=390`, the chosen campaign's regional spend rows)
 
 This proves the campaign spend lookup uses the composite index on `(campaign_sk, spend_date_sk)`.
 

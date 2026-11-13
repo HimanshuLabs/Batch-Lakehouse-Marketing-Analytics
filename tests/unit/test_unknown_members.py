@@ -128,7 +128,8 @@ def test_the_campaign_mart_reconciles_to_orders_with_a_known_campaign(spark, loa
     # Units sold are those of the orders that were not cancelled: the returned order's unit is one of them.
     product_mart = spark.createDataFrame([("p-1", 140.0, 4, 30.0), ("INVALID", 25.0, 1, 0.0)],
                                          "product_sk string, total_revenue double, units_sold int, refund_amount double")
-    funnel_mart = spark.createDataFrame([("facebook",)], "channel string")
+    funnel_mart = spark.createDataFrame(
+        [("facebook", 1, 2, 0.5)], "channel string, purchase_sessions long, sessions_count long, overall_conversion_rate double")
 
     result = marts.validate_marts(fact_orders, items, spend, campaign_mart, clv_mart, product_mart, funnel_mart)
 
@@ -166,11 +167,11 @@ def test_the_campaign_mart_reconciles_to_orders_with_a_known_campaign(spark, loa
 def test_the_gold_marts_carry_flagged_rows_for_the_unknown_and_invalid_members(spark, load_job):
     marts = load_job(MARTS_JOB)
     orders = spark.createDataFrame(
-        [(1, "c-1", "k-1", "2026-06-01 10:00:00", 100.0, "completed", 0.0),
-         (2, "INVALID", "UNKNOWN", "2026-06-02 10:00:00", 40.0, "completed", 0.0),
-         (3, "c-1", "INVALID", "2026-06-03 10:00:00", 25.0, "returned", 25.0)],
+        [(1, "c-1", "k-1", "2026-06-01 10:00:00", 100.0, "completed", 0.0, 7, 5),
+         (2, "INVALID", "UNKNOWN", "2026-06-02 10:00:00", 40.0, "completed", 0.0, 999, None),
+         (3, "c-1", "INVALID", "2026-06-03 10:00:00", 25.0, "returned", 25.0, 7, 888)],
         "order_id int, customer_sk string, campaign_sk string, order_date string, cart_value double, order_status string, "
-        "refund_amount double",
+        "refund_amount double, customer_id int, campaign_id int",
     ).withColumn("order_date", F.to_timestamp("order_date"))
     customers = spark.createDataFrame(
         [("c-1", 7, "Asha", "asha@example.org", "Pune", "MH", "India", "Student", "Gold")],
@@ -198,3 +199,108 @@ def test_the_gold_marts_carry_flagged_rows_for_the_unknown_and_invalid_members(s
         "INVALID": ("invalid_reference", "Invalid reference", 0.0, 9.0)}
     assert (mart["k-1"]["ad_platform_conversions"], mart["k-1"]["platform_attributed_revenue"], mart["k-1"]["platform_roas"]) == (3, 450.0, 9.0)
     assert mart["INVALID"]["returned_amount"] == 25.0
+
+
+def test_the_funnel_conversion_rate_is_purchase_sessions_over_sessions(spark, load_job):
+    # One definition in the project (the warehouse mart's): sessions with a
+    # purchase divided by all sessions. The Gold funnel mart divided purchase
+    # events by page views, which exceeded 1 whenever a campaign had more
+    # purchases than page views.
+    marts = load_job(MARTS_JOB)
+    events = spark.createDataFrame(
+        [   # campaign 5: three sessions, two of them buy; only one page view
+            ("e1", "s1", 7, 5, "facebook", "page_view", "2026-06-01 10:00:00"),
+            ("e2", "s1", 7, 5, "facebook", "purchase", "2026-06-01 10:05:00"),
+            ("e3", "s2", 8, 5, "facebook", "purchase", "2026-06-02 10:00:00"),
+            ("e4", "s3", 9, 5, "facebook", "add_to_cart", "2026-06-03 10:00:00"),
+            # organic: one session, no purchase
+            ("e5", "s4", 7, None, "organic", "product_view", "2026-06-04 10:00:00"),
+        ],
+        "event_id string, session_id string, user_id int, campaign_id int, traffic_source string, event_type string, "
+        "event_timestamp string",
+    ).withColumn("event_timestamp", F.to_timestamp("event_timestamp"))
+    campaigns = spark.createDataFrame(
+        [(5, "k-5", "Summer", "Student", "active", True)],
+        "campaign_id int, campaign_sk string, campaign_name string, target_segment string, campaign_status string, "
+        "is_current boolean")
+    funnel = marts.build_marketing_funnel_mart(events, campaigns)
+    rows = {row["channel"]: row.asDict() for row in funnel.collect()}
+
+    paid = rows["facebook"]
+    assert (paid["page_views"], paid["purchases"], paid["purchase_sessions"], paid["sessions_count"]) == (1, 2, 2, 3)
+    assert paid["overall_conversion_rate"] == pytest.approx(2 / 3), "purchase sessions / sessions, not purchases / page views (2.0)"
+    assert rows["organic"]["overall_conversion_rate"] == 0.0 and rows["organic"]["sessions_count"] == 1
+    for row in rows.values():
+        assert 0 <= row["overall_conversion_rate"] <= 1
+        assert row["overall_conversion_rate"] == pytest.approx(row["purchase_sessions"] / row["sessions_count"])
+
+    # The job's own validation states the definition and catches a rate that breaks it.
+    orders = spark.createDataFrame([(1, "c", "k-5", 10.0, "completed", 0.0)],
+                                   "order_id int, customer_sk string, campaign_sk string, cart_value double, "
+                                   "order_status string, refund_amount double")
+    items = spark.createDataFrame([(1, 1, "p", 10.0, 1, 0.0)],
+                                  "order_item_id int, order_id int, product_sk string, line_amount double, quantity int, "
+                                  "refund_amount double")
+    spend = spark.createDataFrame([(1, "k-5", 5.0)], "spend_id int, campaign_sk string, spend_amount double")
+    campaign_mart = spark.createDataFrame([("k-5", 10.0, 5.0, 0.0)], "campaign_sk string, total_revenue double, "
+                                          "total_spend double, refund_amount double")
+    clv = spark.createDataFrame([("c", 10.0, 0.0, 0.0, 0.0)], "customer_sk string, total_revenue double, "
+                                "cancelled_amount double, returned_amount double, refund_amount double")
+    product = spark.createDataFrame([("p", 10.0, 1, 0.0)], "product_sk string, total_revenue double, units_sold int, "
+                                    "refund_amount double")
+    check = "funnel_conversion_rate_is_purchase_sessions_over_sessions"
+    assert marts.validate_marts(orders, items, spend, campaign_mart, clv, product, funnel)["checks"][check] is True
+    old_rate = funnel.withColumn("overall_conversion_rate", F.col("purchases") / F.greatest(F.col("page_views"), F.lit(1)))
+    broken = marts.validate_marts(orders, items, spend, campaign_mart, clv, product, old_rate)
+    assert broken["checks"][check] is False and broken["status"] == "FAIL"
+
+
+def test_people_and_campaigns_are_counted_by_natural_key_not_by_scd_version(spark, load_job):
+    # Customer 7 changed tier, so the dimension has two versions of them (c-7-v1,
+    # c-7-v2). They ordered from campaign 5 under both versions: one customer,
+    # not two. Campaign 5 has two versions as well (k-5-v1, k-5-v2): for the
+    # customer it is one campaign. The Gold marts counted customer_sk and
+    # campaign_sk, which are versions.
+    marts = load_job(MARTS_JOB)
+    orders = spark.createDataFrame(
+        [(1, "c-7-v1", "k-5-v1", "2026-06-01 10:00:00", 100.0, "completed", 0.0, 7, 5),
+         (2, "c-7-v2", "k-5-v1", "2026-06-10 10:00:00", 50.0, "completed", 0.0, 7, 5),
+         (3, "c-8-v1", "k-5-v1", "2026-06-11 10:00:00", 30.0, "completed", 0.0, 8, 5),
+         (4, "c-7-v2", "k-5-v2", "2026-06-20 10:00:00", 20.0, "completed", 0.0, 7, 5),
+         (5, "c-7-v2", "UNKNOWN", "2026-06-21 10:00:00", 10.0, "completed", 0.0, 7, None),
+         (6, "c-9-v1", "k-5-v1", "2026-06-12 10:00:00", 99.0, "cancelled", 0.0, 9, 5)],
+        "order_id int, customer_sk string, campaign_sk string, order_date string, cart_value double, order_status string, "
+        "refund_amount double, customer_id int, campaign_id int",
+    ).withColumn("order_date", F.to_timestamp("order_date"))
+    campaigns = spark.createDataFrame(
+        [("k-5-v1", 5, "Summer", "conversion", "facebook", "Student", 1000.0, "active", "2026-05-01", "2026-07-01", False),
+         ("k-5-v2", 5, "Summer", "conversion", "facebook", "Student", 1500.0, "active", "2026-05-01", "2026-07-01", True)],
+        "campaign_sk string, campaign_id int, campaign_name string, campaign_type string, channel string, "
+        "target_segment string, budget double, campaign_status string, start_date string, end_date string, is_current boolean")
+    spend = spark.createDataFrame(
+        [(1, "k-5-v1", "2026-06-01", 30.0, 600, 6, 2, 300.0)],
+        "spend_id int, campaign_sk string, spend_date string, spend_amount double, impressions bigint, clicks bigint, "
+        "conversions bigint, attributed_revenue double")
+    by_campaign = {row["campaign_sk"]: row.asDict()
+                   for row in marts.build_campaign_performance_mart(orders, spend, campaigns).collect()}
+    # Version 1 of the campaign sold to customers 7 (under both of their versions) and 8: two customers.
+    assert (by_campaign["k-5-v1"]["orders_count"], by_campaign["k-5-v1"]["customers_count"]) == (3, 2)
+    assert (by_campaign["k-5-v2"]["orders_count"], by_campaign["k-5-v2"]["customers_count"]) == (1, 1)
+    assert by_campaign["UNKNOWN"]["customers_count"] == 1
+    # The cancelled order's customer (9) bought nothing.
+    assert sum(row["customers_count"] for row in by_campaign.values()) == 4
+
+    customers = spark.createDataFrame(
+        [("c-7-v1", 7, "Asha", "asha@example.org", "Pune", "MH", "India", "Student", "Silver"),
+         ("c-7-v2", 7, "Asha", "asha@example.org", "Pune", "MH", "India", "Student", "Gold"),
+         ("c-8-v1", 8, "Ravi", "ravi@example.org", "Pune", "MH", "India", "Student", "Gold"),
+         ("c-9-v1", 9, "Uma", "uma@example.org", "Pune", "MH", "India", "Student", "Gold")],
+        "customer_sk string, customer_id int, customer_name string, email string, city string, state string, "
+        "country string, customer_segment string, loyalty_tier string")
+    by_customer = {row["customer_sk"]: row.asDict()
+                   for row in marts.build_customer_lifetime_value_mart(orders, customers).collect()}
+    # Under version 2 the customer ordered from campaign 5 in both of its versions, and once organically:
+    # one campaign touched (two by version keys, three with the unknown member).
+    assert (by_customer["c-7-v2"]["total_orders"], by_customer["c-7-v2"]["campaigns_touched"]) == (3, 1)
+    assert by_customer["c-7-v1"]["campaigns_touched"] == 1 and by_customer["c-8-v1"]["campaigns_touched"] == 1
+    assert by_customer["c-9-v1"]["campaigns_touched"] == 0, "a cancelled order touches no campaign"

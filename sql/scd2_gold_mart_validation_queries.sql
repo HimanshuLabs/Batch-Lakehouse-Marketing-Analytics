@@ -121,8 +121,13 @@ SELECT
     add_to_cart,
     checkout,
     purchases,
+    purchase_sessions,
     view_to_cart_rate,
     cart_to_purchase_rate,
-    overall_conversion_rate
+    overall_conversion_rate,
+    -- The definition, recomputed: purchase sessions / sessions, never above 1.
+    CASE WHEN sessions_count = 0 THEN 0 ELSE purchase_sessions::DOUBLE PRECISION / sessions_count END
+        AS expected_overall_conversion_rate,
+    overall_conversion_rate BETWEEN 0 AND 1 AS rate_is_valid
 FROM mart_marketing_funnel_scd2
 ORDER BY purchases DESC;

@@ -172,7 +172,9 @@ def build_campaign_performance_mart(
         .groupBy("campaign_sk")
         .agg(
             F.countDistinct(when_sold(F.col("order_id"))).alias("orders_count"),
-            F.countDistinct(when_sold(F.col("customer_sk"))).alias("customers_count"),
+            # People are counted by their natural key: a customer with several
+            # SCD versions (customer_sk) is one customer.
+            F.countDistinct(when_sold(F.col("customer_id"))).alias("customers_count"),
             (F.coalesce(F.sum(when_sold(F.col("cart_value"))), F.lit(0.0)) - refunds()).alias("total_revenue"),
             F.sum(when_sold(F.col("cart_value"))).alias("net_sales"),
             refunds().alias("refund_amount"),
@@ -291,7 +293,9 @@ def build_customer_lifetime_value_mart(
             F.coalesce(F.avg(when_sold(F.col("cart_value"))), F.lit(0.0)).alias("avg_order_value"),
             F.min(when_sold(F.col("order_date"))).alias("first_order_date"),
             F.max(when_sold(F.col("order_date"))).alias("last_order_date"),
-            F.countDistinct(when_sold(F.col("campaign_sk"))).alias("campaigns_touched"),
+            # Campaigns by their natural key, not by SCD version; an organic
+            # order (no campaign_id) touches no campaign.
+            F.countDistinct(when_sold(F.col("campaign_id"))).alias("campaigns_touched"),
             F.countDistinct(when_status(CANCELLED, F.col("order_id"))).alias("cancelled_orders"),
             F.coalesce(F.sum(when_status(CANCELLED, F.col("cart_value"))), F.lit(0.0)).alias("cancelled_amount"),
             F.countDistinct(when_status(RETURNED, F.col("order_id"))).alias("returned_orders"),
@@ -403,7 +407,7 @@ def build_marketing_funnel_mart(
         spark = dim_campaigns.sparkSession
         return spark.createDataFrame(
             [],
-            "campaign_id string, campaign_sk string, campaign_name string, channel string, target_segment string, campaign_status string, page_views long, product_views long, add_to_cart long, checkout long, purchases long, sessions_count long, users_count long, view_to_cart_rate double, cart_to_purchase_rate double, overall_conversion_rate double, built_at timestamp",
+            "campaign_id string, campaign_sk string, campaign_name string, channel string, target_segment string, campaign_status string, page_views long, product_views long, add_to_cart long, checkout long, purchases long, purchase_sessions long, sessions_count long, users_count long, view_to_cart_rate double, cart_to_purchase_rate double, overall_conversion_rate double, built_at timestamp",
         )
 
     normalized = normalize_web_events(web_events)
@@ -433,6 +437,8 @@ def build_marketing_funnel_mart(
             F.sum(F.when(F.col("event_type") == "add_to_cart", 1).otherwise(0)).alias("add_to_cart"),
             F.sum(F.when(F.col("event_type") == "checkout", 1).otherwise(0)).alias("checkout"),
             F.sum(F.when(F.col("event_type") == "purchase", 1).otherwise(0)).alias("purchases"),
+            # Sessions that bought: the numerator of the conversion rate.
+            F.countDistinct(F.when(F.col("event_type") == "purchase", F.col("session_id"))).alias("purchase_sessions"),
             F.countDistinct("session_id").alias("sessions_count"),
             F.countDistinct("user_id").alias("users_count"),
             F.min(F.col("event_timestamp")).alias("first_event_timestamp"),
@@ -440,7 +446,12 @@ def build_marketing_funnel_mart(
         )
         .withColumn("view_to_cart_rate", safe_divide(F.col("add_to_cart"), F.col("page_views")))
         .withColumn("cart_to_purchase_rate", safe_divide(F.col("purchases"), F.col("add_to_cart")))
-        .withColumn("overall_conversion_rate", safe_divide(F.col("purchases"), F.col("page_views")))
+        # The funnel conversion rate has one definition in the project: the
+        # sessions with a purchase divided by all sessions, as in the warehouse
+        # mart (marts.mart_marketing_funnel.funnel_conversion_rate_pct, which
+        # shows it as a percentage). Always between 0 and 1. The two rates
+        # above are ratios of event counts and can exceed 1.
+        .withColumn("overall_conversion_rate", safe_divide(F.col("purchase_sessions"), F.col("sessions_count")))
         .withColumn("built_at", F.current_timestamp())
     )
 
@@ -512,6 +523,13 @@ def validate_marts(
         "clv_mart_has_rows": get_count(mart_customer_lifetime_value) > 0,
         "product_mart_has_rows": get_count(mart_product_performance) > 0,
         "funnel_mart_has_rows": get_count(mart_marketing_funnel) > 0,
+        # The conversion rate is purchase sessions / sessions, so never above 1.
+        "funnel_conversion_rate_is_purchase_sessions_over_sessions": mart_marketing_funnel.filter(
+            (F.col("purchase_sessions") > F.col("sessions_count"))
+            | (F.abs(F.col("overall_conversion_rate")
+                     - F.when(F.col("sessions_count") > 0, F.col("purchase_sessions") / F.col("sessions_count"))
+                     .otherwise(F.lit(0.0))) > 1e-9)
+        ).count() == 0,
     }
 
     return {
