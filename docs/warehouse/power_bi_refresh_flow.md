@@ -168,7 +168,7 @@ python -m json.tool exports/power_bi/export_manifest.json
 4. Create a semantic model or report from the uploaded CSV datasets, depending on the workspace features available.
 5. Confirm data types:
    - Date columns as Date
-   - Revenue/spend fields as Decimal number or Currency
+   - Revenue/spend fields as Decimal number or Currency. Every monetary field in the exports of both routes is in Indian rupees (INR); set the currency format to ₹ (English (India))
    - Count fields as Whole number
    - Rate fields as Decimal number or Percentage
    - ID/name fields as Text

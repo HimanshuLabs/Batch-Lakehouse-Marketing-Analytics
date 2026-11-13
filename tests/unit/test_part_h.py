@@ -598,7 +598,7 @@ def test_the_dbt_counts_in_the_docs_are_the_projects_and_explain_the_grant_hook(
     singular = len(list((dbt / "tests").glob("*.sql")))
     tests = in_yaml + singular
     hooks = list_items(dbt / "dbt_project.yml", "on-run-end")
-    assert (models, tests, hooks) == (24, 80, 1)
+    assert (models, tests, hooks) == (24, 82, 1)
 
     readme = (CODE_ROOT / "README.md").read_text(encoding="utf-8")
     state = (CODE_ROOT / "docs" / "warehouse" / "airflow_working_state.md").read_text(encoding="utf-8")

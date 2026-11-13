@@ -9,7 +9,7 @@ Verified on 2026-11-10 with run `manual__rerun2_2026-06-18` (BATCH_DATE 2026-06-
 - warehouse reconciliation was 14 of 14 PASS;
 - `power_bi_export` succeeded, with every `data_quality_summary.csv` row PASS.
 
-Those are the numbers of that run. The project now has 24 dbt models and 80 dbt tests; dbt reports `PASS=25` for `dbt run` and `PASS=81` for `dbt test`, because it also counts the `on-run-end` hook that grants `p2_reader` USAGE on the dbt schemas. Reconciliation now has 27 checks, and the DAG has 20 tasks (section below).
+Those are the numbers of that run. The project now has 24 dbt models and 82 dbt tests; dbt reports `PASS=25` for `dbt run` and `PASS=83` for `dbt test`, because it also counts the `on-run-end` hook that grants `p2_reader` USAGE on the dbt schemas. Reconciliation now has 27 checks, and the DAG has 20 tasks (section below).
 
 ---
 

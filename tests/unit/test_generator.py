@@ -134,7 +134,7 @@ def without_fixtures(frame: pd.DataFrame, key: str) -> pd.DataFrame:
 
 def test_order_status_tax_shipping_and_total_are_generated(anchor_and_increment):
     generator_text = (anchor_and_increment["2026-05-18"].parents[2] / GENERATOR).read_text(encoding="utf-8")
-    assert 'random.Random(f"order_status|{int(order_id)}")' in generator_text, "its own stream per order"
+    assert 'random.Random(f"order_status|{order_id}")' in generator_text, "its own stream per order"
     for batch, folder in anchor_and_increment.items():
         orders = pd.read_csv(folder / "orders.csv")
         clean = without_fixtures(orders, "order_id").drop(index=[0, 2, 3, 4], errors="ignore")
@@ -149,9 +149,10 @@ def test_order_status_tax_shipping_and_total_are_generated(anchor_and_increment)
         assert clean["tax_amount"].tolist() == tax, batch
         assert ((clean["cart_value"] >= 4999) == (clean["shipping_amount"] == 0)).all(), batch
         assert set(clean["shipping_amount"]) == {0.0, 99.0}, batch
-        # J3: realistic order values, so the shipping rule applies to a meaningful share.
-        assert 0.2 < (clean["shipping_amount"] > 0).mean() < 0.7, batch
-        assert 3000 < clean["cart_value"].mean() < 15000, batch
+        # K-A: an order is the cart that was bought (mostly one or two lines), so the
+        # average order is a few thousand rupees and most orders pay for shipping.
+        assert 0.6 < (clean["shipping_amount"] > 0).mean() < 0.95, batch
+        assert 1500 < clean["cart_value"].mean() < 6000, batch
         assert ((clean["cart_value"] + clean["tax_amount"] + clean["shipping_amount"]).round(2)
                 == clean["total_amount"]).all(), batch
         # cart_value is still the sum of the lines: tax and shipping are not in it.
@@ -206,8 +207,9 @@ def test_the_ad_feed_is_per_campaign_day_and_region_and_internally_coherent(anch
 
 def test_prices_and_quantities_are_realistic(anchor_and_increment):
     products = without_fixtures(pd.read_csv(anchor_and_increment["2026-05-18"] / "products.csv"), "product_id").iloc[3:150]
-    ranges = {"Electronics": (799, 14999), "Fashion": (399, 3999), "Home": (299, 7999), "Beauty": (149, 1499),
-              "Fitness": (299, 4999), "Books": (149, 899)}
+    # K-A: the category's range is that of its cheapest and its dearest catalogue item.
+    ranges = {"Electronics": (499, 14999), "Fashion": (399, 5999), "Home": (299, 14999), "Beauty": (149, 2999),
+              "Fitness": (199, 4999), "Books": (149, 899)}
     for category, (low, high) in ranges.items():
         prices = products[products["category"] == category]["original_price"]
         assert len(prices) > 5 and prices.between(low, high).all(), (category, prices.min(), prices.max())
@@ -215,18 +217,23 @@ def test_prices_and_quantities_are_realistic(anchor_and_increment):
     assert products.groupby("category")["original_price"].median()["Electronics"] \
         > 3 * products.groupby("category")["original_price"].median()["Books"]
     items = pd.read_csv(anchor_and_increment["2026-05-18"] / "order_items.csv").iloc[3:]
-    assert set(items["quantity"]) == {1, 2, 3} and (items["quantity"] == 1).mean() > 0.5
+    # One to three units are added at a time (K-A: adding a product twice gives a line of up to six).
+    assert {1, 2, 3} <= set(items["quantity"]) and items["quantity"].between(1, 6).all() and (items["quantity"] == 1).mean() > 0.5
     campaigns = without_fixtures(pd.read_csv(anchor_and_increment["2026-05-18"] / "campaigns.csv").dropna(subset=["campaign_id"]),
                                  "campaign_id")
-    assert campaigns["budget"].between(25000, 300000 * 1.5).all()
+    # A lifetime budget: INR 500 to 2,000 a day for 15 to 90 days (a revision raises it by up to half).
+    assert campaigns["budget"].between(500 * 15, 2000 * 90 * 1.5).all()
 
 
 def test_product_brand_and_status_and_campaign_type_are_generated(anchor_and_increment):
     first = pd.read_csv(anchor_and_increment["2026-05-18"] / "products.csv")
     later = pd.read_csv(anchor_and_increment["2026-06-18"] / "products.csv")
     base, base_later = without_fixtures(first, "product_id").iloc[:150], without_fixtures(later, "product_id").iloc[:150]
-    # The same product has the same brand and base status in every batch.
-    assert base[["product_id", "brand", "product_status"]].equals(base_later[["product_id", "brand", "product_status"]])
+    # The same product has the same brand in every batch. K-A: a later batch starts from the
+    # state the earlier one left, so product 5 (withdrawn by the anchor batch) stays withdrawn.
+    assert base[["product_id", "brand"]].equals(base_later[["product_id", "brand"]])
+    differs = base[base["product_status"].values != base_later["product_status"].values]["product_id"].tolist()
+    assert differs == [5] and base_later[base_later["product_id"] == 5]["product_status"].tolist() == ["discontinued"]
     assert base["brand"].nunique() >= 12 and base["brand"].notna().all()
     assert set(base["product_status"]) == {"active", "discontinued"}
     assert 0.02 < (base["product_status"] == "discontinued").mean() < 0.15
@@ -259,7 +266,7 @@ def test_each_new_attribute_has_one_dirty_row_recorded_in_the_truth_file(anchor_
     }
     for batch, folder in anchor_and_increment.items():
         truth = [json.loads(line) for line in (folder / "generation_truth.json").read_text(encoding="utf-8").splitlines()]
-        assert truth[0]["generator_version"] == "session_budget_v4"
+        assert truth[0]["generator_version"] == "coherent_source_v6"
         fixtures = {(row["table"], row["reason"]): row["row_index"] for row in truth if row["kind"] == "quality_fixture"}
         for table, reasons in expected.items():
             frame = pd.read_csv(folder / table)
@@ -276,48 +283,37 @@ def test_each_new_attribute_has_one_dirty_row_recorded_in_the_truth_file(anchor_
         assert over["conversions"] == over["clicks"] + 1
 
 
-def test_the_draws_that_were_not_meant_to_change_are_unchanged(anchor_and_increment):
-    # Part J added attributes from separate random streams; J3 changed prices,
-    # quantities, campaign budgets and the ad feed on purpose. Every other
-    # value is the one the generator wrote before Part J: these digests are of
-    # its files (the old rows; for web events every field but the price ones).
+def test_a_batch_is_the_pinned_one(anchor_and_increment):
+    # The generator is deterministic per BATCH_DATE: these are the digests of the
+    # files it writes for two batches generated in date order.
+    #
+    # They were replaced on purpose in Part K-A, which made the source coherent
+    # and for that changed existing draws: customers (city with its state,
+    # language, name with gender, email from the name, tier from points, segment
+    # from age, prime share), products (a distinct catalogue per category and
+    # brand, item price ranges), campaigns (paid channels only, name from the
+    # channel, status from the dates, budget from the period), web events
+    # (one device, place and traffic source per visit, a cart per visit) and
+    # orders and items (the cart of the purchase event). The final part replaced
+    # them again: names and IP addresses come from Faker (Indian locale), and
+    # customers have a signup date and Type 0 and Type 1 changes. The ad feed and the
+    # truth file follow from those and are not pinned (the feed uses lognormal
+    # draws, whose last digit may differ between platforms).
     import hashlib
-    import json
 
-    kept = {
-        "customers.csv": None,
-        "orders.csv": ["order_id", "user_id", "campaign_id", "order_timestamp", "payment_method", "fraud_score",
-                       "country", "city", "schema_version", "source"],
-        "order_items.csv": ["order_item_id", "order_id", "product_id", "product_name", "category", "discount_percent"],
-        "products.csv": ["product_id", "product_name", "category", "discount_percent", "inventory_remaining",
-                         "schema_version", "source", "updated_at"],
-        "campaigns.csv": ["campaign_id", "campaign_name", "traffic_source", "ab_test_group", "target_segment",
-                          "campaign_status", "start_date", "end_date", "schema_version", "source", "updated_at"],
+    digests = {
+        f"{batch}/{name}": hashlib.sha256((folder / name).read_bytes()).hexdigest()[:16]
+        for batch, folder in anchor_and_increment.items()
+        for name in ("customers.csv", "products.csv", "campaigns.csv", "orders.csv", "order_items.csv", "web_events.json")
     }
-    old_rows = {"2026-05-18": {"customers.csv": 502, "orders.csv": 1311, "order_items.csv": 5000, "products.csv": 152,
-                               "campaigns.csv": 41},
-                "2026-06-18": {"customers.csv": 504, "orders.csv": 150, "order_items.csv": 625, "products.csv": 153,
-                               "campaigns.csv": 41}}
-    # (state is a new field of each event, derived from its city)
-    price_fields = ("original_price", "discounted_price", "cart_value", "quantity", "state")
-    digests = {}
-    for batch, folder in anchor_and_increment.items():
-        for name, columns in kept.items():
-            frame = pd.read_csv(folder / name, dtype=str, keep_default_na=False).iloc[:old_rows[batch][name]]
-            frame = frame if columns is None else frame[columns]
-            digests[f"{batch}/{name}"] = hashlib.sha256(frame.to_csv(index=False).encode()).hexdigest()[:16]
-        events = [json.loads(line) for line in (folder / "web_events.json").read_text(encoding="utf-8").splitlines()]
-        events = [{key: value for key, value in event.items() if key not in price_fields} for event in events]
-        digests[f"{batch}/web_events.json"] = hashlib.sha256(json.dumps(events, sort_keys=True).encode()).hexdigest()[:16]
-    assert digests == EXPECTED_UNCHANGED_DIGESTS
+    assert digests == EXPECTED_DIGESTS
 
 
-# sha256 (first 16 hex digits), computed from the files the generator wrote before Part J.
-EXPECTED_UNCHANGED_DIGESTS = {
-    "2026-05-18/customers.csv": "8b0ececa3490fd56", "2026-05-18/orders.csv": "86cb92e37d112ec1",
-    "2026-05-18/order_items.csv": "69ab2208ea11e3f8", "2026-05-18/products.csv": "1a540b680437060b",
-    "2026-05-18/campaigns.csv": "978dfe8e064cf547", "2026-05-18/web_events.json": "f42b7e013225bd3b",
-    "2026-06-18/customers.csv": "0106d3cecf5057c3", "2026-06-18/orders.csv": "34f135e230e77dcc",
-    "2026-06-18/order_items.csv": "2e09ab3c28b2af4e", "2026-06-18/products.csv": "2111fed3cbddc9c4",
-    "2026-06-18/campaigns.csv": "cacdc7e1088ce2ad", "2026-06-18/web_events.json": "4379e2aa6cfc7490",
+EXPECTED_DIGESTS = {
+    "2026-05-18/customers.csv": "0b875d32a4e445b5", "2026-05-18/products.csv": "9ff03fb5756b7b18",
+    "2026-05-18/campaigns.csv": "cbdf13286e0fef74", "2026-05-18/orders.csv": "cc8ecbb54e3d56c1",
+    "2026-05-18/order_items.csv": "ce5e99377ba8eefc", "2026-05-18/web_events.json": "9d4e1e6fc9a3942d",
+    "2026-06-18/customers.csv": "26e807cc0a0cd3a4", "2026-06-18/products.csv": "728cfa99eb876488",
+    "2026-06-18/campaigns.csv": "4a8a546f71ab8efd", "2026-06-18/orders.csv": "0e7c6a3a0a38b2d9",
+    "2026-06-18/order_items.csv": "240782662c75c986", "2026-06-18/web_events.json": "696f8f31e668ff19",
 }

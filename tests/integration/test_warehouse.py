@@ -425,7 +425,8 @@ def test_tax_shipping_and_order_total_are_real_and_add_up():
         "from warehouse.fact_orders")[0])
     assert taxed == orders, "tax is 18% of the net value"
     # J3: with realistic order values the shipping rule applies to a meaningful share.
-    assert 0.20 < shipped / orders < 0.70 and free > 0, (shipped, orders)
+    # K-A: an order is the cart that was bought, mostly one or two lines, so most orders are under the free-shipping value.
+    assert 0.60 < shipped / orders < 0.95 and free > 0, (shipped, orders)
     assert sql("select count(*) from warehouse.fact_orders "
                "where (net_revenue >= 4999) <> (shipping_amount = 0) or shipping_amount not in (0, 99)") == [["0"]]
     assert sql("select sum(total_amount) = sum(net_revenue + tax_amount + shipping_amount) "
@@ -868,7 +869,8 @@ def test_the_ad_feed_and_the_order_values_are_realistic():
                  "where product_sk > 0 group by 1 order by 1")
     assert {row[0] for row in prices} == {"Beauty", "Books", "Electronics", "Fashion", "Fitness", "Home"}
     assert all(100 <= float(low) and float(high) <= 15000 for _, low, high in prices), prices
-    assert sql("select max(quantity) <= 3, avg(quantity) < 2 from warehouse.fact_order_items") == [["t", "t"]]
+    # One to three units are added to a cart at a time; adding a product twice gives a line of up to six.
+    assert sql("select max(quantity) <= 6, avg(quantity) < 2 from warehouse.fact_order_items") == [["t", "t"]]
 
 
 def test_every_mart_has_flagged_member_rows_and_ties_out_to_the_facts():
@@ -1251,3 +1253,63 @@ def test_every_snapshot_row_equals_the_facts_filtered_to_its_date():
     assert sql("select count(*) from marts.mart_customer_daily_snapshot s where not exists (select 1 from warehouse.dim_customer d "
                "where d.customer_id = s.customer_id and warehouse.business_date(d.effective_from) <= s.snapshot_date) "
                "and s.member_type = 'known' and s.customer_name is not null") == [["0"]]
+
+
+# Final part: SCD Types 0, 1 and 2, each exercised by the second batch's own changes.
+
+def test_the_second_batch_exercises_scd_types_0_1_and_2():
+    raw = PROJECT_ROOT / "data" / "raw"
+    batches = sorted(path.name for path in raw.glob("batch_date=*"))
+    assert len(batches) >= 2
+
+    def customers(batch):
+        with (raw / batch / "customers.csv").open(encoding="utf-8", newline="") as file:
+            return list(csv.DictReader(file))
+
+    first = {row["user_id"]: row for row in reversed(customers(batches[0]))}   # the first row per customer
+    later = customers(batches[1])
+    state = {}
+    for row in later[:501]:
+        state.setdefault(row["user_id"], row)
+    changes = later[501:]
+    kinds = {}
+    for row in changes:
+        before = state[row["user_id"]]
+        kind = ("type2" if (row["membership_tier"], row["home_city"]) != (before["membership_tier"], before["home_city"])
+                else "type1" if row["email"] != before["email"] else "type0" if row["signup_date"] != before["signup_date"] else "?")
+        kinds.setdefault(kind, []).append((row, before))
+    assert sorted(kinds) == ["type0", "type1", "type2"] and len(kinds["type2"]) == 3
+
+    def versions(user_id):
+        return sql("select email, signup_date, membership_tier, home_city, is_current, effective_from, effective_to "
+                   f"from warehouse.dim_customer where customer_id = '{user_id}' order by effective_from")
+
+    # Type 0: the source changed the signup date; the dimension keeps the first one and the change is counted.
+    row, before = kinds["type0"][0]
+    assert row["signup_date"] != first[row["user_id"]]["signup_date"]
+    kept = versions(row["user_id"])
+    assert len(kept) == 1 and kept[0][1] == first[row["user_id"]]["signup_date"], kept
+    report = json.loads((PROJECT_ROOT / "logs" / "scd2_quality_report.json").read_text(encoding="utf-8"))
+    assert report["dimensions"]["customers"]["type0_changes_ignored"] == {"signup_date": 1}
+    assert report["dimensions"]["customers"]["scd_types"]["signup_date"]["type"] == 0
+
+    # Type 1: the corrected email is on every version of the customer, and no version was opened for it.
+    row, before = kinds["type1"][0]
+    corrected = versions(row["user_id"])
+    assert len(corrected) == 1 and corrected[0][0] == row["email"] != before["email"], corrected
+
+    # Type 2: each tier change or move closed one version and opened one, at the time of the change.
+    for row, before in kinds["type2"]:
+        old, new = versions(row["user_id"])[-2:]
+        assert (old[4], new[4]) == ("f", "t") and old[6] == new[5], (old, new)
+        assert new[5].startswith(row["updated_at"][:10]) or new[5] < row["updated_at"].replace("T", " "), new
+        assert (new[2], new[3]) == (row["membership_tier"], row["home_city"])
+        assert (old[2], old[3]) == (before["membership_tier"], before["home_city"])
+        assert new[6].startswith("9999-12-31")
+    # Facts still take the version of their time: no order of these customers sits on a version that does not cover it.
+    assert sql("select count(*) from warehouse.fact_orders f join warehouse.dim_customer d using (customer_sk) "
+               "where f.customer_sk > 0 and not (f.order_timestamp >= d.effective_from and f.order_timestamp < d.effective_to)") == [["0"]]
+    # In the whole dimension: a fixed or overwritten attribute has one value per customer, across all versions.
+    assert sql("select count(*) from (select customer_id from warehouse.dim_customer group by 1 "
+               "having count(distinct signup_date) > 1 or count(distinct email) > 1 or count(distinct loyalty_points) > 1) d") == [["0"]]
+    assert sql("select count(*) > 0 from (select customer_id from warehouse.dim_customer group by 1 having count(*) > 1) d") == [["t"]]

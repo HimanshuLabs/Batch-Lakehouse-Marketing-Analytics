@@ -28,7 +28,7 @@ This project demonstrates practical Data Engineering and Analytics Engineering c
 | Historical correctness | SCD Type 2 customer/product/campaign dimensions and point-in-time fact joins |
 | Reproducibility | Deterministic, incremental batches; reruns of a batch leave the lake and the warehouse unchanged |
 | BI readiness | Revenue, campaign, product, customer, and funnel marts built for reporting |
-| Analytics engineering | 24 dbt models and 80 dbt tests, docs, lineage, and exposures |
+| Analytics engineering | 24 dbt models and 82 dbt tests, docs, lineage, and exposures |
 | Orchestration | One Airflow 3 DAG of 20 tasks covering lakehouse, warehouse, dbt, and reporting |
 | Reporting | Power BI Online dashboard assets, screenshots, CSV exports, and refresh flow documentation |
 | Infrastructure | Terraform for the S3 layer that serves the Power BI CSVs |
@@ -168,6 +168,28 @@ flowchart TD
 
 Exact Python pins are in `requirements.txt` (runtime) and `requirements-dev.txt` (pytest, ruff, dbt).
 
+### Where each tool is used, and how that is proven
+
+"CI" is `.github/workflows/ci.yml`; its jobs are `static`, `unit`, `integration`, `powerbi-assets` and `terraform`. The `integration` job runs every task of the Airflow DAG, in DAG order and with the DAG's own commands and environment, for two batches against PostgreSQL in Docker.
+
+| Tool | What it does here | Where | How it is proven to run |
+|---|---|---|---|
+| Python | Generator, Spark jobs, loaders, exports, validators, tests | `data-generator/`, `spark-batch/`, `scripts/`, `sql/*.py`, `tests/` | CI `static` compiles every file; `unit` and `integration` execute them |
+| Faker | Synthetic people: Indian names that agree with gender, and visit IP addresses, seeded per record and batch | `data-generator/generate_data.py` (DAG task `generate_data`) | CI `unit`: `tests/unit/test_coherent_source.py` and the pinned digests in `tests/unit/test_generator.py`; CI `integration` generates both batches |
+| PySpark | Bronze, Silver, Gold, the dimensions (SCD Types 0, 1, 2), point-in-time fact joins, Gold marts | `spark-batch/*.py` (DAG tasks `bronze_ingestion` to `scd2_gold_marts`) | CI `unit` runs each job's functions on small frames; CI `integration` runs the jobs on two batches and compares row counts with `tests/integration/expected_counts.json` |
+| DuckDB | SQL analytics straight on the Gold Parquet files, and the route B export query engine | `sql/duckdb_gold_analytics.py`, `sql/run_scd2_duckdb_analytics.py`, `sql/export_power_bi_dataset.py` (DAG tasks `duckdb_gold_analytics`, `scd2_duckdb_analytics`, `power_bi_export`) | CI `integration` runs the three tasks; the tests also read the lake with DuckDB |
+| PostgreSQL | Staging, star-schema warehouse, marts, audit; each build is published atomically | `sql/warehouse/*.sql`, `scripts/run_warehouse_sql.sh` (DAG task `build_warehouse`) | CI `unit` (database tests in both time zones) and CI `integration` (29 reconciliation and 20 mart checks must pass; a reader loop sees no error during rebuilds) |
+| dbt | Models over the warehouse and marts, 82 tests (the SCD type tests included), docs, exposures | `dbt/` (DAG tasks `dbt_run`, `dbt_test`, `dbt_docs`) | CI `integration`: `dbt run` PASS=25, `dbt test` PASS=83 |
+| Airflow | The DAG: task order, one run at a time, `BATCH_DATE` from the logical date | `airflow/dags/batch_lakehouse_pipeline.py` | The DAG's tasks run in CI, but not under Airflow: `static` checks the DAG file, `unit` renders its `BATCH_DATE` template with Jinja2, and `integration` executes the DAG's own task commands through `tests/integration/run_dag.py` with Airflow stubbed. A real scheduler run is manual and local, recorded in `docs/warehouse/airflow_working_state.md` |
+| Docker | Runs PostgreSQL 16.14 (`project2_postgres` locally, throwaway containers in tests). The pipeline itself is not containerized: there is no Dockerfile | `scripts/run_warehouse_sql.sh` (`docker exec`), `tests/integration/run_local.sh` | CI `unit` and `integration` start PostgreSQL with `docker run` |
+| pytest | Unit tests in two time zones with the database tests required; integration assertions on the finished pipeline | `tests/unit/`, `tests/integration/` | CI `unit` and `integration`; locally `venv/bin/python -m pytest tests/unit` and `bash tests/integration/run_local.sh` |
+| GitHub Actions | The quality gate on every push and pull request | `.github/workflows/ci.yml` | The workflow runs themselves (five jobs) |
+| Power BI | The dashboard, built by hand in Power BI Online from the exported CSVs | `exports/power_bi/`, `data/bi_exports/`, `docs/warehouse/power_bi_*.md`, screenshots in `docs/screenshots/power_bi/` | Not run by the DAG or CI. CI `powerbi-assets` validates the CSVs, manifest and docs; CI `integration` produces the route B CSVs. The dashboard itself is shown by screenshots only |
+| AWS S3 | Hosts five route B CSVs that Power BI Online reads over HTTPS | `terraform/aws-bi-exports/` | Not touched by the DAG or CI (no AWS credentials there). Upload is a manual `terraform apply`; the evidence is the bucket and the dashboard |
+| Terraform | Declares the S3 bucket, its policy and the five objects | `terraform/aws-bi-exports/*.tf` | CI `terraform`: `fmt -check`, `init -backend=false`, `validate`. `plan` and `apply` are manual and never run in CI |
+
+Listed in this README but not exercised by the DAG or CI: Power BI Online, AWS S3 and `terraform apply` (manual, as above), the Airflow scheduler itself (manual, local), and the development environment (Ubuntu, VS Code). pandas, Parquet (pyarrow), psycopg and ruff are used by the code or the CI jobs above; uv only builds the local `venv-dbt`.
+
 ---
 
 ## 7. Data Sources
@@ -202,7 +224,10 @@ The generator is incremental and deterministic:
 
 - `2026-05-18` is the anchor batch. It holds the base master data and a 120-day history of facts.
 - Each later batch adds a 14-day increment of facts plus a few changed customers, products, and campaigns. These changes drive the SCD2 history.
-- All randomness, UUIDs included, is seeded from fixed seeds and `BATCH_DATE`. Rerunning a date produces the same files.
+- A batch continues from the batches before it. Its master files hold the current state of every customer, product and campaign (the base rows with the changes of all earlier raw batches applied), followed by the versions its own day brought, and it delivers again any earlier order that was cancelled or returned since.
+- Each raw batch records the generator version that wrote it (first line of `generation_truth.json`). The generator refuses to build on raw batches of a different version and names them: regenerate from the first batch in date order.
+- Batches are therefore generated in date order. The generator refuses to create a batch that is older than the newest raw batch on disk and says which date is in the way. Reprocessing existing raw batches, in any order, is unaffected: a complete raw batch is never regenerated.
+- All randomness, UUIDs and Faker's names and IP addresses included, comes from named streams seeded from a fixed seed and `BATCH_DATE`. Generating the same dates in the same order produces the same files.
 - Fact IDs are unique across batches.
 - Files are written to a temporary folder and renamed into place. If the seven raw files for a date already exist, the DAG's `generate_data` task skips generation.
 
@@ -261,6 +286,10 @@ mart_marketing_funnel            mart_marketing_funnel_scd2
 
 The `_scd2` facts join each row to the dimension version that was valid at the event time. A fact is never dropped because its dimension reference is bad. A missing key (an organic order has no campaign) is the unknown member. A key that is present but has no valid dimension row, for example a campaign that Silver quarantined, is the invalid-reference member (`INVALID` in Gold, key `-1` in the warehouse): the fact is kept with its own natural ID and resolves to the real member as soon as the dimension row is valid. A fact is rejected to `data/quarantine/` only for its own defect, such as an item whose order does not exist. The point-in-time report counts the invalid references per fact and key and checks that Silver rows = valid rows + rejected rows.
 
+**Currency.** Every monetary value in this project is in Indian rupees (INR): prices, order values, discounts, tax, shipping, refunds, budgets, ad spend, the ad platform's attributed revenue, and every metric built from them (revenue, net sales, average order value, lifetime value, cost per click, cost per order). ROAS and the rates are ratios without a unit. There is no currency column because there is only one currency.
+
+**A coherent source.** The fields of a source record agree with each other. A customer's city is in its real state, the preferred language is the state's language, Hindi or English, the name is one of Faker's Indian names and its first name agrees with the gender, the email is derived from the name (on reserved `example` domains), the signup date precedes everything else, `membership_tier` follows `loyalty_points` by fixed thresholds (Silver from 5,000, Gold from 15,000, Platinum from 30,000), the segment is plausible for the age, and about a quarter are prime members, more in the higher tiers. A product is one brand's version of one catalogue item, so name, category and brand agree, no two products share a name, and the price is in the item's range; the brand names are invented for this project. A campaign is paid marketing on one channel: its name starts with the channel, its budget is a daily amount for the days it runs, and its status follows its dates (`planned` before the start, `active` while it runs, `completed` after the end, `paused` by a revision). Organic traffic is nobody's campaign: it has no budget and no ad spend, and an organic session or order has no campaign and stays on the unknown member. A visit has one device with an operating system, browser and network that exist for it, one place (usually the customer's home city) and one traffic source, and only a campaign running that day can bring it; ad spend exists only for days a campaign runs. A visit has a cart: an order is the cart of its purchase event, with that event's value, payment method, place and campaign, and its items show the products' own names and prices. Between batches a tier changes because points were earned, a move changes city and state together, and nothing reverts. `tests/unit/test_coherent_source.py` lists every rule and scans generated batches for all of them; the deliberately dirty rows are unchanged.
+
 **Real source attributes.** The generator delivers, and every layer carries: an order's status (`completed`, `cancelled`, `returned`), tax (18% of the net value), shipping (free from INR 4,999, else INR 99) and `total_amount` (`net + tax + shipping`, the same name and meaning in Silver, Gold, the warehouse, the marts and the exports; the net value is `cart_value` in the lake and `net_revenue` in the warehouse); the ad platform's feed per campaign, day and region (spend, impressions, clicks, and the platform's own conversions and attributed revenue, related by realistic cost per click, click-through rate and return on ad spend); a product's brand and status (`active`, `discontinued`; a status change opens a new SCD2 version); and a campaign's objective (`campaign_type`: awareness, consideration, conversion, retention). Silver validates each one, and each batch contains one deliberately dirty row per attribute that must be quarantined. The marts show cancelled and returned orders in columns of their own.
 
 **Order lifecycle and refunds.** An order is placed at `order_timestamp`. A cancelled order has a cancellation time within hours; a returned order has a return time 2 to 20 days later and a refund, full or partial. `status_timestamp` is when the current status took effect and `refund_amount` is what was refunded; `updated_at` is when the source last changed the order. A batch knows only what had happened by the end of its day, so an order that is cancelled or returned later is first delivered as `completed`, and the batch that covers the change delivers the order again with its new status and a later `updated_at`, as an order system does. Silver keeps the latest version of each order (by `updated_at`, then the later batch) and quarantines impossible lifecycles: a return before the order, a refund above the order's net value, a refund on an order that was not returned. Gold and the warehouse carry `order_status`, `status_timestamp` and `refund_amount`; an order's refund is split over its items in whole paise (`fact_order_items.refund_amount`).
@@ -269,7 +298,7 @@ The `_scd2` facts join each row to the dimension version that was valid at the e
 
 **Daily snapshots (no leakage).** `marts.mart_customer_daily_snapshot`, `marts.mart_product_daily_snapshot` and `marts.mart_campaign_daily_snapshot` have one row per entity and business date, from the entity's first activity to the last date in the data. A row holds the columns of the lifetime mart (`mart_customer_360`, `mart_product_sales`, `mart_campaign_performance`) as they were at the end of `snapshot_date`: orders placed up to that date, each order's status as of that date (an order returned later is still a completed sale), refunds up to it, spend and web events up to it, and the dimension versions in force on it. `days_since_last_order` is counted to `snapshot_date`. Each snapshot is built by running the lifetime mart's own query on as-of copies of the facts, so a measure has one definition, and the build checks that the last date's snapshot equals the lifetime mart. For a time-based split, take features from the snapshot at the cutoff date and outcomes from what happened after it; the lifetime marts contain the whole history and must not be used as features for a past date. The snapshots are in the consumer contract as available relations and in dbt.
 
-**Regional ad spend.** Each campaign targets two to five states. `fact_campaign_spend` has one row per campaign, day and region; a campaign's spend, and what is compared with its budget, is the sum over its regions. Each feed row repeats the platform's total for the campaign-day, and a reconciliation check requires the regional rows to sum to it. Spend and return on ad spend by channel and by region are two queries at the end of `sql/warehouse/dashboard_query_pack.sql`; the route B exports of the spend and order facts carry the same columns. Product prices are in a realistic INR range per category and most order lines are one unit, so the average order value is a few thousand rupees and platform and warehouse ROAS are both in single digits.
+**Regional ad spend.** Each campaign targets two to five states. `fact_campaign_spend` has one row per campaign, day and region; a campaign's spend, and what is compared with its budget, is the sum over its regions. Each feed row repeats the platform's total for the campaign-day, and a reconciliation check requires the regional rows to sum to it. Spend and return on ad spend by channel and by region are two queries at the end of `sql/warehouse/dashboard_query_pack.sql`; the route B exports of the spend and order facts carry the same columns. Product prices are in a realistic INR range per catalogue item and most orders are one or two lines, so the average order value is a few thousand rupees and platform and warehouse ROAS are both in low single digits.
 
 **Marts tie out.** Every mart has one row for the unknown member and one for the invalid-reference member, flagged in `member_type` (`known`, `unknown_member`, `invalid_reference`); filter `member_type = 'known'` for real customers, products or campaigns only. With those rows each mart's revenue (sales less refunds), refunds, spend and units equal the fact totals, and the mart validation checks exactly that.
 
@@ -292,13 +321,49 @@ Main schemas:
 
 Warehouse capabilities:
 
-- SCD Type 2 customer, product, and campaign dimensions.
+- Customer, product, and campaign dimensions with SCD Type 0, Type 1 and Type 2 attributes (table below).
 - Surrogate keys for historical dimension versions. Dimension keys are deterministic: a rebuild from the same data gives the same keys in any load order.
 - Point-in-time fact joins that only accept a version whose validity range covers the event.
 - Unknown-member handling where needed.
 - BI-ready marts for revenue, campaign, product, customer, and funnel reporting.
 - Reconciliation checks stored under the audit layer.
 - Query performance tuning through indexes and `EXPLAIN ANALYZE` documentation.
+
+### SCD Types 0, 1 and 2
+
+Each dimension attribute is one slowly-changing-dimension type. Type 0 (fixed) keeps the first value forever; a later source change is ignored and counted in `logs/scd2_quality_report.json`. Type 1 (overwrite) puts the latest value on every version, with no history. Type 2 (history) closes the current version and opens a new one with effective dates and a current flag. Only a Type 2 change creates a version or a surrogate key, so facts always keep the version of their time. Every later batch contains at least one change of each type. Details and the checks are in `docs/warehouse/scd2_design.md`.
+
+| Dimension | Attribute | SCD type | Reason |
+|---|---|---|---|
+| Customer (`dim_customer`) | `signup_date` | Type 0 (fixed) | The day the account was opened cannot change; a different value later is a source error. |
+| Customer (`dim_customer`) | `customer_name` | Type 1 (overwrite) | A change is a spelling correction or a new name of the same person; the old one has no reporting value. |
+| Customer (`dim_customer`) | `email` | Type 1 (overwrite) | A contact detail: only the current address is of use, and an old one should not be kept. |
+| Customer (`dim_customer`) | `gender` | Type 1 (overwrite) | A correction of the record, not an event in time. |
+| Customer (`dim_customer`) | `age` | Type 1 (overwrite) | It moves on every year; a version per birthday would be noise. |
+| Customer (`dim_customer`) | `preferred_language` | Type 1 (overwrite) | A current preference, used for contact, not for history. |
+| Customer (`dim_customer`) | `loyalty_points` | Type 1 (overwrite) | A running balance that moves with every order; its history is the tier (Type 2). |
+| Customer (`dim_customer`) | `is_prime_user` | Type 1 (overwrite) | The current membership flag; this project does not report on its history. |
+| Customer (`dim_customer`) | `city` | Type 2 (history) | A move changes where sales are counted; orders before it belong to the old city. |
+| Customer (`dim_customer`) | `state` | Type 2 (history) | Changes with the city: the same reason. |
+| Customer (`dim_customer`) | `country` | Type 2 (history) | Changes with the city: the same reason. |
+| Customer (`dim_customer`) | `customer_segment` | Type 2 (history) | Segment reporting must show the segment the customer was in at the time of each order. |
+| Customer (`dim_customer`) | `loyalty_tier` | Type 2 (history) | Tier reporting must show the tier the customer had at the time of each order. |
+| Product (`dim_product`) | `category` | Type 0 (fixed) | A product is listed in one category for good; a different value later is a source error. |
+| Product (`dim_product`) | `product_name` | Type 1 (overwrite) | A renamed or corrected title is the same product; reports should show the current name. |
+| Product (`dim_product`) | `brand` | Type 1 (overwrite) | A corrected brand applies to the product as a whole. |
+| Product (`dim_product`) | `original_price` | Type 1 (overwrite) | The list price is reference information; the price that was paid is the Type 2 price. |
+| Product (`dim_product`) | `inventory_remaining` | Type 1 (overwrite) | A level that moves with every sale and restock; only the latest is meaningful. |
+| Product (`dim_product`) | `price` | Type 2 (history) | The selling price at the time of a sale explains its revenue. |
+| Product (`dim_product`) | `status` | Type 2 (history) | Whether the product was on sale or withdrawn at a given time is history. |
+| Campaign (`dim_campaign`) | `channel` | Type 0 (fixed) | A campaign runs on the channel it was created for; a different value later is a source error. |
+| Campaign (`dim_campaign`) | `campaign_type` | Type 0 (fixed) | The objective is set when the campaign is created and defines it. |
+| Campaign (`dim_campaign`) | `campaign_name` | Type 1 (overwrite) | A renamed campaign is the same campaign; reports should show the current name. |
+| Campaign (`dim_campaign`) | `ab_test_group` | Type 1 (overwrite) | An assignment label; a correction applies to the whole campaign. |
+| Campaign (`dim_campaign`) | `target_segment` | Type 2 (history) | Retargeting changes who the campaign reaches from that day on. |
+| Campaign (`dim_campaign`) | `budget` | Type 2 (history) | Spend is judged against the budget that was authorized at the time. |
+| Campaign (`dim_campaign`) | `campaign_status` | Type 2 (history) | Planned, active, paused and completed periods are the campaign's history. |
+| Campaign (`dim_campaign`) | `start_date` | Type 2 (history) | A rescheduled period changes which days count as the campaign's. |
+| Campaign (`dim_campaign`) | `end_date` | Type 2 (history) | A rescheduled period changes which days count as the campaign's. |
 
 Main SQL assets:
 
@@ -330,7 +395,7 @@ docs/warehouse/runbook.md
 
 ## 10. dbt Analytics Engineering Layer
 
-The dbt layer organizes warehouse models, marts, tests, docs, lineage, and dashboard exposures: 24 models and 80 tests.
+The dbt layer organizes warehouse models, marts, tests, docs, lineage, and dashboard exposures: 24 models and 82 tests.
 
 Main dbt areas:
 
@@ -361,12 +426,12 @@ cd dbt
 ../venv-dbt/bin/dbt debug --profiles-dir .
 ../venv-dbt/bin/dbt parse --profiles-dir . --no-partial-parse
 ../venv-dbt/bin/dbt run --profiles-dir .              # 24 models: PASS=25
-../venv-dbt/bin/dbt test --profiles-dir .             # 80 tests:  PASS=81
+../venv-dbt/bin/dbt test --profiles-dir .             # 82 tests:  PASS=83
 ../venv-dbt/bin/dbt docs generate --profiles-dir .
 cd ..
 ```
 
-dbt's `PASS=` total is one more than the 24 models or the 80 tests (77 in `schema.yml`, 3 in `dbt/tests/`). The extra result is the project's `on-run-end` hook in `dbt/dbt_project.yml`, which grants the read-only role `p2_reader` USAGE on the dbt schemas; dbt runs it at the end of both `dbt run` and `dbt test` and counts it.
+dbt's `PASS=` total is one more than the 24 models or the 82 tests (77 in `schema.yml`, 5 in `dbt/tests/`). The extra result is the project's `on-run-end` hook in `dbt/dbt_project.yml`, which grants the read-only role `p2_reader` USAGE on the dbt schemas; dbt runs it at the end of both `dbt run` and `dbt test` and counts it.
 
 Keep `dbt/profiles.yml` in place: the DAG's dbt tasks need it. `dbt/target/`, `dbt/logs/`, and `dbt/profiles.yml` are git-ignored.
 
@@ -857,6 +922,8 @@ Deliberate trade-offs for a portfolio project built on synthetic data:
 - **Public dashboard files.** Power BI Online reads five synthetic CSVs from S3 through public, read-only object URLs (no listing, no write access). The bucket policy does not enforce TLS, which is acceptable for synthetic data; a production setup would serve the files privately, for example through CloudFront with origin access control.
 - **Reproducibility scope.** Direct dependencies are pinned; transitive dependencies of the dev tools are not.
 - **Screenshots** show the dashboard layout; the current figures are in `exports/power_bi/`.
+
+**Known characteristics of the synthetic data.** The source is made coherent enough that nothing contradicts itself, not realistic. Left as they are, on purpose: the funnel converts far more often than a real shop (event types are drawn almost evenly, so about one event in six is a purchase); most orders are a single line; loyalty points do not grow with orders and stock does not fall with sales; the model-score fields (engagement, purchase and abandonment probability, fraud score) and the recommendation fields are random and unrelated to what the visitor did, which also keeps them from leaking outcomes; an IP address is not tied to the visit's city and names are not regional; every web event carries a product, page views and searches included; prime members pay shipping like everyone else, and the free-shipping value is high for the typical order; there is no price or campaign history before the first batch; the ad platform's conversions are independent of the shop's orders; and the channel names (`google`, `facebook`, `instagram`) are the real platforms, while product brands are invented.
 
 ---
 

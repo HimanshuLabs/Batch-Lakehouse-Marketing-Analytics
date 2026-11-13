@@ -6,6 +6,8 @@ This document defines the CSV datasets used by the Power BI Online dashboard dem
 
 The datasets are exported from PostgreSQL `marts` views. They are business-ready reporting outputs, not raw lakehouse files.
 
+**Currency.** Every monetary field in every dataset is in Indian rupees (INR): revenue, sales, discounts, refunds, tax, shipping, order totals, prices, average order value, lifetime value, budgets, spend, cost per click and cost per order. No field holds another currency and there is no currency column. In Power BI, format these fields as Currency with the symbol ₹ (English (India)).
+
 ## Exported dataset contract
 
 | Dataset | Source mart | CSV path | Primary dashboard usage |
