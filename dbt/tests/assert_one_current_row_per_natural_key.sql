@@ -1,4 +1,5 @@
--- Each SCD2 dimension has exactly one current version per natural key.
+-- SCD Type 2 (history): a change in a history attribute closes the current version
+-- and opens a new one, so each dimension has exactly one current version per natural key.
 -- Returns the offending keys; dbt test fails if any row comes back.
 
 select 'dim_customer' as dimension, customer_id as natural_key, count(*) as current_rows

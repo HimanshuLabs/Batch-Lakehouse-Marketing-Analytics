@@ -438,11 +438,13 @@ def clean_customers(spark: SparkSession) -> tuple[DataFrame, DataFrame, DataFram
         .withColumn("country", trim(col("country")))
         .withColumn("user_segment", trim(col("user_segment")))
         .withColumn("is_prime_user", safe_boolean("is_prime_user"))
+        .withColumn("signup_date", safe_date("signup_date"))
         .withColumn("updated_at", safe_timestamp("updated_at"))
     )
 
     # NULL allowed: user_name, gender, membership_tier, loyalty_points,
-    # preferred_language, home_state, country, user_segment, is_prime_user.
+    # preferred_language, home_state, country, user_segment, is_prime_user,
+    # signup_date.
     invalid_condition = (
         col("user_id").isNull()
         | col("email").isNull()

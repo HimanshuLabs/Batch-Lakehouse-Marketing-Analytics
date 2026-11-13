@@ -213,8 +213,8 @@ BRONZE_TEMPLATES: dict[str, dict] = {
         "user_id": "4", "user_name": "Jagrati Padmanabhan", "email": "caleb78@example.org", "gender": "Male",
         "age": "28", "membership_tier": "Platinum", "loyalty_points": "22298", "preferred_language": "Telugu",
         "home_city": "Tiruchirappalli", "home_state": "Madhya Pradesh", "country": "India",
-        "user_segment": "Working Professional", "is_prime_user": "True", "schema_version": "v1",
-        "source": "crm_customer_master", "updated_at": "2026-02-10T10:06:05",
+        "user_segment": "Working Professional", "is_prime_user": "True", "signup_date": "2024-03-01",
+        "schema_version": "v1", "source": "crm_customer_master", "updated_at": "2026-02-10T10:06:05",
     },
     "products": {
         "product_id": "4", "product_name": "Bluetooth Speaker", "category": "Fitness", "brand": "Stridex",

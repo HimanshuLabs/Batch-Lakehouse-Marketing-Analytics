@@ -140,7 +140,7 @@ def test_a_later_batch_delivers_the_order_again_when_its_status_changes(three_ba
 
 def test_each_impossible_lifecycle_has_a_dirty_row_recorded_in_the_truth_file(three_batches):
     for batch, (orders, truth) in three_batches.items():
-        assert truth[0]["generator_version"] == "session_budget_v4"
+        assert truth[0]["generator_version"] == "coherent_source_v6"
         fixtures = {row["reason"]: orders.loc[row["row_index"]] for row in truth
                     if row["kind"] == "quality_fixture" and row["table"] == "orders.csv"}
         early = fixtures["return_before_order"]

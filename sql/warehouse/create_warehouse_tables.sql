@@ -297,6 +297,8 @@ CREATE TABLE warehouse.dim_customer (
     home_city TEXT,
     home_state TEXT,
     country TEXT,
+    -- SCD Type 0: the day the account was opened, the same on every version.
+    signup_date DATE,
     effective_from TIMESTAMPTZ NOT NULL DEFAULT TIMESTAMPTZ '1900-01-01 00:00:00+00',
     effective_to TIMESTAMPTZ NOT NULL DEFAULT TIMESTAMPTZ '9999-12-31 00:00:00+00',
     is_current BOOLEAN NOT NULL DEFAULT TRUE,
@@ -310,6 +312,13 @@ CREATE TABLE warehouse.dim_customer (
 
 COMMENT ON TABLE warehouse.dim_customer IS
 'SCD2 customer dimension. customer_sk is the surrogate key used by facts for point-in-time reporting; customer_id is the source natural key.';
+
+COMMENT ON COLUMN warehouse.dim_customer.signup_date IS
+'SCD Type 0 (fixed): the first signup date the source delivered. A later change in the source is ignored and counted in logs/scd2_quality_report.json.';
+COMMENT ON COLUMN warehouse.dim_customer.email IS
+'SCD Type 1 (overwrite): the customer''s latest email on every version; a change opens no version.';
+COMMENT ON COLUMN warehouse.dim_customer.membership_tier IS
+'SCD Type 2 (history): a change closes the current version and opens a new one (effective_from, effective_to, is_current).';
 
 COMMENT ON COLUMN warehouse.dim_customer.customer_sk IS
 'Surrogate key. Multiple customer_sk values can exist for one customer_id when SCD2 attributes change.';
@@ -893,6 +902,7 @@ BEGIN
                     coalesce(nullif(r->>'home_city', ''), nullif(r->>'city', ''), 'Unknown') AS home_city,
                     coalesce(nullif(r->>'home_state', ''), nullif(r->>'state', ''), 'Unknown') AS home_state,
                     coalesce(nullif(r->>'country', ''), 'Unknown') AS country,
+                    warehouse.safe_date(r->>'signup_date') AS signup_date,
                     coalesce(
                         warehouse.safe_timestamp(coalesce(r->>'effective_from', r->>'valid_from', r->>'start_date')),
                         TIMESTAMPTZ '1900-01-01 00:00:00+00'
@@ -930,13 +940,13 @@ BEGIN
             INSERT INTO warehouse.dim_customer (
                 customer_sk, customer_id, customer_name, email, gender, age,
                 membership_tier, loyalty_points, preferred_language, customer_segment,
-                is_prime_user, home_city, home_state, country, effective_from, effective_to,
+                is_prime_user, home_city, home_state, country, signup_date, effective_from, effective_to,
                 is_current, source_updated_at, scd_hash
             )
             SELECT DISTINCT ON (customer_sk)
                 customer_sk, customer_id, customer_name, email, gender, age,
                 membership_tier, loyalty_points, preferred_language, customer_segment,
-                is_prime_user, home_city, home_state, country,
+                is_prime_user, home_city, home_state, country, signup_date,
                 effective_from,
                 CASE
                     WHEN effective_to <= effective_from THEN
@@ -964,6 +974,7 @@ BEGIN
                 home_city = EXCLUDED.home_city,
                 home_state = EXCLUDED.home_state,
                 country = EXCLUDED.country,
+                signup_date = EXCLUDED.signup_date,
                 effective_from = EXCLUDED.effective_from,
                 effective_to = EXCLUDED.effective_to,
                 is_current = EXCLUDED.is_current,

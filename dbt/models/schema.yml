@@ -146,8 +146,22 @@ models:
           - unique
 
   - name: dim_customer
-    description: "Customer SCD2 dimension with surrogate keys and current-row tracking."
+    description: "Customer dimension with surrogate keys. Each attribute is SCD Type 0 (signup_date), Type 1 (name, email, gender, age, language, points, prime flag) or Type 2 (city, state, country, segment, tier); only a Type 2 change opens a version."
     columns:
+      - name: signup_date
+        description: "SCD Type 0 (fixed): the first signup date the source delivered; a later change is ignored and counted."
+      - name: email
+        description: "SCD Type 1 (overwrite): the latest email on every version; a change opens no version."
+      - name: customer_name
+        description: "SCD Type 1 (overwrite): the latest name on every version."
+      - name: loyalty_points
+        description: "SCD Type 1 (overwrite): the current balance on every version; its history is the tier."
+      - name: membership_tier
+        description: "SCD Type 2 (history): a change closes the current version and opens a new one."
+      - name: customer_segment
+        description: "SCD Type 2 (history): the segment the customer was in during the version."
+      - name: home_city
+        description: "SCD Type 2 (history): a move opens a new version; home_state and country change with it."
       - name: customer_sk
         tests:
           - not_null
@@ -163,8 +177,18 @@ models:
                 quote: false
 
   - name: dim_product
-    description: "Product SCD2 dimension with surrogate keys and current-row tracking."
+    description: "Product dimension with surrogate keys. Each attribute is SCD Type 0 (category), Type 1 (name, brand, list price, inventory) or Type 2 (selling price, status); only a Type 2 change opens a version."
     columns:
+      - name: category
+        description: "SCD Type 0 (fixed): a product stays in the category it was first listed in."
+      - name: product_name
+        description: "SCD Type 1 (overwrite): the current name on every version."
+      - name: inventory_remaining
+        description: "SCD Type 1 (overwrite): the latest stock level on every version."
+      - name: original_price
+        description: "List price in Indian rupees (INR)."
+      - name: current_price
+        description: "Selling price after the discount, in Indian rupees (INR)."
       - name: product_sk
         tests:
           - not_null
@@ -189,8 +213,16 @@ models:
                 quote: false
 
   - name: dim_campaign
-    description: "Campaign SCD2 dimension with surrogate keys and current-row tracking."
+    description: "Campaign dimension with surrogate keys. Each attribute is SCD Type 0 (channel, objective), Type 1 (name, A/B group) or Type 2 (target segment, budget, status, start and end date); only a Type 2 change opens a version."
     columns:
+      - name: channel
+        description: "SCD Type 0 (fixed): the channel the campaign was created for."
+      - name: campaign_name
+        description: "SCD Type 1 (overwrite): the current name on every version."
+      - name: campaign_status
+        description: "SCD Type 2 (history): planned, active, paused and completed periods are versions."
+      - name: budget
+        description: "Lifetime budget of the campaign in Indian rupees (INR)."
       - name: campaign_sk
         tests:
           - not_null
@@ -222,6 +254,18 @@ models:
   - name: fact_orders
     description: "Order fact table joined to the correct customer/product/campaign historical dimension versions."
     columns:
+      - name: gross_amount
+        description: "Order value at list prices in Indian rupees (INR)."
+      - name: discount_amount
+        description: "Discount on the order in Indian rupees (INR)."
+      - name: net_revenue
+        description: "Net order value (the sum of the lines) in Indian rupees (INR)."
+      - name: tax_amount
+        description: "Tax on the order in Indian rupees (INR)."
+      - name: shipping_amount
+        description: "Shipping fee in Indian rupees (INR)."
+      - name: refund_amount
+        description: "Amount refunded for a returned order in Indian rupees (INR)."
       - name: order_id
         tests:
           - not_null
@@ -233,6 +277,7 @@ models:
               arguments:
                 values: ['completed', 'cancelled', 'returned']
       - name: total_amount
+        description: "What the customer was charged: net + tax + shipping, in Indian rupees (INR)."
         tests:
           - not_null
       - name: customer_sk
@@ -246,6 +291,16 @@ models:
   - name: fact_order_items
     description: "Order item fact table for product-level sales analytics."
     columns:
+      - name: unit_price
+        description: "Selling price of one unit in Indian rupees (INR)."
+      - name: gross_amount
+        description: "Line value at list price in Indian rupees (INR)."
+      - name: discount_amount
+        description: "Discount on the line in Indian rupees (INR)."
+      - name: line_revenue
+        description: "Net line value in Indian rupees (INR)."
+      - name: refund_amount
+        description: "The line's share of the order's refund in Indian rupees (INR)."
       - name: order_item_nk
         tests:
           - not_null
@@ -268,6 +323,10 @@ models:
   - name: fact_campaign_spend
     description: "Campaign spend fact table for ROAS and marketing efficiency analytics."
     columns:
+      - name: spend_amount
+        description: "Ad spend of the campaign, day and region in Indian rupees (INR)."
+      - name: attributed_revenue
+        description: "Revenue the ad platform attributes to that spend in Indian rupees (INR)."
       - name: campaign_spend_nk
         tests:
           - not_null
@@ -286,6 +345,8 @@ models:
   - name: fact_web_events
     description: "Web behavior fact table used for funnel and engagement reporting."
     columns:
+      - name: event_value
+        description: "Value of the cart at the event in Indian rupees (INR)."
       - name: event_id
         tests:
           - not_null
@@ -294,6 +355,14 @@ models:
   - name: mart_customer_360
     description: "Customer-level BI mart for customer value, orders, engagement, and segmentation."
     columns:
+      - name: lifetime_value
+        description: "net_sales less refund_amount in Indian rupees (INR)."
+      - name: net_sales
+        description: "Net value of the customer's orders that were not cancelled in Indian rupees (INR)."
+      - name: refund_amount
+        description: "Refunds to the customer in Indian rupees (INR)."
+      - name: average_order_value
+        description: "Average net order value in Indian rupees (INR)."
       - name: customer_id
         tests:
           - not_null
@@ -301,6 +370,14 @@ models:
   - name: mart_campaign_performance
     description: "Campaign-level BI mart for spend, revenue, ROAS, and conversion performance."
     columns:
+      - name: campaign_budget
+        description: "Lifetime budget in Indian rupees (INR)."
+      - name: total_spend
+        description: "Ad spend in Indian rupees (INR)."
+      - name: attributed_revenue
+        description: "net_sales less refund_amount of the campaign's orders in Indian rupees (INR)."
+      - name: platform_attributed_revenue
+        description: "Revenue the ad platform attributes to the campaign in Indian rupees (INR)."
       - name: campaign_id
         tests:
           - not_null
@@ -308,6 +385,12 @@ models:
   - name: mart_product_sales
     description: "Product-level BI mart for units, revenue, and category performance."
     columns:
+      - name: product_revenue
+        description: "net_sales less refund_amount in Indian rupees (INR)."
+      - name: original_price
+        description: "List price in Indian rupees (INR)."
+      - name: current_price
+        description: "Selling price in Indian rupees (INR)."
       - name: product_id
         tests:
           - not_null
@@ -315,6 +398,18 @@ models:
   - name: mart_revenue_daily
     description: "Daily revenue BI mart for trend reporting."
     columns:
+      - name: gross_revenue
+        description: "Sales at list prices in Indian rupees (INR)."
+      - name: discount_amount
+        description: "Discounts in Indian rupees (INR)."
+      - name: net_revenue
+        description: "Net sales of the orders placed that day and not cancelled in Indian rupees (INR)."
+      - name: refund_amount
+        description: "Refunds of the returns of that day in Indian rupees (INR)."
+      - name: net_revenue_after_refunds
+        description: "net_revenue less refund_amount in Indian rupees (INR)."
+      - name: total_amount
+        description: "What customers were charged (net + tax + shipping) in Indian rupees (INR)."
       - name: revenue_date
         tests:
           - not_null
@@ -322,6 +417,8 @@ models:
   - name: mart_customer_daily_snapshot
     description: "mart_customer_360 as of the end of each business date, from each customer's first activity: computed only from what was known on that date."
     columns:
+      - name: lifetime_value
+        description: "net_sales less refund_amount as of snapshot_date in Indian rupees (INR)."
       - name: snapshot_date
         tests:
           - not_null
@@ -332,6 +429,8 @@ models:
   - name: mart_product_daily_snapshot
     description: "mart_product_sales as of the end of each business date, from each product's first activity: computed only from what was known on that date."
     columns:
+      - name: product_revenue
+        description: "net_sales less refund_amount as of snapshot_date in Indian rupees (INR)."
       - name: snapshot_date
         tests:
           - not_null
@@ -342,6 +441,10 @@ models:
   - name: mart_campaign_daily_snapshot
     description: "mart_campaign_performance as of the end of each business date, from each campaign's first activity: computed only from what was known on that date."
     columns:
+      - name: total_spend
+        description: "Ad spend up to snapshot_date in Indian rupees (INR)."
+      - name: attributed_revenue
+        description: "net_sales less refund_amount as of snapshot_date in Indian rupees (INR)."
       - name: snapshot_date
         tests:
           - not_null
