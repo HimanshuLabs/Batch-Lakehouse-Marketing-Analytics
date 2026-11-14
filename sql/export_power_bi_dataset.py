@@ -41,6 +41,7 @@ GOLD_DIR = PROJECT_ROOT / "data" / "gold"
 LOG_DIR = PROJECT_ROOT / "logs"
 DEFAULT_EXPORT_DIR = PROJECT_ROOT / "data" / "bi_exports"
 DEFAULT_REPORT_PATH = LOG_DIR / "power_bi_export_report.json"
+DASHBOARD_CONTRACT = PROJECT_ROOT / "scripts" / "power_bi_dashboard_contract.json"
 
 BATCH_DATE = date.fromisoformat(os.environ.get("BATCH_DATE") or date.today().isoformat()).isoformat()
 
@@ -56,6 +57,22 @@ EXPORTS = {
     "fact_order_items": f"SELECT * FROM read_parquet('{GOLD_DIR}/fact_order_items_scd2/**/*.parquet')",
     "fact_campaign_spend": f"SELECT * FROM read_parquet('{GOLD_DIR}/fact_campaign_spend_scd2/**/*.parquet')",
 }
+
+
+def published_column_order(file_name: str, columns: list[str], route: str) -> list[str]:
+    """The export's columns in the order the dashboards read them.
+
+    Power BI reads a CSV by column position. The columns a file was published
+    with (scripts/power_bi_dashboard_contract.json) come first, in that order;
+    every newer column follows, in the mart's own order. A published column
+    that the mart no longer has is an error: the dashboard would break.
+    """
+    contract = json.loads(DASHBOARD_CONTRACT.read_text(encoding="utf-8"))
+    published = contract[route]["files"][file_name]
+    missing = [column for column in published if column not in columns]
+    if missing:
+        raise ValueError(f"{file_name}: the dashboard reads column(s) {', '.join(missing)}, which the export no longer has")
+    return published + [column for column in columns if column not in published]
 
 
 # ---------------------------------------------------------------------------
@@ -298,8 +315,9 @@ def read_pit_report() -> dict:
 
 
 def write_summary(rows: list[dict], path: Path) -> None:
+    columns = published_column_order(f"{DATA_QUALITY_SUMMARY}.csv", SUMMARY_COLUMNS, "route_b")
     with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=SUMMARY_COLUMNS, lineterminator="\n")
+        writer = csv.DictWriter(handle, fieldnames=columns, lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
 
@@ -344,10 +362,13 @@ def main() -> None:
             print(f"Exporting {name} -> {output_path}")
 
             try:
+                # The dashboards read by position: published columns first, new ones after.
+                columns = [column[0] for column in con.execute(f"DESCRIBE {query}").fetchall()]
+                ordered = ", ".join(f'"{column}"' for column in published_column_order(f"{name}.csv", columns, "route_b"))
                 # COPY returns the number of rows it wrote, so each query runs once.
                 row_count = con.execute(
                     f"""
-                    COPY ({query})
+                    COPY (SELECT {ordered} FROM ({query}))
                     TO '{output_path}'
                     WITH (HEADER, DELIMITER ',')
                     """

@@ -547,3 +547,16 @@ def test_a_customer_with_two_scd_versions_who_engages_with_one_campaign_counts_o
                       "WHERE campaign_id = '5' AND snapshot_date >= '2026-05-10'").fetchall() == [(1,)]
     assert pg.execute("SELECT status FROM audit.mart_validation_report "
                       "WHERE check_name = 'campaign_snapshot_last_date_matches_lifetime_mart'").fetchone()[0] == "PASS"
+
+
+def test_the_funnel_mart_carries_the_campaign_objective_without_changing_its_grain(pg, tmp_path):
+    # The dashboards read campaign_type from the funnel export. It is the campaign's real objective
+    # (fixed per campaign), 'Unknown' on the unknown-campaign rows.
+    build(tmp_path)
+    funnel = rows(pg, "SELECT * FROM marts.mart_marketing_funnel")
+    assert {(row["campaign_id"], row["campaign_type"]) for row in funnel} == {("5", "conversion"), ("UNKNOWN", "Unknown")}
+    # One row per date, channel and campaign, as before.
+    assert len(funnel) == len({(row["event_date"], row["channel_name"], row["campaign_id"]) for row in funnel}) == \
+        pg.execute("SELECT count(*) FROM (SELECT DISTINCT warehouse.business_date(event_timestamp), channel_sk, campaign_sk "
+                   "FROM warehouse.fact_web_events) g").fetchone()[0]
+    assert sum(row["total_event_count"] for row in funnel) == pg.execute("SELECT count(*) FROM warehouse.fact_web_events").fetchone()[0]
