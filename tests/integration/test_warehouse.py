@@ -1340,3 +1340,20 @@ def test_the_funnel_conversion_rate_has_one_definition_in_both_routes():
     report = json.loads((PROJECT_ROOT / "logs" / "scd2_gold_mart_report.json").read_text(encoding="utf-8"))
     validation = report["validation"] if "validation" in report else report["marts"]["validation"]
     assert validation["checks"]["funnel_conversion_rate_is_purchase_sessions_over_sessions"] is True
+
+
+def test_the_route_b_exports_start_with_the_columns_the_dashboards_were_built_on():
+    recorded = json.loads((Path(__file__).resolve().parents[2] / "scripts" / "power_bi_dashboard_contract.json")
+                          .read_text(encoding="utf-8"))["route_b"]["files"]
+    assert len(recorded) == 8
+    for file_name, published in recorded.items():
+        with (PROJECT_ROOT / "data" / "bi_exports" / file_name).open(encoding="utf-8", newline="") as handle:
+            header = next(csv.reader(handle))
+        assert header[:len(published)] == published, file_name
+        assert len(header) == len(set(header)), file_name
+    # The warehouse funnel mart has the campaign's real objective again, at its own grain.
+    assert sql("select count(*), count(distinct (event_date, channel_name, campaign_id)) = count(*), "
+               "count(*) filter (where campaign_type is null) from marts.mart_marketing_funnel")[0][1:] == ["t", "0"]
+    assert sql("select count(*) from marts.mart_marketing_funnel f join warehouse.dim_campaign d "
+               "on d.campaign_id = f.campaign_id and d.is_current where f.campaign_type <> d.campaign_type") == [["0"]]
+    assert int(sql("select count(distinct campaign_type) from marts.mart_marketing_funnel where member_type = 'known'")[0][0]) >= 3

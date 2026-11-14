@@ -6,6 +6,8 @@ This document defines the CSV datasets used by the Power BI Online dashboard dem
 
 The datasets are exported from PostgreSQL `marts` views. They are business-ready reporting outputs, not raw lakehouse files.
 
+**Column order is a contract.** Power BI reads these files by column position. `scripts/power_bi_dashboard_contract.json` records the columns each file was published with, in order, for both export routes. Both export scripts write those columns first, in that order, and append every newer column after them; `scripts/validate_powerbi_assets.py` (CI job `powerbi-assets`) and the tests fail when a published column is moved, renamed or dropped. To add a column, append it; to change a published one, change the dashboard first and then the contract file.
+
 **Currency.** Every monetary field in every dataset is in Indian rupees (INR): revenue, sales, discounts, refunds, tax, shipping, order totals, prices, average order value, lifetime value, budgets, spend, cost per click and cost per order. No field holds another currency and there is no currency column. In Power BI, format these fields as Currency with the symbol ₹ (English (India)).
 
 ## Exported dataset contract

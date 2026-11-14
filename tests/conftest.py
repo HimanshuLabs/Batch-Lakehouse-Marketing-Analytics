@@ -183,6 +183,12 @@ def load_job(project_root: Path, monkeypatch):
         target = (root or project_root) / relative_path
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(source, target)
+        # The export jobs read the dashboards' column contract from the project.
+        contract = CODE_ROOT / "scripts" / "power_bi_dashboard_contract.json"
+        if "export_power_bi" in relative_path and contract.is_file():
+            contract_target = (root or project_root) / "scripts" / contract.name
+            contract_target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(contract, contract_target)
         for key, value in env.items():
             monkeypatch.setenv(key, value)
         name = f"p2_job_{target.stem}_{next(_module_counter)}"

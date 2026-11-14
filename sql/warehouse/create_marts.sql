@@ -770,6 +770,9 @@ WITH event_enriched AS (
 
         dc.campaign_id,
         dc.campaign_name,
+        -- The campaign's objective: fixed for a campaign (SCD Type 0), so it does
+        -- not change the grain.
+        dc.campaign_type,
         dc.traffic_source,
         dc.target_segment,
 
@@ -807,6 +810,7 @@ SELECT
     CASE COALESCE(campaign_id, 'UNKNOWN') WHEN 'UNKNOWN' THEN 'unknown_member' WHEN 'INVALID' THEN 'invalid_reference'
          ELSE 'known' END AS member_type,
     COALESCE(campaign_name, 'Unknown') AS campaign_name,
+    COALESCE(campaign_type, 'Unknown') AS campaign_type,
     COALESCE(traffic_source, 'Unknown') AS traffic_source,
     COALESCE(target_segment, 'Unknown') AS target_segment,
 
@@ -883,6 +887,7 @@ GROUP BY
     COALESCE(channel_group, 'Unknown'),
     COALESCE(campaign_id, 'UNKNOWN'),
     COALESCE(campaign_name, 'Unknown'),
+    COALESCE(campaign_type, 'Unknown'),
     COALESCE(traffic_source, 'Unknown'),
     COALESCE(target_segment, 'Unknown');
 
