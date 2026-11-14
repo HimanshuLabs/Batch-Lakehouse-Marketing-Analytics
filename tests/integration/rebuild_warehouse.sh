@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# Rebuild the warehouse three times from the same staging tables and prove the
-# result does not depend on the build or on insert order:
+# Rebuild the warehouse three times from the same staging tables, each time as
+# the DAG's build_warehouse task does (one transaction, a new generation), and
+# prove the result does not depend on the build or on insert order:
 #   A, B  the warehouse SQL as committed, twice
 #   C     the same, with the dim_region / dim_channel source lists reversed
 # Keys (dimension and fact), the key-free fingerprint (tests/sql/keyfree.sql)
 # and every mart must be identical across A, B and C, every region/channel key
 # must equal warehouse.deterministic_sk(prefix, natural key), and every fact
 # row key must equal warehouse.deterministic_fact_sk(prefix, natural key).
+#
+# Then a fourth build, F, is made to fail its reconciliation: it must publish
+# nothing and leave a report of the failing check.
 #
 # Usage: bash tests/integration/rebuild_warehouse.sh <work dir>
 # Env:   PGCONTAINER (default project2_postgres): the Postgres container to use.
@@ -26,8 +30,15 @@ if [ "$PGCONTAINER" = "project2_postgres" ] && [ "${CI:-}" != "true" ] && [ "${P
     exit 2
 fi
 
+# The whole script is one run under the pipeline run lock, so no pipeline run
+# and no other rebuild can change the warehouse between its builds and checks.
+if [ -z "${P2_LOCK_HELD:-}" ]; then
+    export PROJECT_ROOT="${PROJECT_ROOT:-$REPO}" P2_RUN_ID="rebuild-warehouse-$(date +%s%N)-$$"
+    exec python3 "$REPO/scripts/pipeline_lock.py" --last rebuild_warehouse -- bash "$0" "$@"
+fi
+
 mkdir -p "$WORK"
-psql_db() { docker exec -i "$PGCONTAINER" psql -U project2 -d marketing_analytics -v ON_ERROR_STOP=1 -At -F $'\t' "$@"; }
+psql_db() { docker exec -i -e "PGOPTIONS=-c p2.run_id=${P2_RUN_ID}" "$PGCONTAINER" psql -U project2 -d marketing_analytics -v ON_ERROR_STOP=1 -At -F $'\t' "$@"; }
 
 # Build C uses a copy of create_warehouse_tables.sql with the first two
 # FOREACH source lists (dim_region, dim_channel) reversed.
@@ -45,25 +56,26 @@ PY
 
 build() {
     local tag=$1 warehouse_sql=$2
+    export P2_RUN_ID="integration-$tag-$(date +%s%N)-$$"
     echo "== build $tag"
-    for f in "$warehouse_sql" "$REPO/sql/warehouse/repair_web_event_surrogate_keys.sql" \
-             "$REPO/sql/warehouse/scd2_validation_queries.sql" "$REPO/sql/warehouse/create_marts.sql" \
-             "$REPO/sql/warehouse/reconciliation_report.sql"; do
-        if ! psql_db -q < "$f" > "$WORK/$tag-$(basename "$f" .sql).log" 2>&1; then
-            echo "ERROR in $(basename "$f") (build $tag):"; tail -20 "$WORK/$tag-$(basename "$f" .sql).log"; exit 1
-        fi
-    done
+    # The build as the DAG runs it: a new generation, in one transaction.
+    if ! (cd "$REPO" && PGCONTAINER="$PGCONTAINER" RUN_MODE=docker bash scripts/run_warehouse_sql.sh \
+            sql/warehouse/begin_generation.sql "$warehouse_sql" \
+            sql/warehouse/scd2_validation_queries.sql sql/warehouse/create_marts.sql \
+            sql/warehouse/reconciliation_report.sql) > "$WORK/$tag-build.log" 2>&1; then
+        echo "ERROR in build $tag:"; tail -20 "$WORK/$tag-build.log"; exit 1
+    fi
     psql_db > "$WORK/$tag-keys.tsv" <<'SQL'
 SELECT 'region', region_sk, region_nk, country, state, city FROM warehouse.dim_region ORDER BY region_nk;
 SELECT 'channel', channel_sk, channel_nk, channel_name, channel_group FROM warehouse.dim_channel ORDER BY channel_nk;
 SELECT 'customer', customer_sk, customer_id, effective_from FROM warehouse.dim_customer ORDER BY customer_sk;
 SELECT 'product', product_sk, product_id, effective_from FROM warehouse.dim_product ORDER BY product_sk;
 SELECT 'campaign', campaign_sk, campaign_id, effective_from FROM warehouse.dim_campaign ORDER BY campaign_sk;
-SELECT 'orders', order_id, order_sk, customer_sk, campaign_sk, order_date_sk, region_sk, channel_sk FROM warehouse.fact_orders ORDER BY order_id;
-SELECT 'items', order_item_nk, order_item_sk, order_sk, customer_sk, product_sk, order_date_sk, region_sk, channel_sk FROM warehouse.fact_order_items ORDER BY order_item_nk;
-SELECT 'spend', campaign_spend_nk, campaign_spend_sk, campaign_sk, spend_date_sk, region_sk, channel_sk FROM warehouse.fact_campaign_spend ORDER BY campaign_spend_nk;
-SELECT 'web', event_id, event_sk, customer_sk, product_sk, campaign_sk, event_date_sk, region_sk, channel_sk FROM warehouse.fact_web_events ORDER BY event_id;
-SELECT 'conversions', conversion_nk, conversion_sk, event_sk, customer_sk, product_sk, campaign_sk, conversion_date_sk, region_sk, channel_sk FROM warehouse.fact_conversions ORDER BY conversion_nk;
+SELECT 'orders', order_id, order_sk, customer_sk, campaign_sk, order_date_sk, region_sk, channel_sk, customer_id, campaign_id, source_updated_at, record_hash FROM warehouse.fact_orders ORDER BY order_id;
+SELECT 'items', order_item_nk, order_item_sk, order_sk, customer_sk, product_sk, order_date_sk, region_sk, channel_sk, customer_id, product_id, source_updated_at, record_hash FROM warehouse.fact_order_items ORDER BY order_item_nk;
+SELECT 'spend', campaign_spend_nk, campaign_spend_sk, campaign_sk, spend_date_sk, channel_sk, campaign_id, source_updated_at, record_hash FROM warehouse.fact_campaign_spend ORDER BY campaign_spend_nk;
+SELECT 'web', event_id, event_sk, customer_sk, product_sk, campaign_sk, event_date_sk, region_sk, channel_sk, customer_id, product_id, campaign_id, source_updated_at, record_hash FROM warehouse.fact_web_events ORDER BY event_id;
+SELECT 'conversions', conversion_nk, conversion_sk, event_sk, customer_sk, product_sk, campaign_sk, conversion_date_sk, region_sk, channel_sk, customer_id, product_id, campaign_id, source_updated_at, record_hash FROM warehouse.fact_conversions ORDER BY conversion_nk;
 SQL
     psql_db < "$REPO/tests/sql/keyfree.sql" > "$WORK/$tag-keyfree.tsv"
     psql_db < "$REPO/tests/sql/marts_fingerprint.sql" > "$WORK/$tag-marts.tsv"
@@ -84,6 +96,44 @@ for part in keys keyfree marts; do
         fi
     done
 done
+
+# Build F is the same build with one loaded order removed before the
+# reconciliation (tests/sql/inject_reconciliation_fail.sql). The quality gate
+# must fail it before the commit: nothing is published, the warehouse stays
+# build C's, and the failing check is in logs/warehouse/failed_build_*.json.
+echo "== build F (must fail its reconciliation and publish nothing)"
+export P2_RUN_ID="integration-F-$(date +%s%N)-$$"
+generation_before=$(psql_db -c "SELECT to_regnamespace('warehouse')::oid")
+if (cd "$REPO" && PGCONTAINER="$PGCONTAINER" RUN_MODE=docker bash scripts/run_warehouse_sql.sh \
+        sql/warehouse/begin_generation.sql sql/warehouse/create_warehouse_tables.sql \
+        sql/warehouse/scd2_validation_queries.sql sql/warehouse/create_marts.sql \
+        tests/sql/inject_reconciliation_fail.sql sql/warehouse/reconciliation_report.sql) > "$WORK/F-build.log" 2>&1; then
+    echo "FAIL  build F succeeded: a build with a failing check was published"; failed=1
+else
+    echo "PASS  build F failed (exit code non-zero)"
+fi
+psql_db < "$REPO/tests/sql/keyfree.sql" > "$WORK/F-keyfree.tsv"
+psql_db < "$REPO/tests/sql/marts_fingerprint.sql" > "$WORK/F-marts.tsv"
+generation_after=$(psql_db -c "SELECT to_regnamespace('warehouse')::oid")
+for part in keyfree marts; do
+    if cmp -s "$WORK/C-$part.tsv" "$WORK/F-$part.tsv"; then
+        echo "PASS  $part: unchanged by the failed build"
+    else
+        echo "FAIL  $part: the failed build changed what is published"; diff "$WORK/C-$part.tsv" "$WORK/F-$part.tsv" | head -10; failed=1
+    fi
+done
+if [ "$generation_before" = "$generation_after" ]; then
+    echo "PASS  the live generation is still build C's"
+else
+    echo "FAIL  the failed build replaced the live generation"; failed=1
+fi
+report=$(grep -o 'logs/warehouse/failed_build_[0-9TZ]*\.json' "$WORK/F-build.log" | tail -1 || true)
+if [ -n "$report" ] && grep -q '"Gold order count equals warehouse fact_orders count"' "$REPO/$report" \
+        && grep -q "$P2_RUN_ID" "$REPO/$report"; then
+    echo "PASS  $report names the failing check"
+else
+    echo "FAIL  no failed-build report naming the failing check (log: $WORK/F-build.log)"; failed=1
+fi
 
 non_hash_keys=$(psql_db -c "
 SELECT (SELECT count(*) FROM warehouse.dim_region

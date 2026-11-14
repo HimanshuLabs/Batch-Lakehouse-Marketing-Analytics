@@ -26,6 +26,68 @@ FAR_FUTURE_DATE = "9999-12-31"
 # Interpreted in UTC (spark.sql.session.timeZone is UTC).
 BEGINNING_OF_TIME = "1900-01-01 00:00:00"
 
+# Every attribute of a dimension is of one slowly-changing-dimension type:
+#
+#   Type 0 (fixed)      the first value the source delivered is kept forever. A
+#                       later change in the source is ignored, and counted in
+#                       logs/scd2_quality_report.json (type0_changes_ignored).
+#   Type 1 (overwrite)  the latest value replaces the old one on every version
+#                       of the entity. No new version, no history, no new key.
+#   Type 2 (history)    a change closes the current version and opens a new one
+#                       (effective_from, effective_to, is_current). Only these
+#                       attributes are hashed into record_hash and so into the
+#                       surrogate key.
+#
+# SCD_ATTRIBUTES lists, per dimension, each attribute in output order with its
+# type and the reason for it. The configuration below is derived from it:
+#   tracked_columns     the Type 2 attributes
+#   type1_columns       the Type 1 attributes
+#   type0_columns       the Type 0 attributes
+#   untracked_optional  tracked_columns that may be missing from the source; kept
+#                       as NULL and left out of the hash
+# Every attribute must exist in the source.
+SCD_ATTRIBUTES: Dict[str, Dict[str, tuple]] = {
+    "customers": {
+        "customer_name": (1, "a change is a spelling correction or a new name of the same person; the old one has no reporting value"),
+        "email": (1, "a contact detail: only the current address is of use, and an old one should not be kept"),
+        "city": (2, "a move changes where sales are counted; orders before it belong to the old city"),
+        "state": (2, "changes with the city: the same reason"),
+        "country": (2, "changes with the city: the same reason"),
+        "customer_segment": (2, "segment reporting must show the segment the customer was in at the time of each order"),
+        "loyalty_tier": (2, "tier reporting must show the tier the customer had at the time of each order"),
+        "gender": (1, "a correction of the record, not an event in time"),
+        "age": (1, "it moves on every year; a version per birthday would be noise"),
+        "preferred_language": (1, "a current preference, used for contact, not for history"),
+        "loyalty_points": (1, "a running balance that moves with every order; its history is the tier (Type 2)"),
+        "is_prime_user": (1, "the current membership flag; this project does not report on its history"),
+        "signup_date": (0, "the day the account was opened cannot change; a different value later is a source error"),
+    },
+    "products": {
+        "product_name": (1, "a renamed or corrected title is the same product; reports should show the current name"),
+        "category": (0, "a product is listed in one category for good; a different value later is a source error"),
+        "price": (2, "the selling price at the time of a sale explains its revenue"),
+        "status": (2, "whether the product was on sale or withdrawn at a given time is history"),
+        "brand": (1, "a corrected brand applies to the product as a whole"),
+        "original_price": (1, "the list price is reference information; the price that was paid is the Type 2 price"),
+        "inventory_remaining": (1, "a level that moves with every sale and restock; only the latest is meaningful"),
+    },
+    "campaigns": {
+        "campaign_name": (1, "a renamed campaign is the same campaign; reports should show the current name"),
+        "channel": (0, "a campaign runs on the channel it was created for; a different value later is a source error"),
+        "target_segment": (2, "retargeting changes who the campaign reaches from that day on"),
+        "budget": (2, "spend is judged against the budget that was authorized at the time"),
+        "campaign_status": (2, "planned, active, paused and completed periods are the campaign's history"),
+        "start_date": (2, "a rescheduled period changes which days count as the campaign's"),
+        "end_date": (2, "a rescheduled period changes which days count as the campaign's"),
+        "campaign_type": (0, "the objective is set when the campaign is created and defines it"),
+        "ab_test_group": (1, "an assignment label; a correction applies to the whole campaign"),
+    },
+}
+
+
+def columns_of_type(dimension: str, scd_type: int) -> List[str]:
+    return [column for column, (kind, _) in SCD_ATTRIBUTES[dimension].items() if kind == scd_type]
+
 
 DIMENSION_CONFIGS: Dict[str, Dict[str, object]] = {
     "customers": {
@@ -37,20 +99,15 @@ DIMENSION_CONFIGS: Dict[str, Dict[str, object]] = {
         "output_path": GOLD_DIR / "dim_customers_scd2",
         "natural_key": "customer_id",
         "surrogate_key": "customer_sk",
-        "tracked_columns": [
-            "customer_name",
-            "email",
-            "city",
-            "state",
-            "country",
-            "customer_segment",
-            "loyalty_tier",
-        ],
+        "output_columns": list(SCD_ATTRIBUTES["customers"]),
+        "tracked_columns": columns_of_type("customers", 2),
         "column_map": {
             "customer_segment": "user_segment",
             "loyalty_tier": "membership_tier",
         },
         "untracked_optional": [],
+        "type1_columns": columns_of_type("customers", 1),
+        "type0_columns": columns_of_type("customers", 0),
         "date_candidates": [
             "updated_at",
             "event_timestamp",
@@ -68,20 +125,15 @@ DIMENSION_CONFIGS: Dict[str, Dict[str, object]] = {
         "output_path": GOLD_DIR / "dim_products_scd2",
         "natural_key": "product_id",
         "surrogate_key": "product_sk",
-        "tracked_columns": [
-            "product_name",
-            "category",
-            "brand",
-            "price",
-            "status",
-        ],
+        "output_columns": list(SCD_ATTRIBUTES["products"]),
+        "tracked_columns": columns_of_type("products", 2),
         "column_map": {
             "price": "discounted_price",
+            "status": "product_status",
         },
-        "untracked_optional": [
-            "brand",
-            "status",
-        ],
+        "untracked_optional": [],
+        "type1_columns": columns_of_type("products", 1),
+        "type0_columns": columns_of_type("products", 0),
         "date_candidates": [
             "updated_at",
             "event_timestamp",
@@ -98,19 +150,14 @@ DIMENSION_CONFIGS: Dict[str, Dict[str, object]] = {
         "output_path": GOLD_DIR / "dim_campaigns_scd2",
         "natural_key": "campaign_id",
         "surrogate_key": "campaign_sk",
-        "tracked_columns": [
-            "campaign_name",
-            "channel",
-            "target_segment",
-            "budget",
-            "campaign_status",
-            "start_date",
-            "end_date",
-        ],
+        "output_columns": list(SCD_ATTRIBUTES["campaigns"]),
+        "tracked_columns": columns_of_type("campaigns", 2),
         "column_map": {
             "channel": "traffic_source",
         },
         "untracked_optional": [],
+        "type1_columns": columns_of_type("campaigns", 1),
+        "type0_columns": columns_of_type("campaigns", 0),
         "date_candidates": [
             "updated_at",
             "start_date",
@@ -245,7 +292,19 @@ def build_scd2_dimension(
     date_candidates: List[str],
     column_map: Dict[str, str],
     untracked_optional: List[str],
+    type1_columns: List[str] | None = None,
+    type0_columns: List[str] | None = None,
+    output_columns: List[str] | None = None,
 ) -> DataFrame:
+    """One row per version of each entity.
+
+    Type 2 attributes (tracked_columns) decide the versions. Type 1 attributes
+    carry the entity's latest value on every version, Type 0 attributes its
+    first value; neither opens a version or changes a key.
+    """
+    type1_columns, type0_columns = list(type1_columns or []), list(type0_columns or [])
+    carried_columns = type1_columns + type0_columns
+    output_columns = list(output_columns or tracked_columns + carried_columns)
     df = normalize_dimension_columns(df, natural_key, column_map)
 
     if natural_key not in df.columns:
@@ -253,6 +312,13 @@ def build_scd2_dimension(
         raise ValueError(
             f"Missing natural key column: {natural_key}. "
             f"Available columns: {available_columns}"
+        )
+
+    missing_carried = [column for column in carried_columns if column not in df.columns]
+    if missing_carried:
+        raise ValueError(
+            f"SCD2 dimension '{dimension_name}' is missing Type 1 or Type 0 columns: "
+            f"{', '.join(missing_carried)}. Available columns: {', '.join(df.columns)}"
         )
 
     effective_column = first_existing_column(df, date_candidates)
@@ -300,10 +366,22 @@ def build_scd2_dimension(
 
     hashed = build_record_hash(cleaned, hashed_columns)
 
-    base_window = Window.partitionBy(natural_key).orderBy(
+    # Type 1 and Type 0 columns only break exact ties (same time and hash), so
+    # the order of an entity's source rows is deterministic; they never decide
+    # versions or keys.
+    base_order = [
         F.col("effective_from").asc(),
         F.col("record_hash").asc(),
-    )
+        *[F.col(column).asc_nulls_first() for column in carried_columns],
+    ]
+    base_window = Window.partitionBy(natural_key).orderBy(*base_order)
+    whole_entity = base_window.rowsBetween(Window.unboundedPreceding, Window.unboundedFollowing)
+    # Type 1: the value of the entity's latest source row, on every version.
+    for column in type1_columns:
+        hashed = hashed.withColumn(column, F.last(F.col(column)).over(whole_entity))
+    # Type 0: the first value the source delivered, on every version.
+    for column in type0_columns:
+        hashed = hashed.withColumn(column, F.first(F.col(column), ignorenulls=True).over(whole_entity))
 
     with_previous = hashed.withColumn(
         "previous_record_hash",
@@ -359,7 +437,7 @@ def build_scd2_dimension(
         F.col(natural_key),
     ]
 
-    for column in tracked_columns:
+    for column in output_columns:
         selected_columns.append(F.col(column))
 
     selected_columns.extend(
@@ -375,6 +453,31 @@ def build_scd2_dimension(
     )
 
     return versioned.select(*selected_columns)
+
+
+def type0_changes_ignored(
+    df: DataFrame,
+    natural_key: str,
+    type0_columns: List[str],
+    date_candidates: List[str],
+    column_map: Dict[str, str],
+) -> Dict[str, int]:
+    """Per Type 0 attribute: the entities whose source later delivered another value than the first.
+
+    The dimension keeps the first value; this is the count of what it ignored.
+    """
+    df = normalize_dimension_columns(df, natural_key, column_map).filter(F.col(natural_key).isNotNull())
+    effective_column = first_existing_column(df, date_candidates)
+    order = [F.to_timestamp(F.col(effective_column)).asc()] if effective_column else []
+    counts = {}
+    for column in type0_columns:
+        entity = Window.partitionBy(natural_key).orderBy(*order, F.col(column).asc_nulls_first()) \
+            .rowsBetween(Window.unboundedPreceding, Window.unboundedFollowing)
+        first = F.first(F.col(column), ignorenulls=True).over(entity)
+        changed = df.withColumn("_first", first).filter(
+            F.col(column).isNotNull() & (F.col(column).cast("string") != F.col("_first").cast("string")))
+        counts[column] = changed.select(natural_key).distinct().count()
+    return counts
 
 
 def validate_scd2_dimension(
@@ -459,6 +562,8 @@ def main() -> None:
             date_candidates = config["date_candidates"]  # type: ignore[assignment]
             column_map = config["column_map"]  # type: ignore[assignment]
             untracked_optional = config["untracked_optional"]  # type: ignore[assignment]
+            type1_columns = config["type1_columns"]  # type: ignore[assignment]
+            type0_columns = config["type0_columns"]  # type: ignore[assignment]
 
             source_df = read_table(spark, source_path)
 
@@ -471,7 +576,12 @@ def main() -> None:
                 date_candidates=date_candidates,
                 column_map=column_map,
                 untracked_optional=untracked_optional,
+                type1_columns=type1_columns,
+                type0_columns=type0_columns,
+                output_columns=config["output_columns"],  # type: ignore[arg-type]
             )
+            ignored = type0_changes_ignored(
+                source_df, natural_key, type0_columns, date_candidates, column_map)
 
             write_dimension(scd2_df, output_path)
 
@@ -494,6 +604,14 @@ def main() -> None:
                 "tracked_columns": tracked_columns,
                 "column_map": column_map,
                 "untracked_optional": untracked_optional,
+                "scd_types": {
+                    column: {"type": kind, "reason": reason}
+                    for column, (kind, reason) in SCD_ATTRIBUTES[dimension_name].items()
+                },
+                "type1_columns": type1_columns,
+                "type0_columns": type0_columns,
+                # Data quality: source changes to fixed attributes, kept out of the dimension.
+                "type0_changes_ignored": ignored,
                 "validation": validation,
             }
 
@@ -501,7 +619,8 @@ def main() -> None:
                 f"{dimension_name}: "
                 f"status={validation['status']}, "
                 f"rows={validation['total_rows']}, "
-                f"current_rows={validation['current_rows']}"
+                f"current_rows={validation['current_rows']}, "
+                f"type0_changes_ignored={ignored}"
             )
 
     except Exception as exc:

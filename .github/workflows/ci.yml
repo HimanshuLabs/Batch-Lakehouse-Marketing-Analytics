@@ -195,6 +195,31 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
+    # The throwaway PostgreSQL of the database tests (tests/conftest.py,
+    # require_sandbox_database): the image the integration job pins, on port
+    # 5546, under the container name the tests use for docker exec.
+    services:
+      sandbox:
+        image: postgres:16.14
+        env:
+          POSTGRES_USER: project2
+          POSTGRES_PASSWORD: project2
+          POSTGRES_DB: marketing_analytics
+        ports:
+          - 5546:5432
+        options: >-
+          --name p2-part-f-sandbox
+          --health-cmd "pg_isready -U project2 -d marketing_analytics"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+
+    # P2_F_SANDBOX=1 offers that database to the tests; P2_REQUIRE_DB=1 makes a
+    # database test FAIL instead of skip when it is not reachable.
+    env:
+      P2_F_SANDBOX: "1"
+      P2_REQUIRE_DB: "1"
+
     steps:
       - name: Check out repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -214,26 +239,32 @@ jobs:
             requirements.txt
             requirements-dev.txt
 
-      - name: Install runtime requirements and pytest
+      - name: Install runtime requirements, pytest and Jinja2
         run: |
           set -euo pipefail
 
           python -m pip install -r requirements.txt
-          python -m pip install "$(grep -E '^pytest==' requirements-dev.txt)"
+          # The test-only pins come from requirements-dev.txt (its dbt pins need Python 3.13).
+          python -m pip install \
+            "$(grep -E '^pytest==' requirements-dev.txt)" \
+            "$(grep -E '^Jinja2==' requirements-dev.txt)"
           python -m pytest --version
+          python -c "import jinja2; print('Jinja2', jinja2.__version__)"
           java -version
 
-      - name: Unit tests with the machine in UTC
+      # -rs lists every skipped test with its reason: with the sandbox up
+      # there must be none.
+      - name: Unit tests with the machine in UTC (database tests included)
         env:
           TZ: UTC
         run: |
-          python -m pytest tests/unit -p no:cacheprovider
+          python -m pytest tests/unit -p no:cacheprovider -rs
 
-      - name: Unit tests with the machine in Asia/Kolkata
+      - name: Unit tests with the machine in Asia/Kolkata (database tests included)
         env:
           TZ: Asia/Kolkata
         run: |
-          python -m pytest tests/unit -p no:cacheprovider
+          python -m pytest tests/unit -p no:cacheprovider -rs
 
   integration:
     name: Integration (full pipeline, warehouse, dbt)

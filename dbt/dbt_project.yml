@@ -12,11 +12,18 @@ clean-targets:
   - "target"
   - "dbt_packages"
 
+# The read-only role p2_reader (sql/warehouse/create_schemas.sql) reads every
+# dbt model: SELECT on each model, and USAGE on the schemas dbt creates.
+on-run-end:
+  - "{% for schema in schemas %}grant usage on schema {{ schema }} to p2_reader;{% endfor %}"
+
 models:
   marketing_lakehouse_warehouse:
     +persist_docs:
       relation: true
       columns: true
+    +grants:
+      select: ["p2_reader"]
 
     staging:
       +materialized: view

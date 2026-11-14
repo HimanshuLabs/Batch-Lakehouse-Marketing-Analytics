@@ -181,16 +181,16 @@ Source:
 Expected output columns:
     - campaign_id
     - campaign_name
-    - campaign_type
     - channel
     - traffic_source
     - target_segment
+    - campaign_status
+    - ab_test_group
     - campaign_budget
     - total_spend
     - budget_remaining
     - impressions
     - clicks
-    - ad_platform_conversions
     - warehouse_conversion_count
     - order_count
     - purchasing_customer_count
@@ -207,16 +207,16 @@ Expected output columns:
 SELECT
     campaign_id,
     campaign_name,
-    COALESCE(campaign_type, 'Unknown') AS campaign_type,
     COALESCE(channel, 'Unknown') AS channel,
     COALESCE(traffic_source, 'Unknown') AS traffic_source,
     COALESCE(target_segment, 'Unknown') AS target_segment,
+    campaign_status,
+    ab_test_group,
     campaign_budget,
     total_spend,
     budget_remaining,
     impressions,
     clicks,
-    ad_platform_conversions,
     warehouse_conversion_count,
     order_count,
     purchasing_customer_count,
@@ -356,7 +356,6 @@ Expected output columns:
     - channel_group
     - campaign_id
     - campaign_name
-    - campaign_type
     - traffic_source
     - total_event_count
     - session_count
@@ -379,7 +378,6 @@ SELECT
     COALESCE(channel_group, 'Unknown') AS channel_group,
     campaign_id,
     campaign_name,
-    COALESCE(campaign_type, 'Unknown') AS campaign_type,
     COALESCE(traffic_source, 'Unknown') AS traffic_source,
     total_event_count,
     session_count,
@@ -520,3 +518,101 @@ WHERE LOWER(check_name) LIKE '%revenue%'
 ORDER BY
     checked_at DESC,
     check_name;
+
+
+/*
+===============================================================================
+Ad spend and return on ad spend by channel
+===============================================================================
+Source:
+- warehouse.fact_campaign_spend (one row per campaign, day and region)
+- warehouse.fact_orders (revenue: orders that were not cancelled, less refunds)
+
+platform_roas is what the ad platform reports for its own spend;
+warehouse_roas is the completed order revenue of the channel's campaigns over
+the same spend.
+===============================================================================
+*/
+
+WITH spend AS (
+    SELECT
+        ch.channel_name,
+        SUM(fcs.spend_amount) AS total_spend,
+        SUM(fcs.impressions) AS impressions,
+        SUM(fcs.clicks) AS clicks,
+        SUM(fcs.conversions) AS ad_platform_conversions,
+        SUM(fcs.attributed_revenue) AS platform_attributed_revenue
+    FROM warehouse.fact_campaign_spend fcs
+    JOIN warehouse.dim_channel ch
+        ON fcs.channel_sk = ch.channel_sk
+    GROUP BY ch.channel_name
+),
+revenue AS (
+    SELECT
+        ch.channel_name,
+        SUM(fo.net_revenue) - SUM(fo.refund_amount) AS completed_revenue
+    FROM warehouse.fact_orders fo
+    JOIN warehouse.dim_channel ch
+        ON fo.channel_sk = ch.channel_sk
+    WHERE fo.order_status <> 'cancelled'
+    GROUP BY ch.channel_name
+)
+SELECT
+    s.channel_name,
+    ROUND(s.total_spend, 2) AS total_spend,
+    s.impressions,
+    s.clicks,
+    s.ad_platform_conversions,
+    ROUND(s.platform_attributed_revenue / NULLIF(s.total_spend, 0), 4) AS platform_roas,
+    ROUND(COALESCE(r.completed_revenue, 0) / NULLIF(s.total_spend, 0), 4) AS warehouse_roas
+FROM spend s
+LEFT JOIN revenue r
+    ON s.channel_name = r.channel_name
+ORDER BY total_spend DESC;
+
+
+/*
+===============================================================================
+Ad spend and return on ad spend by region
+===============================================================================
+Source:
+- warehouse.fact_campaign_spend and warehouse.dim_region (the state the ad
+  platform reports the spend for)
+- warehouse.fact_orders and warehouse.dim_region (the state the order was
+  placed from; orders that were not cancelled, less refunds)
+===============================================================================
+*/
+
+WITH spend AS (
+    SELECT
+        dr.state,
+        SUM(fcs.spend_amount) AS total_spend,
+        SUM(fcs.clicks) AS clicks,
+        SUM(fcs.conversions) AS ad_platform_conversions,
+        SUM(fcs.attributed_revenue) AS platform_attributed_revenue
+    FROM warehouse.fact_campaign_spend fcs
+    JOIN warehouse.dim_region dr
+        ON fcs.region_sk = dr.region_sk
+    GROUP BY dr.state
+),
+revenue AS (
+    SELECT
+        dr.state,
+        SUM(fo.net_revenue) - SUM(fo.refund_amount) AS completed_revenue
+    FROM warehouse.fact_orders fo
+    JOIN warehouse.dim_region dr
+        ON fo.region_sk = dr.region_sk
+    WHERE fo.order_status <> 'cancelled'
+    GROUP BY dr.state
+)
+SELECT
+    s.state,
+    ROUND(s.total_spend, 2) AS total_spend,
+    s.clicks,
+    s.ad_platform_conversions,
+    ROUND(s.platform_attributed_revenue / NULLIF(s.total_spend, 0), 4) AS platform_roas,
+    ROUND(COALESCE(r.completed_revenue, 0) / NULLIF(s.total_spend, 0), 4) AS warehouse_roas
+FROM spend s
+LEFT JOIN revenue r
+    ON s.state = r.state
+ORDER BY total_spend DESC;

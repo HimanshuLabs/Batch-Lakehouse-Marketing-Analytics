@@ -8,18 +8,19 @@ import sys
 REQUIRED_FILES = {
     "sql/warehouse/create_schemas.sql": ["create schema"],
     "sql/warehouse/load_gold_to_staging.sql": ["staging"],
-    "sql/warehouse/create_warehouse_tables.sql": ["warehouse"],
-    "sql/warehouse/create_marts.sql": ["marts"],
+    "sql/warehouse/begin_generation.sql": ["alter schema", "p2.build_txid"],
+    # Each build file must keep its check for the build transaction (p2.build_txid).
+    "sql/warehouse/create_warehouse_tables.sql": ["warehouse", "p2.build_txid"],
+    "sql/warehouse/create_marts.sql": ["marts", "p2.build_txid"],
     "sql/warehouse/create_indexes.sql": ["create index"],
-    "sql/warehouse/reconciliation_report.sql": ["audit", "reconciliation"],
-    "sql/warehouse/scd2_validation_queries.sql": ["scd2"],
+    "sql/warehouse/reconciliation_report.sql": ["audit", "reconciliation", "p2.build_txid"],
+    "sql/warehouse/scd2_validation_queries.sql": ["scd2", "p2.build_txid"],
     "sql/warehouse/performance_explain_analyze.sql": ["explain"],
     "sql/warehouse/dashboard_query_pack.sql": ["select"],
 }
 
 OPTIONAL_FILES = {
     "sql/warehouse/powerbi_export_queries.sql": [],
-    "sql/warehouse/repair_web_event_surrogate_keys.sql": [],
 }
 
 FORBIDDEN_PATTERNS = [

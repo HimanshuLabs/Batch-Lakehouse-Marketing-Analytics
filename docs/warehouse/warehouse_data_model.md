@@ -43,6 +43,11 @@ The warehouse data model turns trusted Gold/SCD2 lakehouse outputs into a relati
 | marts.mart_product_sales | Which products and categories drive revenue? |
 | marts.mart_revenue_daily | How is revenue trending over time? |
 | marts.mart_marketing_funnel | Where do users move or drop in the funnel? |
+| marts.mart_customer_daily_snapshot | What did mart_customer_360 say at the end of each business date? |
+| marts.mart_product_daily_snapshot | What did mart_product_sales say at the end of each business date? |
+| marts.mart_campaign_daily_snapshot | What did mart_campaign_performance say at the end of each business date? |
+
+The three daily snapshots are tables with the key (entity ID, `snapshot_date`). A row uses only the facts, order statuses, refunds and dimension versions known at the end of its date, so features taken at a cutoff date cannot contain anything that happened later.
 
 ## Key Design Rule
 

@@ -26,11 +26,12 @@ import sys
 import tempfile
 import time
 import types
+import uuid
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DAG_FILE = REPO_ROOT / "airflow" / "dags" / "batch_lakehouse_pipeline.py"
-BATCH_DATE_TEMPLATE = "{{ (dag_run.logical_date or dag_run.run_after) | ds }}"
+BATCH_DATE_TEMPLATE = "{{ (dag_run.logical_date or dag_run.run_after).astimezone(macros.dateutil.tz.gettz('Asia/Kolkata')) | ds }}"
 
 
 def load_dag() -> tuple[object, dict[str, dict], list[tuple[str, str]]]:
@@ -102,7 +103,7 @@ def task_order(tasks: dict[str, dict], edges: list[tuple[str, str]]) -> list[str
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--batch-date", required=True)
-    parser.add_argument("--log-dir", required=True, type=Path)
+    parser.add_argument("--log-dir", type=Path, default=REPO_ROOT / "logs" / ("dag-" + uuid.uuid4().hex))
     parser.add_argument("--skip", nargs="*", default=[])
     parser.add_argument("--from", dest="start")
     parser.add_argument("--to", dest="stop")
@@ -123,6 +124,7 @@ def main() -> int:
     if default_env.get("BATCH_DATE") != BATCH_DATE_TEMPLATE:
         raise SystemExit("DEFAULT_ENV no longer renders BATCH_DATE from the DAG run")
     env = {key: (args.batch_date if value == BATCH_DATE_TEMPLATE else value) for key, value in default_env.items()}
+    env["P2_RUN_ID"] = "local-" + uuid.uuid4().hex
     for item in args.env:
         key, sep, value = item.partition("=")
         if not sep or not key:
@@ -138,6 +140,17 @@ def main() -> int:
         args.log_dir.mkdir(parents=True, exist_ok=True)
     bash = shutil.which("bash") or "/bin/bash"
 
+    try:
+        return run_tasks(args, order, selected, tasks, env, bash)
+    finally:
+        # This invocation is the whole run (it may stop before the DAG's last
+        # task), so give the pipeline run lock back whatever happened.
+        if not args.dry_run:
+            subprocess.run([env["PROJECT_PYTHON"], str(Path(env["PROJECT_ROOT"]) / "scripts" / "pipeline_lock.py"),
+                            "--release"], env=env, stdout=subprocess.DEVNULL, check=False)
+
+
+def run_tasks(args, order, selected, tasks, env, bash) -> int:
     for number, task in enumerate(order, 1):
         if task not in selected:
             continue
