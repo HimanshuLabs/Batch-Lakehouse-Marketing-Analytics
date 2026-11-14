@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import os
 from datetime import date
 from pathlib import Path
@@ -59,7 +60,7 @@ TABLES = {
         "raw_file": RAW_BASE_DIR / f"batch_date={BATCH_DATE}" / "web_events.json",
         "bronze_path": BRONZE_BASE_DIR / "bronze_web_events",
         "raw_has_header": False,
-        "expected_bronze_columns": 65,
+        "expected_bronze_columns": 66,
     },
 }
 
@@ -75,14 +76,54 @@ def create_spark_session() -> SparkSession:
     )
 
 
+# Volume rules, per feed (one raw file):
+#   - An empty feed fails, unless the batch is declared empty: whoever delivers
+#     the batch puts a file named EMPTY_BATCH_MARKER into its raw folder.
+#   - A feed far below its usual volume fails: fewer rows than
+#     MIN_VOLUME_RATIO x the median of the earlier batches in Bronze. The first
+#     batch ever loaded is the initial load (months of history in one file): it
+#     has no baseline and is never used as one, so the second batch has no
+#     baseline either and only has to be non-empty.
+#   The per-batch pass ratio (how many delivered rows survive Silver) is a
+#   separate check in silver_quality_checks.py.
+EMPTY_BATCH_MARKER = "_EMPTY_BATCH"
+MIN_VOLUME_RATIO = float(os.environ.get("P2_MIN_VOLUME_RATIO", "0.5"))
+
+
+def batch_is_declared_empty(raw_file: Path) -> bool:
+    return (raw_file.parent / EMPTY_BATCH_MARKER).is_file()
+
+
+def usual_row_count(spark: SparkSession, bronze_path: Path) -> int | None:
+    """The median row count of the earlier batches, without the initial load; None when there is none."""
+    if not bronze_path.exists() or not any(bronze_path.rglob("*.parquet")):
+        return None
+    earlier = sorted(
+        (row["ingestion_date"], row["count"])
+        for row in spark.read.parquet(str(bronze_path))
+        .filter(col("ingestion_date") < lit(BATCH_DATE).cast("date"))
+        .groupBy("ingestion_date").count().collect()
+    )
+    counts = sorted(count for _, count in earlier[1:])
+    if not counts:
+        return None
+    middle = len(counts) // 2
+    return counts[middle] if len(counts) % 2 else (counts[middle - 1] + counts[middle]) // 2
+
+
 def count_raw_file_lines(path: Path, has_header: bool) -> int:
+    """Rows in a raw file: CSV records for a CSV with a header (a quoted field
+    can span lines, like Bronze reads it), lines for JSON lines."""
     if not path.exists():
         raise FileNotFoundError(f"Missing raw file: {path}")
 
-    with path.open("r", encoding="utf-8") as file:
-        line_count = sum(1 for _ in file)
+    if has_header:
+        with path.open("r", encoding="utf-8", newline="") as file:
+            record_count = sum(1 for _ in csv.reader(file))
+        return record_count - 1
 
-    return line_count - 1 if has_header else line_count
+    with path.open("r", encoding="utf-8") as file:
+        return sum(1 for line in file if line.strip())
 
 
 def validate_table(
@@ -93,18 +134,52 @@ def validate_table(
     raw_has_header: bool,
     expected_bronze_columns: int | None = None,
 ) -> dict:
+    raw_row_count = count_raw_file_lines(raw_file, raw_has_header)
+
+    declared_empty = batch_is_declared_empty(raw_file)
+
+    if raw_row_count == 0:
+        # An empty feed: valid only when the batch is declared empty, and when
+        # Bronze also has nothing for this batch date (bronze_ingestion writes
+        # no partition for it).
+        bronze_row_count = 0
+        if bronze_path.exists():
+            bronze_row_count = (
+                spark.read.parquet(str(bronze_path))
+                .filter(col("ingestion_date") == lit(BATCH_DATE).cast("date"))
+                .count()
+            )
+        failure_reasons = []
+        if not declared_empty:
+            failure_reasons.append(
+                f"the feed is empty and the batch is not declared empty (no {EMPTY_BATCH_MARKER} file in {raw_file.parent.name})"
+            )
+        if bronze_row_count != 0:
+            failure_reasons.append(
+                f"the raw file is empty but Bronze has {bronze_row_count} row(s) for ingestion_date={BATCH_DATE}"
+            )
+        return {
+            "table_name": table_name,
+            "status": "PASSED" if not failure_reasons else "FAILED",
+            "raw_row_count": 0,
+            "bronze_row_count": bronze_row_count,
+            "bronze_column_count": 0,
+            "missing_metadata_columns": "",
+            "usual_row_count": 0,
+            "failure_reason": "; ".join(failure_reasons),
+        }
+
     if not bronze_path.exists():
         return {
             "table_name": table_name,
             "status": "FAILED",
-            "raw_row_count": None,
-            "bronze_row_count": None,
-            "bronze_column_count": None,
+            "raw_row_count": raw_row_count,
+            "bronze_row_count": 0,
+            "bronze_column_count": 0,
             "missing_metadata_columns": "ALL",
+            "usual_row_count": 0,
             "failure_reason": f"Missing Bronze path: {bronze_path}",
         }
-
-    raw_row_count = count_raw_file_lines(raw_file, raw_has_header)
 
     # Read the table root (keeps the ingestion_date partition column) and
     # check only this run's partition; earlier batches stay in Bronze.
@@ -125,15 +200,19 @@ def validate_table(
                 f"expected exactly one batch_id for ingestion_date={BATCH_DATE}, found {batch_id_count}"
             )
 
-    if raw_row_count <= 0:
-        failure_reasons.append("raw row count is zero")
-
     if bronze_row_count <= 0:
         failure_reasons.append("bronze row count is zero")
 
     if raw_row_count != bronze_row_count:
         failure_reasons.append(
             f"row count mismatch raw={raw_row_count}, bronze={bronze_row_count}"
+        )
+
+    usual = usual_row_count(spark, bronze_path)
+    if usual is not None and not declared_empty and raw_row_count < MIN_VOLUME_RATIO * usual:
+        failure_reasons.append(
+            f"volume far below usual: {raw_row_count} rows, less than {MIN_VOLUME_RATIO:g} x the median "
+            f"of the earlier batches ({usual})"
         )
 
     if missing_metadata:
@@ -153,6 +232,7 @@ def validate_table(
         "bronze_row_count": bronze_row_count,
         "bronze_column_count": len(bronze_df.columns),
         "missing_metadata_columns": ",".join(missing_metadata) if missing_metadata else "",
+        "usual_row_count": usual or 0,
         "failure_reason": "; ".join(failure_reasons),
     }
 

@@ -104,6 +104,8 @@ def build_dim_products(products: DataFrame) -> DataFrame:
             "product_id",
             "product_name",
             "category",
+            "brand",
+            "product_status",
             "original_price",
             "discount_percent",
             "discounted_price",
@@ -120,6 +122,7 @@ def build_dim_campaigns(campaigns: DataFrame) -> DataFrame:
             "campaign_id",
             "campaign_name",
             "traffic_source",
+            "campaign_type",
             "ab_test_group",
             "target_segment",
             "budget",
@@ -140,11 +143,19 @@ def build_fact_orders(orders: DataFrame) -> DataFrame:
             "campaign_id",
             "order_timestamp",
             to_date(col("order_timestamp")).alias("order_date"),
+            "order_status",
+            "status_timestamp",
+            "refund_amount",
+            "updated_at",
             "payment_method",
             col("cart_value").alias("order_amount"),
+            "tax_amount",
+            "shipping_amount",
+            "total_amount",
             "fraud_score",
             "country",
             "city",
+            "state",
         ),
         "fact_orders",
     )
@@ -176,9 +187,14 @@ def build_fact_ad_spend(ad_spend: DataFrame) -> DataFrame:
             "campaign_id",
             "traffic_source",
             "spend_date",
+            "country",
+            "state",
             "impressions",
             "clicks",
+            "conversions",
+            "attributed_revenue",
             "spend_amount",
+            "campaign_day_spend",
         ),
         "fact_ad_spend",
     )
@@ -207,6 +223,9 @@ def build_fact_web_events(web_events: DataFrame) -> DataFrame:
             "operating_system",
             "browser",
             "network_type",
+            "search_query",
+            "time_on_page_sec",
+            "scroll_depth_percent",
             "engagement_score",
             "purchase_probability",
             "cart_abandonment_probability",
@@ -214,9 +233,26 @@ def build_fact_web_events(web_events: DataFrame) -> DataFrame:
             "page_load_time_ms",
             "fraud_score",
             "city",
+            "state",
             "country",
+            "schema_version",
+            "source_system",
+            # The batch that delivered the event (the warehouse's source_updated_at).
+            "ingestion_date",
         ),
         "fact_web_events",
+    )
+
+
+def completed_orders(orders: DataFrame) -> DataFrame:
+    """The orders that are sales (every order that was not cancelled), with cart_value net of refunds.
+
+    A returned order stays a sale; its refund is subtracted, so the revenue in
+    these marts is net of refunds.
+    """
+    return (
+        orders.filter(col("order_status") != "cancelled")
+        .withColumn("cart_value", col("cart_value") - col("refund_amount"))
     )
 
 
@@ -514,6 +550,9 @@ def main() -> None:
     ad_spend = read_silver(spark, "ad_spend").cache()
     web_events = read_silver(spark, "web_events").cache()
 
+    sold_orders = completed_orders(orders)
+    sold_items = order_items.join(sold_orders.select("order_id"), "order_id", "left_semi")
+
     gold_tables = {
         "dim_customers": build_dim_customers(customers),
         "dim_products": build_dim_products(products),
@@ -522,9 +561,10 @@ def main() -> None:
         "fact_order_items": build_fact_order_items(order_items),
         "fact_ad_spend": build_fact_ad_spend(ad_spend),
         "fact_web_events": build_fact_web_events(web_events),
-        "mart_campaign_performance": build_mart_campaign_performance(campaigns, orders, ad_spend, web_events),
-        "mart_product_performance": build_mart_product_performance(products, order_items, web_events),
-        "mart_customer_value": build_mart_customer_value(customers, orders, web_events),
+        # Revenue, order counts and units in the marts are those of completed orders.
+        "mart_campaign_performance": build_mart_campaign_performance(campaigns, sold_orders, ad_spend, web_events),
+        "mart_product_performance": build_mart_product_performance(products, sold_items, web_events),
+        "mart_customer_value": build_mart_customer_value(customers, sold_orders, web_events),
         "mart_marketing_funnel": build_mart_marketing_funnel(web_events),
     }
 

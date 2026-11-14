@@ -93,7 +93,11 @@ TABLES = {
         "dedupe_key": {"event_id": "trim(`event_id`)"},
         "required_columns": ["event_id", "session_id", "user_id", "event_type", "event_timestamp", "processed_date", "silver_record_hash"],
         "not_null_columns": ["event_id", "session_id", "user_id", "event_type", "event_timestamp"],
-        "minimum_silver_rows": 7000,
+        # Of this batch's Bronze rows, the share that must pass Silver (7 of 8,
+        # the old 7,000-of-8,000 floor of the first batch). Per batch, so a
+        # small or empty batch, or a start from any batch date, is judged on
+        # its own rows.
+        "minimum_batch_pass_ratio": 0.875,
     },
 }
 
@@ -377,12 +381,22 @@ def validate_table(spark: SparkSession, table_name: str, config: dict) -> dict:
         if bad_nulls:
             failure_reasons.append(f"not-null violations: {bad_nulls}")
 
-    minimum_silver_rows = config.get("minimum_silver_rows")
+    minimum_batch_pass_ratio = config.get("minimum_batch_pass_ratio")
 
-    if minimum_silver_rows is not None and silver_count < minimum_silver_rows:
-        failure_reasons.append(
-            f"silver row count below minimum threshold: actual={silver_count}, minimum={minimum_silver_rows}"
+    if minimum_batch_pass_ratio is not None and bronze_df is not None:
+        this_batch = col("ingestion_date") == lit(BATCH_DATE).cast("date")
+        batch_bronze_rows = bronze_df.filter(this_batch).count()
+        batch_quarantine_rows = (
+            quarantine_df.filter(this_batch).count()
+            if quarantine_df is not None and "ingestion_date" in quarantine_df.columns
+            else 0
         )
+        batch_passed_rows = batch_bronze_rows - batch_quarantine_rows
+        if batch_bronze_rows > 0 and batch_passed_rows < minimum_batch_pass_ratio * batch_bronze_rows:
+            failure_reasons.append(
+                f"too few of batch {BATCH_DATE}'s rows passed Silver: passed={batch_passed_rows} of "
+                f"{batch_bronze_rows}, minimum share={minimum_batch_pass_ratio}"
+            )
 
     history_result = validate_history(spark, config, silver_df)
     failure_reasons.extend(history_result.pop("failure_reasons"))

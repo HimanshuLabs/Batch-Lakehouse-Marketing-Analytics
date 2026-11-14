@@ -9,6 +9,8 @@ Verified on 2026-11-10 with run `manual__rerun2_2026-06-18` (BATCH_DATE 2026-06-
 - warehouse reconciliation was 14 of 14 PASS;
 - `power_bi_export` succeeded, with every `data_quality_summary.csv` row PASS.
 
+Those are the numbers of that run. The project now has 24 dbt models and 82 dbt tests; dbt reports `PASS=25` for `dbt run` and `PASS=83` for `dbt test`, because it also counts the `on-run-end` hook that grants `p2_reader` USAGE on the dbt schemas. Reconciliation now has 29 checks, and the DAG has 20 tasks (section below). Two later scheduler runs of the 20-task DAG, on 13 and 14 November 2026, succeeded with no failed task; see `docs/screenshots/airflow/01_dag_run_success.png`.
+
 ---
 
 ## Versions and environments
@@ -113,7 +115,7 @@ source scripts/airflow_local_env.sh
 airflow db migrate
 airflow db check
 airflow dags list-import-errors
-airflow tasks list batch_lakehouse_marketing_analytics   # 23 tasks
+airflow tasks list batch_lakehouse_marketing_analytics   # 20 tasks
 ```
 
 ---
@@ -149,9 +151,9 @@ The UI is at `http://127.0.0.1:8080`.
 
 ## 7. Trigger a run for a chosen BATCH_DATE
 
-The DAG sets `BATCH_DATE` from `{{ (dag_run.logical_date or dag_run.run_after) | ds }}`: the run's logical date when it has one, otherwise its `run_after` time. Both are in UTC, so `BATCH_DATE` is the UTC day.
+The DAG sets `BATCH_DATE` from `{{ (dag_run.logical_date or dag_run.run_after).astimezone(macros.dateutil.tz.gettz('Asia/Kolkata')) | ds }}`: the run's logical date when it has one, otherwise its `run_after` time, converted to India time. `BATCH_DATE` is the India (Asia/Kolkata) day.
 
-**From the UI.** Trigger the DAG and set **Logical Date** to the day you want to process or rerun. Use 12:00 on that day: noon keeps the UTC day the same whichever timezone the UI shows. To process today, leave the field at its default, now. "Today" means the current UTC day, so between 00:00 and 05:30 IST it is still the previous day.
+**From the UI.** Trigger the DAG and set **Logical Date** to the day you want to process or rerun. Use 12:00 on that day: noon is the same day in India whichever timezone the UI shows. To process today, leave the field at its default, now. "Today" means the current day in India, also between 00:00 and 05:30 IST.
 
 **From the CLI**, the same applies: `airflow dags trigger batch_lakehouse_marketing_analytics -l 2026-06-04T12:00:00+00:00` for a given day, or the same command without `-l` for today.
 
@@ -207,9 +209,9 @@ For a batch date whose raw files already exist, `generate_data` logs `Raw data f
 airflow tasks states-for-dag-run batch_lakehouse_marketing_analytics "$RUN_ID"
 
 docker exec project2_postgres psql -U project2 -d marketing_analytics -c "
-SELECT status, COUNT(*) FROM audit.v_latest_reconciliation_report GROUP BY status;"   # PASS | 14
+SELECT status, COUNT(*) FROM audit.v_latest_reconciliation_report GROUP BY status;"   # PASS | 29
 
-awk -F, 'NR>1 && $4!="PASS"' data/bi_exports/data_quality_summary.csv              # prints nothing
+python -c "import csv; print([r for r in csv.DictReader(open('data/bi_exports/data_quality_summary.csv', newline='')) if r['status'] != 'PASS'])"   # prints []
 ```
 
 ---
@@ -246,10 +248,7 @@ scd2_gold_marts
 scd2_duckdb_analytics
 create_postgresql_schemas
 load_gold_scd2_to_staging
-build_warehouse_tables
-run_scd2_validation
-build_reporting_marts
-run_warehouse_reconciliation
+build_warehouse
 dbt_run
 dbt_test
 dbt_docs

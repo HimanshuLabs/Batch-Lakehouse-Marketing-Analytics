@@ -7,6 +7,7 @@ import sys
 
 EXPORT_DIR = Path("exports/power_bi")
 SCREENSHOT_DIR = Path("screenshots/power_bi")
+DASHBOARD_CONTRACT = Path("scripts/power_bi_dashboard_contract.json")
 
 EXPECTED_CSVS = {
     "revenue_daily.csv": "revenue daily",
@@ -144,6 +145,46 @@ def validate_no_powerbi_secrets(errors: list[str]) -> None:
                 errors.append(f"Possible Power BI credential/token pattern {pattern!r} found in {path}")
 
 
+def header_problems(file_name: str, header: list[str], published: list[str]) -> list[str]:
+    """How a CSV header breaks the dashboard contract: its first columns must be the published ones, in order."""
+    problems = []
+    missing = [column for column in published if column not in header]
+    if missing:
+        problems.append(f"{file_name}: the dashboard reads column(s) {', '.join(missing)}, which the file no longer has")
+    elif header[:len(published)] != published:
+        position = next(i for i, column in enumerate(published) if header[i] != column)
+        problems.append(
+            f"{file_name}: column {position + 1} is {header[position]!r}, the dashboard reads {published[position]!r} "
+            f"there. Power BI reads by position: published columns must come first, in their published order; "
+            f"new columns may only be appended"
+        )
+    return problems
+
+
+def validate_dashboard_contract(errors: list[str]) -> None:
+    """Every export file starts with the columns the dashboards were built on, in that order.
+
+    Route A files (exports/power_bi) are committed and always checked. Route B
+    files (data/bi_exports) are produced by the pipeline and are checked when
+    they are there.
+    """
+    if not DASHBOARD_CONTRACT.exists():
+        errors.append(f"Missing dashboard column contract: {DASHBOARD_CONTRACT}")
+        return
+    contract = json.loads(DASHBOARD_CONTRACT.read_text(encoding="utf-8"))
+    for route, required in (("route_a", True), ("route_b", False)):
+        directory = Path(contract[route]["directory"])
+        for file_name, published in contract[route]["files"].items():
+            path = directory / file_name
+            if not path.exists():
+                if required:
+                    errors.append(f"Dashboard contract: {path} is missing")
+                continue
+            with path.open("r", encoding="utf-8", newline="") as handle:
+                header = next(csv.reader(handle), [])
+            errors.extend(f"Dashboard contract: {directory}/{problem}" for problem in header_problems(file_name, header, published))
+
+
 def main() -> int:
     errors: list[str] = []
 
@@ -155,6 +196,7 @@ def main() -> int:
 
         validate_manifest(errors)
 
+    validate_dashboard_contract(errors)
     validate_screenshots(errors)
     validate_docs(errors)
     validate_no_powerbi_secrets(errors)

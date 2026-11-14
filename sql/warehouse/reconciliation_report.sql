@@ -24,6 +24,17 @@ Notes:
 
 BEGIN;
 
+-- This file is one step of the warehouse build. It refuses to run anywhere but
+-- in the build transaction that sql/warehouse/begin_generation.sql started
+-- (which sets p2.build_txid for that transaction only), so it can never drop or
+-- rebuild the live tables on its own.
+DO $$
+BEGIN
+    IF current_setting('p2.build_txid', true) IS DISTINCT FROM txid_current()::TEXT THEN
+        RAISE EXCEPTION 'reconciliation_report.sql runs only inside the warehouse build transaction started by sql/warehouse/begin_generation.sql. Run the whole build: bash scripts/run_airflow_task.sh build_warehouse';
+    END IF;
+END $$;
+
 CREATE SCHEMA IF NOT EXISTS audit;
 
 DROP VIEW IF EXISTS audit.v_latest_reconciliation_report;
@@ -166,12 +177,15 @@ $$;
 
 DO $$
 DECLARE
-    run_id TEXT := to_char(clock_timestamp(), 'YYYYMMDDHH24MISSUS') || '-' || substr(md5(random()::TEXT), 1, 8);
+    run_id TEXT := NULLIF(current_setting('p2.run_id', true), '');
     checked_time TIMESTAMPTZ := CURRENT_TIMESTAMP;
 
     source_table TEXT;
+    invalid_reference RECORD;
+    scd2_dimension RECORD;
     source_value NUMERIC(38, 6);
     target_value NUMERIC(38, 6);
+    order_count_excluded NUMERIC(38, 6);
 BEGIN
     /*
     ---------------------------------------------------------------------------
@@ -268,9 +282,7 @@ BEGIN
                         COALESCE(
                             warehouse.safe_numeric(to_jsonb(src)->>'net_revenue'),
                             warehouse.safe_numeric(to_jsonb(src)->>'revenue'),
-                            warehouse.safe_numeric(to_jsonb(src)->>'total_amount'),
                             warehouse.safe_numeric(to_jsonb(src)->>'total_revenue'),
-                            warehouse.safe_numeric(to_jsonb(src)->>'order_total'),
                             warehouse.safe_numeric(to_jsonb(src)->>'cart_value'),
                             0
                         )
@@ -379,33 +391,18 @@ BEGIN
         INTO source_value;
     END IF;
 
-    IF to_regclass('staging.stg_gold_fact_web_events') IS NOT NULL THEN
-        SELECT COUNT(*)::NUMERIC
-    INTO source_value
-    FROM (
-        SELECT DISTINCT customer_id::TEXT AS customer_id
-        FROM staging.stg_gold_dim_customers_scd2
-        WHERE customer_id IS NOT NULL
-
-        UNION
-
-        SELECT DISTINCT customer_id::TEXT AS customer_id
-        FROM staging.stg_gold_fact_web_events
-        WHERE customer_id IS NOT NULL
-    ) expected_customers;
-    END IF;
 
     SELECT COUNT(DISTINCT customer_id)::NUMERIC
     INTO target_value
     FROM warehouse.dim_customer
-    WHERE customer_sk <> 0
-      AND customer_id <> 'UNKNOWN';
+    WHERE customer_sk NOT IN (0, -1)
+      AND customer_id NOT IN ('UNKNOWN', 'INVALID');
 
     PERFORM audit.record_reconciliation_check(
         run_id,
-        'Gold plus inferred customer dimension row count equals warehouse dim_customer row count',
+        'Gold customer dimension key count equals warehouse dim_customer key count',
         'Staging-to-warehouse row count',
-        COALESCE(source_table, 'missing customer staging table') || ' + inferred web-event customer keys',
+        COALESCE(source_table, 'missing customer staging table'),
         'warehouse.dim_customer',
         'customer_dimension_rows',
         'COUNT',
@@ -413,7 +410,7 @@ BEGIN
         target_value,
         0,
         checked_time,
-        'Excludes warehouse unknown customer member customer_sk = 0 and includes inferred late-arriving web-event customer keys.'
+        'Distinct customer_id on both sides, excluding the unknown member (customer_sk = 0) and the invalid-reference member (customer_sk = -1). No member is invented per key: a fact whose customer is not in the dimension is kept on the invalid-reference member.'
     );
 
     source_table := audit.first_existing_table(
@@ -433,33 +430,18 @@ BEGIN
         INTO source_value;
     END IF;
 
-    IF to_regclass('staging.stg_gold_fact_web_events') IS NOT NULL THEN
-        SELECT COUNT(*)::NUMERIC
-    INTO source_value
-    FROM (
-        SELECT DISTINCT product_id::TEXT AS product_id
-        FROM staging.stg_gold_dim_products_scd2
-        WHERE product_id IS NOT NULL
-
-        UNION
-
-        SELECT DISTINCT product_id::TEXT AS product_id
-        FROM staging.stg_gold_fact_web_events
-        WHERE product_id IS NOT NULL
-    ) expected_products;
-    END IF;
 
     SELECT COUNT(DISTINCT product_id)::NUMERIC
     INTO target_value
     FROM warehouse.dim_product
-    WHERE product_sk <> 0
-      AND product_id <> 'UNKNOWN';
+    WHERE product_sk NOT IN (0, -1)
+      AND product_id NOT IN ('UNKNOWN', 'INVALID');
 
     PERFORM audit.record_reconciliation_check(
         run_id,
-        'Gold plus inferred product dimension row count equals warehouse dim_product row count',
+        'Gold product dimension key count equals warehouse dim_product key count',
         'Staging-to-warehouse row count',
-        COALESCE(source_table, 'missing product staging table') || ' + inferred web-event product keys',
+        COALESCE(source_table, 'missing product staging table'),
         'warehouse.dim_product',
         'product_dimension_rows',
         'COUNT',
@@ -467,7 +449,7 @@ BEGIN
         target_value,
         0,
         checked_time,
-        'Excludes warehouse unknown product member product_sk = 0 and includes inferred late-arriving web-event product keys.'
+        'Distinct product_id on both sides, excluding the unknown member (product_sk = 0) and the invalid-reference member (product_sk = -1). No member is invented per key: a fact whose product is not in the dimension is kept on the invalid-reference member.'
     );
 
     source_table := audit.first_existing_table(
@@ -487,38 +469,18 @@ BEGIN
         INTO source_value;
     END IF;
 
-    IF to_regclass('staging.stg_gold_fact_web_events') IS NOT NULL THEN
-        SELECT COUNT(*)::NUMERIC
-    INTO source_value
-    FROM (
-        SELECT DISTINCT campaign_id::TEXT AS campaign_id
-        FROM staging.stg_gold_dim_campaigns_scd2
-        WHERE campaign_id IS NOT NULL
-
-        UNION
-
-        SELECT DISTINCT
-            CASE
-                WHEN campaign_id = FLOOR(campaign_id)
-                    THEN campaign_id::BIGINT::TEXT
-                ELSE campaign_id::TEXT
-            END AS campaign_id
-        FROM staging.stg_gold_fact_web_events
-        WHERE campaign_id IS NOT NULL
-    ) expected_campaigns;
-    END IF;
 
     SELECT COUNT(DISTINCT campaign_id)::NUMERIC
     INTO target_value
     FROM warehouse.dim_campaign
-    WHERE campaign_sk <> 0
-      AND campaign_id <> 'UNKNOWN';
+    WHERE campaign_sk NOT IN (0, -1)
+      AND campaign_id NOT IN ('UNKNOWN', 'INVALID');
 
     PERFORM audit.record_reconciliation_check(
         run_id,
-        'Gold plus inferred campaign dimension row count equals warehouse dim_campaign row count',
+        'Gold campaign dimension key count equals warehouse dim_campaign key count',
         'Staging-to-warehouse row count',
-        COALESCE(source_table, 'missing campaign staging table') || ' + inferred web-event campaign keys',
+        COALESCE(source_table, 'missing campaign staging table'),
         'warehouse.dim_campaign',
         'campaign_dimension_rows',
         'COUNT',
@@ -526,7 +488,7 @@ BEGIN
         target_value,
         0,
         checked_time,
-        'Excludes warehouse unknown campaign member campaign_sk = 0 and includes inferred late-arriving web-event campaign keys.'
+        'Distinct campaign_id on both sides, excluding the unknown member (campaign_sk = 0) and the invalid-reference member (campaign_sk = -1). No member is invented per key: a fact whose campaign is not in the dimension is kept on the invalid-reference member.'
     );
 
     source_table := audit.first_existing_table(
@@ -571,6 +533,8 @@ BEGIN
         INTO source_value;
     END IF;
 
+    -- Every staging web event is a warehouse fact: none is rejected or dropped
+    -- for a bad reference (it loads on the invalid-reference member instead).
     SELECT COUNT(*)::NUMERIC
     INTO target_value
     FROM warehouse.fact_web_events;
@@ -587,7 +551,173 @@ BEGIN
         target_value,
         0,
         checked_time,
-        NULL
+        'No web event is rejected for a customer, product or campaign key without a valid dimension row; such a key is the invalid-reference member (-1).'
+    );
+
+    /*
+    ---------------------------------------------------------------------------
+    Invalid references, per fact and dimension
+    ---------------------------------------------------------------------------
+    A fact is never dropped because its dimension reference is bad. A key that
+    is present but has no valid dimension row (quarantined in Silver, or never
+    delivered) is the invalid-reference member (-1); a missing key is the
+    unknown member (0). Each check counts both sides independently: the facts
+    whose natural ID is in no version of the dimension, and the facts on
+    member -1. The count itself is the number of invalid references, and it
+    reaches data_quality_summary.csv. The fact keeps its natural ID, so it
+    resolves to the real member once the dimension row is valid.
+    */
+
+    FOR invalid_reference IN
+        SELECT * FROM (VALUES
+            ('fact_orders', 'customer'),
+            ('fact_orders', 'campaign'),
+            ('fact_order_items', 'product'),
+            ('fact_campaign_spend', 'campaign'),
+            ('fact_web_events', 'customer'),
+            ('fact_web_events', 'product'),
+            ('fact_web_events', 'campaign')
+        ) AS pairs(fact_name, dimension_name)
+    LOOP
+        EXECUTE format($sql$
+            SELECT
+                COUNT(*) FILTER (WHERE NOT EXISTS (
+                    SELECT 1 FROM warehouse.dim_%2$s d WHERE d.%2$s_id = f.%2$s_id))::NUMERIC,
+                COUNT(*) FILTER (WHERE f.%2$s_sk = -1)::NUMERIC
+            FROM warehouse.%1$s f
+        $sql$, invalid_reference.fact_name, invalid_reference.dimension_name)
+        INTO source_value, target_value;
+
+        PERFORM audit.record_reconciliation_check(
+            run_id,
+            format('Invalid %s references in %s are on the invalid-reference member',
+                   invalid_reference.dimension_name, invalid_reference.fact_name),
+            'Invalid references',
+            format('warehouse.%s rows whose %s_id is in no warehouse.dim_%s version',
+                   invalid_reference.fact_name, invalid_reference.dimension_name, invalid_reference.dimension_name),
+            format('warehouse.%s rows with %s_sk = -1', invalid_reference.fact_name, invalid_reference.dimension_name),
+            format('invalid_%s_references_in_%s', invalid_reference.dimension_name, invalid_reference.fact_name),
+            'COUNT',
+            source_value,
+            target_value,
+            0,
+            checked_time,
+            format('%s %s rows reference a %s with no valid dimension row. They are kept, with their %s_id, on the invalid-reference member.',
+                   target_value, invalid_reference.fact_name, invalid_reference.dimension_name,
+                   invalid_reference.dimension_name)
+        );
+    END LOOP;
+
+    /*
+    ---------------------------------------------------------------------------
+    SCD2 versions: Gold vs warehouse
+    ---------------------------------------------------------------------------
+    The key-count checks above compare distinct natural keys. These compare the
+    number of versions: every Gold SCD2 version is one warehouse dimension row,
+    apart from the warehouse's own unknown (0) and invalid-reference (-1)
+    members.
+    */
+
+    FOR scd2_dimension IN
+        SELECT * FROM (VALUES
+            ('customer', 'staging.stg_gold_dim_customers_scd2'),
+            ('product', 'staging.stg_gold_dim_products_scd2'),
+            ('campaign', 'staging.stg_gold_dim_campaigns_scd2')
+        ) AS dims(dimension_name, staging_table)
+    LOOP
+        source_value := NULL;
+        IF to_regclass(scd2_dimension.staging_table) IS NOT NULL THEN
+            EXECUTE format('SELECT COUNT(*)::NUMERIC FROM %s', scd2_dimension.staging_table) INTO source_value;
+        END IF;
+        EXECUTE format('SELECT COUNT(*)::NUMERIC FROM warehouse.dim_%1$s WHERE %1$s_sk NOT IN (0, -1)',
+                       scd2_dimension.dimension_name)
+        INTO target_value;
+
+        PERFORM audit.record_reconciliation_check(
+            run_id,
+            format('Gold %s SCD2 version count equals warehouse dim_%s version count',
+                   scd2_dimension.dimension_name, scd2_dimension.dimension_name),
+            'Staging-to-warehouse row count',
+            scd2_dimension.staging_table,
+            format('warehouse.dim_%s', scd2_dimension.dimension_name),
+            format('%s_dimension_versions', scd2_dimension.dimension_name),
+            'COUNT',
+            source_value,
+            target_value,
+            0,
+            checked_time,
+            'Rows (SCD2 versions) on both sides, excluding the unknown member (0) and the invalid-reference member (-1).'
+        );
+    END LOOP;
+
+    /*
+    ---------------------------------------------------------------------------
+    Ad spend: regional rows vs the campaign-day total
+    ---------------------------------------------------------------------------
+    The ad feed has one row per campaign, day and region, and each row repeats
+    the platform's total for the campaign-day (campaign_day_spend, kept in
+    staging only: it is not additive). The warehouse rows of a campaign-day
+    must sum to that total, and a region appears once per campaign-day.
+    */
+
+    EXECUTE $sql$
+        SELECT COUNT(*)::NUMERIC, (SELECT COUNT(*) FROM (
+                   SELECT 1 FROM warehouse.fact_campaign_spend
+                   GROUP BY campaign_id, spend_date, region_sk HAVING COUNT(*) > 1) duplicated)::NUMERIC
+        FROM (
+            SELECT f.campaign_id, f.spend_date
+            FROM warehouse.fact_campaign_spend f
+            JOIN staging.stg_gold_fact_campaign_spend_scd2 s ON s.spend_id::TEXT = f.campaign_spend_nk
+            GROUP BY f.campaign_id, f.spend_date
+            HAVING SUM(f.spend_amount) <> MAX(s.campaign_day_spend)::NUMERIC(18, 2)
+                OR MIN(s.campaign_day_spend) <> MAX(s.campaign_day_spend)
+        ) mismatched
+    $sql$
+    INTO target_value, source_value;
+
+    PERFORM audit.record_reconciliation_check(
+        run_id,
+        'Regional ad spend rows sum to the campaign-day total',
+        'Warehouse integrity',
+        'expected zero campaign-days whose regional spend does not sum to campaign_day_spend, and zero repeated regions',
+        'warehouse.fact_campaign_spend',
+        'campaign_days_not_summing_to_their_total',
+        'COUNT',
+        0,
+        target_value + source_value,
+        0,
+        checked_time,
+        format('Checked %s campaign-days over %s regional rows; %s repeated campaign-day-region rows.',
+               (SELECT COUNT(*) FROM (SELECT 1 FROM warehouse.fact_campaign_spend GROUP BY campaign_id, spend_date) d),
+               (SELECT COUNT(*) FROM warehouse.fact_campaign_spend), source_value)
+    );
+
+    /*
+    ---------------------------------------------------------------------------
+    Order total
+    ---------------------------------------------------------------------------
+    What the customer was charged is net revenue plus tax plus shipping, to the
+    cent, for every order. net_revenue stays the sum of the lines.
+    */
+
+    SELECT COUNT(*)::NUMERIC
+    INTO target_value
+    FROM warehouse.fact_orders
+    WHERE total_amount <> net_revenue + tax_amount + shipping_amount;
+
+    PERFORM audit.record_reconciliation_check(
+        run_id,
+        'Order total equals net revenue plus tax plus shipping for every order',
+        'Warehouse integrity',
+        'expected zero orders where total_amount <> net_revenue + tax_amount + shipping_amount',
+        'warehouse.fact_orders',
+        'order_total_mismatched_orders',
+        'COUNT',
+        0,
+        target_value,
+        0,
+        checked_time,
+        format('Checked %s orders.', (SELECT COUNT(*) FROM warehouse.fact_orders))
     );
 
     /*
@@ -787,11 +917,13 @@ BEGIN
     ---------------------------------------------------------------------------
     */
 
+    -- Sales are the orders that were not cancelled (on their order date);
+    -- cancelled orders are in the mart's own column, compared in the same check.
     SELECT ROUND(COALESCE(SUM(net_revenue), 0)::NUMERIC, 2)
     INTO source_value
     FROM warehouse.fact_orders;
 
-    SELECT ROUND(COALESCE(SUM(net_revenue), 0)::NUMERIC, 2)
+    SELECT ROUND(COALESCE(SUM(net_revenue + cancelled_amount), 0)::NUMERIC, 2)
     INTO target_value
     FROM marts.mart_revenue_daily;
 
@@ -807,15 +939,15 @@ BEGIN
         target_value,
         0.01,
         checked_time,
-        'Compares fact_orders.net_revenue to mart_revenue_daily.net_revenue.'
+        'Compares the net value of every order in fact_orders to mart_revenue_daily net_revenue (orders that were not cancelled) + cancelled_amount: no order is lost from the mart, whatever its status.'
     );
 
-    SELECT ROUND(COALESCE(SUM(foi.line_revenue), 0)::NUMERIC, 2)
+    SELECT ROUND((COALESCE(SUM(foi.line_revenue) FILTER (WHERE fo.order_status <> 'cancelled'), 0)
+                  - COALESCE(SUM(foi.refund_amount), 0))::NUMERIC, 2)
     INTO source_value
     FROM warehouse.fact_order_items foi
-    JOIN warehouse.dim_product dp
-        ON foi.product_sk = dp.product_sk
-    WHERE dp.product_id <> 'UNKNOWN';
+    JOIN warehouse.fact_orders fo
+        ON fo.order_sk = foi.order_sk;
 
     SELECT ROUND(COALESCE(SUM(product_revenue), 0)::NUMERIC, 2)
     INTO target_value
@@ -823,7 +955,7 @@ BEGIN
 
     PERFORM audit.record_reconciliation_check(
         run_id,
-        'Mart product revenue equals BI-visible warehouse fact_order_items revenue',
+        'Mart product revenue equals warehouse fact_order_items revenue',
         'Mart-to-fact amount',
         'warehouse.fact_order_items',
         'marts.mart_product_sales',
@@ -833,7 +965,110 @@ BEGIN
         target_value,
         0.01,
         checked_time,
-        'Compares BI-visible fact_order_items.line_revenue to mart_product_sales.product_revenue, excluding UNKNOWN product rows because the product mart is business-facing.'
+        'Compares fact_order_items.line_revenue to mart_product_sales.product_revenue, for the items of orders that were not cancelled, less the item refunds. The mart has a row for the unknown and for the invalid-reference product member, so it ties out to the fact in full.'
+    );
+
+    /*
+    ---------------------------------------------------------------------------
+    Refunds
+    ---------------------------------------------------------------------------
+    A refund is an amount on a returned order. The point-in-time job splits
+    it over the order's items; for every order with loaded items the item
+    refunds must sum to exactly the order's refund. And the refunds the daily
+    mart shows (on their return dates) are the refunds of the fact.
+    */
+
+    SELECT COUNT(*)::NUMERIC
+    INTO target_value
+    FROM (
+        SELECT fo.order_sk
+        FROM warehouse.fact_orders fo
+        JOIN warehouse.fact_order_items foi ON foi.order_sk = fo.order_sk
+        GROUP BY fo.order_sk, fo.refund_amount
+        HAVING SUM(foi.refund_amount) <> fo.refund_amount
+    ) mismatched;
+
+    PERFORM audit.record_reconciliation_check(
+        run_id,
+        'Item refunds sum to their order refund',
+        'Warehouse integrity',
+        'expected zero orders whose item refunds do not sum to the order refund',
+        'warehouse.fact_order_items',
+        'orders_with_item_refunds_not_summing',
+        'COUNT',
+        0,
+        target_value,
+        0,
+        checked_time,
+        format('Checked %s returned orders with loaded items.',
+               (SELECT COUNT(DISTINCT fo.order_sk) FROM warehouse.fact_orders fo
+                JOIN warehouse.fact_order_items foi ON foi.order_sk = fo.order_sk WHERE fo.order_status = 'returned'))
+    );
+
+    SELECT COALESCE(SUM(refund_amount), 0)::NUMERIC INTO source_value FROM warehouse.fact_orders;
+    SELECT COALESCE(SUM(refund_amount), 0)::NUMERIC INTO target_value FROM marts.mart_revenue_daily;
+
+    PERFORM audit.record_reconciliation_check(
+        run_id,
+        'Mart refunds equal warehouse fact_orders refunds',
+        'Mart-to-fact amount',
+        'warehouse.fact_orders',
+        'marts.mart_revenue_daily',
+        'refund_amount',
+        'AMOUNT',
+        source_value,
+        target_value,
+        0,
+        checked_time,
+        'Refunds are recognised on the return date. The daily mart total equals the fact total exactly; the customer, campaign and product marts are compared in the mart validation.'
+    );
+
+    /*
+    ---------------------------------------------------------------------------
+    Order gross minus discount equals net revenue
+    ---------------------------------------------------------------------------
+    gross_amount and discount_amount are sums over the order's loaded items. For
+    a complete order (its loaded lines add up to its net revenue) gross minus
+    discount must equal net revenue exactly. An order that lost items to Silver
+    quarantine or point-in-time rejection is excluded and counted, as in the
+    point-in-time order totals check.
+    */
+
+    SELECT
+        COUNT(*) FILTER (
+            WHERE o.line_total = o.net_revenue
+              AND o.gross_amount - o.discount_amount <> o.net_revenue
+        )::NUMERIC,
+        COUNT(*) FILTER (WHERE o.line_total = o.net_revenue)::NUMERIC,
+        COUNT(*) FILTER (WHERE o.line_total IS DISTINCT FROM o.net_revenue)::NUMERIC
+    INTO target_value, source_value, order_count_excluded
+    FROM (
+        SELECT fo.net_revenue, fo.gross_amount, fo.discount_amount, items.line_total
+        FROM warehouse.fact_orders fo
+        LEFT JOIN (
+            SELECT order_sk, SUM(line_revenue) AS line_total
+            FROM warehouse.fact_order_items
+            GROUP BY order_sk
+        ) items
+            ON items.order_sk = fo.order_sk
+    ) o;
+
+    PERFORM audit.record_reconciliation_check(
+        run_id,
+        'Order gross minus discount equals net revenue for every complete order',
+        'Warehouse integrity',
+        'expected zero complete orders where gross_amount - discount_amount <> net_revenue',
+        'warehouse.fact_orders',
+        'gross_discount_net_mismatched_orders',
+        'COUNT',
+        0,
+        target_value,
+        0,
+        checked_time,
+        format(
+            'Checked %s complete orders; excluded %s incomplete orders (items quarantined or rejected, or none loaded).',
+            source_value::BIGINT, order_count_excluded::BIGINT
+        )
     );
 END $$;
 
@@ -869,8 +1104,6 @@ ORDER BY
     check_category,
     check_name;
 
-COMMIT;
-
 SELECT
     check_name,
     source_object,
@@ -885,3 +1118,87 @@ FROM audit.v_latest_reconciliation_report
 ORDER BY
     CASE status WHEN 'FAIL' THEN 0 ELSE 1 END,
     check_name;
+
+-- ---------------------------------------------------------------------------
+-- Quality gate, before the commit: a build that fails a check is never
+-- published. Every check of this run in the three reports must be PASS, and
+-- each report must have checks for this run. Otherwise the failing checks are
+-- written to the log (one NOTICE each, and one P2_FAILED_BUILD_REPORT line of
+-- JSON that scripts/run_warehouse_sql.sh saves as
+-- logs/warehouse/failed_build_<timestamp>.json), and the exception rolls the
+-- whole transaction back: the previous warehouse stays live and untouched, and
+-- the report tables of the failed build are gone with it.
+-- ---------------------------------------------------------------------------
+DO $$
+DECLARE
+    current_run TEXT := NULLIF(current_setting('p2.run_id', true), '');
+    report RECORD;
+    check_count BIGINT;
+    failed JSONB;
+    item JSONB;
+    failing JSONB := '[]'::JSONB;
+BEGIN
+    FOR report IN SELECT * FROM (VALUES
+        ('reconciliation_report', 'reconciliation_run_id'),
+        ('scd2_validation_results', 'validation_run_id'),
+        ('mart_validation_report', 'validation_run_id')
+    ) AS reports(table_name, run_column)
+    LOOP
+        EXECUTE format(
+            'SELECT count(*), coalesce(jsonb_agg(to_jsonb(t)) FILTER (WHERE t.status IS DISTINCT FROM ''PASS''), ''[]''::JSONB) '
+            'FROM audit.%I t WHERE %I = $1', report.table_name, report.run_column)
+        INTO check_count, failed USING current_run;
+
+        IF check_count = 0 THEN
+            failing := failing || jsonb_build_object(
+                'report', 'audit.' || report.table_name,
+                'check_name', '(no checks recorded for this run)',
+                'expected', 'at least one check',
+                'actual', '0 checks',
+                'details', format('audit.%s has no row for run %s: its checks did not run.', report.table_name, current_run));
+        END IF;
+
+        FOR item IN SELECT value FROM jsonb_array_elements(failed) ORDER BY value->>'check_name' LOOP
+            failing := failing || jsonb_build_object(
+                'report', 'audit.' || report.table_name,
+                'check_name', item->>'check_name',
+                'status', item->>'status',
+                -- What the check compares: the source side is what was expected.
+                'expected', coalesce(item->>'source_count', item->>'source_amount', item->>'source_value',
+                                     CASE WHEN item ? 'failed_row_count' THEN '0' END),
+                'actual', coalesce(item->>'target_count', item->>'target_amount', item->>'target_value',
+                                   item->>'failed_row_count'),
+                'difference', coalesce(item->>'count_difference', item->>'amount_difference', item->>'difference'),
+                'metric', coalesce(item->>'metric_name', CASE WHEN item ? 'failed_row_count' THEN 'failed_row_count' END),
+                'expected_from', coalesce(item->>'source_object', item->>'checked_entity'),
+                'actual_from', item->>'target_object',
+                -- A check without its own text still says what was compared.
+                'details', coalesce(item->>'details', format(
+                    '%s: %s has %s, %s has %s (difference %s).',
+                    coalesce(item->>'metric_name', 'failed_row_count'),
+                    coalesce(item->>'source_object', item->>'checked_entity', 'expected'),
+                    coalesce(item->>'source_count', item->>'source_amount', item->>'source_value', '0'),
+                    coalesce(item->>'target_object', 'actual'),
+                    coalesce(item->>'target_count', item->>'target_amount', item->>'target_value', item->>'failed_row_count', '?'),
+                    coalesce(item->>'count_difference', item->>'amount_difference', item->>'difference', '?'))));
+        END LOOP;
+    END LOOP;
+
+    IF jsonb_array_length(failing) > 0 THEN
+        FOR item IN SELECT value FROM jsonb_array_elements(failing) LOOP
+            RAISE NOTICE 'FAILED CHECK % | % | expected % | actual % | %',
+                item->>'report', item->>'check_name', coalesce(item->>'expected', '-'),
+                coalesce(item->>'actual', '-'), coalesce(item->>'details', '');
+        END LOOP;
+        RAISE NOTICE 'P2_FAILED_BUILD_REPORT %', jsonb_build_object(
+            'run_id', current_run,
+            'failed_at', to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+            'outcome', 'rolled back: nothing of this build was published, the previous warehouse is unchanged',
+            'failing_check_count', jsonb_array_length(failing),
+            'failing_checks', failing)::TEXT;
+        RAISE EXCEPTION 'Quality gate failed: % failing check(s) in run %. The build is rolled back; the previous warehouse stays live.',
+            jsonb_array_length(failing), current_run;
+    END IF;
+END $$;
+
+COMMIT;

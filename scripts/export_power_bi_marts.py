@@ -46,6 +46,7 @@ except ImportError as exc:
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_EXPORT_DIR = PROJECT_ROOT / "exports" / "power_bi"
 MANIFEST_FILE = DEFAULT_EXPORT_DIR / "export_manifest.json"
+DASHBOARD_CONTRACT = PROJECT_ROOT / "scripts" / "power_bi_dashboard_contract.json"
 
 
 @dataclass(frozen=True)
@@ -84,6 +85,22 @@ MART_EXPORTS: list[MartExport] = [
 ]
 
 
+def published_column_order(file_name: str, columns: list[str], route: str) -> list[str]:
+    """The export's columns in the order the dashboards read them.
+
+    Power BI reads a CSV by column position. The columns a file was published
+    with (scripts/power_bi_dashboard_contract.json) come first, in that order;
+    every newer column follows, in the mart's own order. A published column
+    that the mart no longer has is an error: the dashboard would break.
+    """
+    contract = json.loads(DASHBOARD_CONTRACT.read_text(encoding="utf-8"))
+    published = contract[route]["files"][file_name]
+    missing = [column for column in published if column not in columns]
+    if missing:
+        raise ValueError(f"{file_name}: the dashboard reads column(s) {', '.join(missing)}, which the export no longer has")
+    return published + [column for column in columns if column not in published]
+
+
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
@@ -110,6 +127,18 @@ def validate_table_name(table_name: str) -> None:
         raise ValueError(f"Unsafe or unsupported table name: {table_name}")
 
 
+def csv_value(value: Any) -> Any:
+    """A mart value as the CSV shows it.
+
+    Mart timestamps are TIMESTAMPTZ. The files keep the format the dashboards
+    were built on: the UTC wall time without an offset (2026-06-14 12:05:53),
+    whatever time zone the database session uses.
+    """
+    if isinstance(value, datetime) and value.tzinfo is not None:
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
+
+
 def export_mart(cursor, mart: MartExport, export_dir: Path, allow_empty: bool) -> dict[str, Any]:
     validate_table_name(mart.table_name)
 
@@ -129,14 +158,17 @@ def export_mart(cursor, mart: MartExport, export_dir: Path, allow_empty: bool) -
     try:
         cursor.execute(query)
         column_names = [description[0] for description in cursor.description]
+        # The dashboards read by position: published columns first, new ones after.
+        ordered = published_column_order(mart.csv_file_name, column_names, "route_a")
+        positions = [column_names.index(column) for column in ordered]
 
         row_count = 0
         with csv_path.open("w", newline="", encoding="utf-8") as csv_file:
             writer = csv.writer(csv_file)
-            writer.writerow(column_names)
+            writer.writerow(ordered)
 
             for row in cursor:
-                writer.writerow(row)
+                writer.writerow([csv_value(row[position]) for position in positions])
                 row_count += 1
 
         manifest_record["row_count"] = row_count

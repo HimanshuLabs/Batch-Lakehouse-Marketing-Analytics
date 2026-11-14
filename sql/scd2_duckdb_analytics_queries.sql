@@ -70,8 +70,8 @@ LIMIT 50;
 -- ============================================================
 
 SELECT
-    COALESCE(customer_segment, 'unknown') AS customer_segment,
-    COALESCE(loyalty_tier, 'unknown') AS loyalty_tier,
+    COALESCE(customer_segment, 'Unknown') AS customer_segment,
+    COALESCE(loyalty_tier, 'Unknown') AS loyalty_tier,
     COUNT(*) AS customer_count,
     SUM(total_orders) AS total_orders,
     SUM(total_revenue) AS total_revenue,
@@ -79,8 +79,8 @@ SELECT
     AVG(customer_lifetime_days) AS avg_customer_lifetime_days
 FROM read_parquet('data/gold/mart_customer_lifetime_value_scd2/*.parquet')
 GROUP BY
-    COALESCE(customer_segment, 'unknown'),
-    COALESCE(loyalty_tier, 'unknown')
+    COALESCE(customer_segment, 'Unknown'),
+    COALESCE(loyalty_tier, 'Unknown')
 ORDER BY total_revenue DESC;
 
 
@@ -92,8 +92,6 @@ SELECT
     product_id,
     product_name,
     category,
-    brand,
-    status,
     units_sold,
     total_revenue,
     avg_selling_price,
@@ -105,20 +103,18 @@ LIMIT 50;
 
 
 -- ============================================================
--- 6. Product revenue by category and brand
+-- 6. Product revenue by category
 -- ============================================================
 
 SELECT
-    COALESCE(category, 'unknown') AS category,
-    COALESCE(brand, 'unknown') AS brand,
+    COALESCE(category, 'Unknown') AS category,
     COUNT(*) AS product_count,
     SUM(units_sold) AS units_sold,
     SUM(total_revenue) AS total_revenue,
     AVG(avg_selling_price) AS avg_selling_price
 FROM read_parquet('data/gold/mart_product_performance_scd2/*.parquet')
 GROUP BY
-    COALESCE(category, 'unknown'),
-    COALESCE(brand, 'unknown')
+    COALESCE(category, 'Unknown')
 ORDER BY total_revenue DESC;
 
 
@@ -139,8 +135,10 @@ SELECT
     add_to_cart,
     checkout,
     purchases,
+    purchase_sessions,
     view_to_cart_rate,
     cart_to_purchase_rate,
+    -- purchase sessions / sessions: between 0 and 1
     overall_conversion_rate
 FROM read_parquet('data/gold/mart_marketing_funnel_scd2/*.parquet')
 ORDER BY purchases DESC, overall_conversion_rate DESC;
@@ -159,6 +157,7 @@ SELECT
     SUM(add_to_cart) AS add_to_cart,
     SUM(checkout) AS checkout,
     SUM(purchases) AS purchases,
+    SUM(purchase_sessions) AS purchase_sessions,
     CASE
         WHEN SUM(page_views) = 0 THEN 0
         ELSE SUM(add_to_cart)::DOUBLE / SUM(page_views)
@@ -167,9 +166,10 @@ SELECT
         WHEN SUM(add_to_cart) = 0 THEN 0
         ELSE SUM(purchases)::DOUBLE / SUM(add_to_cart)
     END AS cart_to_purchase_rate,
+    -- The project's one funnel conversion rate: purchase sessions / sessions.
     CASE
-        WHEN SUM(page_views) = 0 THEN 0
-        ELSE SUM(purchases)::DOUBLE / SUM(page_views)
+        WHEN SUM(sessions_count) = 0 THEN 0
+        ELSE SUM(purchase_sessions)::DOUBLE / SUM(sessions_count)
     END AS overall_conversion_rate
 FROM read_parquet('data/gold/mart_marketing_funnel_scd2/*.parquet')
 GROUP BY channel
@@ -182,7 +182,7 @@ ORDER BY purchases DESC;
 
 SELECT
     'fact_orders_scd2' AS object_name,
-    SUM(total_amount) AS amount
+    SUM(cart_value) FILTER (WHERE order_status = 'completed') AS amount
 FROM read_parquet('data/gold/fact_orders_scd2/**/*.parquet')
 
 UNION ALL

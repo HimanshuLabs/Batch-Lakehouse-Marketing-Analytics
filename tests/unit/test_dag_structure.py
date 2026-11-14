@@ -14,15 +14,16 @@ import pytest
 
 DAG_FILE = "airflow/dags/batch_lakehouse_pipeline.py"
 DAG_ID = "batch_lakehouse_marketing_analytics"
-BATCH_DATE_TEMPLATE = "{{ (dag_run.logical_date or dag_run.run_after) | ds }}"
+BATCH_DATE_TEMPLATE = "{{ (dag_run.logical_date or dag_run.run_after).astimezone(macros.dateutil.tz.gettz('Asia/Kolkata')) | ds }}"
 
 CHAIN = [
     "generate_data", "bronze_ingestion", "bronze_quality_checks", "silver_transformations",
     "silver_quality_checks", "gold_transformations", "gold_quality_checks",
     ["duckdb_gold_analytics", "publish_gold_to_postgres"],
     "scd2_dimensions", "point_in_time_fact_joins", "scd2_gold_marts", "scd2_duckdb_analytics",
-    "create_postgresql_schemas", "load_gold_scd2_to_staging", "build_warehouse_tables",
-    "run_scd2_validation", "build_reporting_marts", "run_warehouse_reconciliation",
+    # H2: build_warehouse is the former build_warehouse_tables, run_scd2_validation,
+    # build_reporting_marts and run_warehouse_reconciliation, as one transaction.
+    "create_postgresql_schemas", "load_gold_scd2_to_staging", "build_warehouse",
     "dbt_run", "dbt_test", "dbt_docs", "power_bi_export",
 ]
 
@@ -102,7 +103,8 @@ def test_the_dag_has_every_task_in_order(dag):
 
 def test_every_task_gets_one_environment_with_the_run_batch_date(dag):
     module, recorder = dag
-    assert set(module.DEFAULT_ENV) == {"PROJECT_ROOT", "PROJECT_PYTHON", "DBT_BIN", "BATCH_DATE"}
+    assert set(module.DEFAULT_ENV) == {"PROJECT_ROOT", "PROJECT_PYTHON", "DBT_BIN", "BATCH_DATE", "P2_RUN_ID"}
+    assert module.DEFAULT_ENV["P2_RUN_ID"] == "{{ run_id }}"
     assert module.DEFAULT_ENV["BATCH_DATE"] == BATCH_DATE_TEMPLATE
     without_env = [task for task, kwargs in recorder.tasks.items() if kwargs.get("env") is not module.DEFAULT_ENV]
     assert without_env == [], f"tasks without DEFAULT_ENV: {without_env}"

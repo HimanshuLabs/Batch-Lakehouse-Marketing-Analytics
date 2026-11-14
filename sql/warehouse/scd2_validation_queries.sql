@@ -19,6 +19,17 @@ Expected result:
 
 BEGIN;
 
+-- This file is one step of the warehouse build. It refuses to run anywhere but
+-- in the build transaction that sql/warehouse/begin_generation.sql started
+-- (which sets p2.build_txid for that transaction only), so it can never drop or
+-- rebuild the live tables on its own.
+DO $$
+BEGIN
+    IF current_setting('p2.build_txid', true) IS DISTINCT FROM txid_current()::TEXT THEN
+        RAISE EXCEPTION 'scd2_validation_queries.sql runs only inside the warehouse build transaction started by sql/warehouse/begin_generation.sql. Run the whole build: bash scripts/run_airflow_task.sh build_warehouse';
+    END IF;
+END $$;
+
 CREATE SCHEMA IF NOT EXISTS audit;
 
 DROP TABLE IF EXISTS audit.scd2_validation_results CASCADE;
@@ -33,7 +44,7 @@ CREATE TABLE audit.scd2_validation_results (
     status TEXT NOT NULL CHECK (status IN ('PASS', 'FAIL')),
     severity TEXT NOT NULL DEFAULT 'ERROR',
     details TEXT,
-    checked_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    checked_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 COMMENT ON TABLE audit.scd2_validation_results IS
@@ -52,7 +63,7 @@ SELECT
     NULL::TEXT AS fact_key,
     'current_row_count=' || COUNT(*) FILTER (WHERE is_current) AS issue_details
 FROM warehouse.dim_customer
-WHERE customer_id <> 'UNKNOWN'
+WHERE customer_id NOT IN ('UNKNOWN', 'INVALID')
 GROUP BY customer_id
 HAVING COUNT(*) FILTER (WHERE is_current) <> 1
 
@@ -66,7 +77,7 @@ SELECT
     NULL::TEXT AS fact_key,
     'current_row_count=' || COUNT(*) FILTER (WHERE is_current) AS issue_details
 FROM warehouse.dim_product
-WHERE product_id <> 'UNKNOWN'
+WHERE product_id NOT IN ('UNKNOWN', 'INVALID')
 GROUP BY product_id
 HAVING COUNT(*) FILTER (WHERE is_current) <> 1
 
@@ -80,7 +91,7 @@ SELECT
     NULL::TEXT AS fact_key,
     'current_row_count=' || COUNT(*) FILTER (WHERE is_current) AS issue_details
 FROM warehouse.dim_campaign
-WHERE campaign_id <> 'UNKNOWN'
+WHERE campaign_id NOT IN ('UNKNOWN', 'INVALID')
 GROUP BY campaign_id
 HAVING COUNT(*) FILTER (WHERE is_current) <> 1;
 
@@ -146,7 +157,7 @@ FROM warehouse.dim_customer a
 JOIN warehouse.dim_customer b
     ON a.customer_id = b.customer_id
    AND a.customer_sk < b.customer_sk
-   AND a.customer_id <> 'UNKNOWN'
+   AND a.customer_id NOT IN ('UNKNOWN', 'INVALID')
    AND a.effective_from < b.effective_to
    AND b.effective_from < a.effective_to
 
@@ -164,7 +175,7 @@ FROM warehouse.dim_product a
 JOIN warehouse.dim_product b
     ON a.product_id = b.product_id
    AND a.product_sk < b.product_sk
-   AND a.product_id <> 'UNKNOWN'
+   AND a.product_id NOT IN ('UNKNOWN', 'INVALID')
    AND a.effective_from < b.effective_to
    AND b.effective_from < a.effective_to
 
@@ -182,7 +193,7 @@ FROM warehouse.dim_campaign a
 JOIN warehouse.dim_campaign b
     ON a.campaign_id = b.campaign_id
    AND a.campaign_sk < b.campaign_sk
-   AND a.campaign_id <> 'UNKNOWN'
+   AND a.campaign_id NOT IN ('UNKNOWN', 'INVALID')
    AND a.effective_from < b.effective_to
    AND b.effective_from < a.effective_to;
 
@@ -492,11 +503,6 @@ FROM warehouse.fact_order_items
 WHERE order_date_sk = 0
 
 UNION ALL
-SELECT 'warehouse.fact_campaign_spend.region_sk_unknown', COUNT(*)
-FROM warehouse.fact_campaign_spend
-WHERE region_sk = 0
-
-UNION ALL
 SELECT 'warehouse.fact_campaign_spend.channel_sk_unknown', COUNT(*)
 FROM warehouse.fact_campaign_spend
 WHERE channel_sk = 0
@@ -616,8 +622,8 @@ SELECT
 FROM warehouse.fact_campaign_spend fcs
 JOIN warehouse.dim_campaign dca ON fcs.campaign_sk = dca.campaign_sk
 WHERE fcs.spend_date IS NULL
-   OR fcs.spend_date::TIMESTAMP < dca.effective_from
-   OR fcs.spend_date::TIMESTAMP >= dca.effective_to
+   OR (fcs.spend_date::TIMESTAMP AT TIME ZONE 'UTC') < dca.effective_from
+   OR (fcs.spend_date::TIMESTAMP AT TIME ZONE 'UTC') >= dca.effective_to
 
 UNION ALL
 
@@ -723,7 +729,7 @@ SELECT
     'warehouse.fact_campaign_spend.campaign_sk',
     fcs.campaign_spend_nk,
     s.campaign_id::BIGINT::TEXT,
-    fcs.spend_date::TIMESTAMP
+    (fcs.spend_date::TIMESTAMP AT TIME ZONE 'UTC')
 FROM warehouse.fact_campaign_spend fcs
 JOIN staging.stg_gold_fact_campaign_spend_scd2 s ON s.spend_id::TEXT = fcs.campaign_spend_nk
 WHERE fcs.campaign_sk = 0
@@ -785,7 +791,7 @@ SELECT
     NULL::TEXT AS fact_key,
     'duplicate_count=' || COUNT(*) AS issue_details
 FROM warehouse.dim_customer
-WHERE customer_id <> 'UNKNOWN'
+WHERE customer_id NOT IN ('UNKNOWN', 'INVALID')
 GROUP BY
     customer_id,
     effective_from,
@@ -815,7 +821,7 @@ SELECT
     NULL::TEXT AS fact_key,
     'duplicate_count=' || COUNT(*) AS issue_details
 FROM warehouse.dim_product
-WHERE product_id <> 'UNKNOWN'
+WHERE product_id NOT IN ('UNKNOWN', 'INVALID')
 GROUP BY
     product_id,
     effective_from,
@@ -823,7 +829,6 @@ GROUP BY
     is_current,
     COALESCE(product_name, '__NULL__'),
     COALESCE(category, '__NULL__'),
-    COALESCE(brand, '__NULL__'),
     COALESCE(original_price::TEXT, '__NULL__'),
     COALESCE(current_price::TEXT, '__NULL__'),
     COALESCE(inventory_remaining::TEXT, '__NULL__')
@@ -839,17 +844,18 @@ SELECT
     NULL::TEXT AS fact_key,
     'duplicate_count=' || COUNT(*) AS issue_details
 FROM warehouse.dim_campaign
-WHERE campaign_id <> 'UNKNOWN'
+WHERE campaign_id NOT IN ('UNKNOWN', 'INVALID')
 GROUP BY
     campaign_id,
     effective_from,
     effective_to,
     is_current,
     COALESCE(campaign_name, '__NULL__'),
-    COALESCE(campaign_type, '__NULL__'),
     COALESCE(channel, '__NULL__'),
     COALESCE(traffic_source, '__NULL__'),
     COALESCE(target_segment, '__NULL__'),
+    COALESCE(campaign_status, '__NULL__'),
+    COALESCE(ab_test_group, '__NULL__'),
     COALESCE(campaign_start_date::TEXT, '__NULL__'),
     COALESCE(campaign_end_date::TEXT, '__NULL__'),
     COALESCE(budget::TEXT, '__NULL__')
@@ -870,7 +876,7 @@ SELECT
     NULL::TEXT AS fact_key,
     'effective_from=' || effective_from || ', duplicate_count=' || COUNT(*) AS issue_details
 FROM warehouse.dim_customer
-WHERE customer_id <> 'UNKNOWN'
+WHERE customer_id NOT IN ('UNKNOWN', 'INVALID')
 GROUP BY customer_id, effective_from
 HAVING COUNT(*) > 1
 
@@ -884,7 +890,7 @@ SELECT
     NULL::TEXT AS fact_key,
     'effective_from=' || effective_from || ', duplicate_count=' || COUNT(*) AS issue_details
 FROM warehouse.dim_product
-WHERE product_id <> 'UNKNOWN'
+WHERE product_id NOT IN ('UNKNOWN', 'INVALID')
 GROUP BY product_id, effective_from
 HAVING COUNT(*) > 1
 
@@ -898,7 +904,7 @@ SELECT
     NULL::TEXT AS fact_key,
     'effective_from=' || effective_from || ', duplicate_count=' || COUNT(*) AS issue_details
 FROM warehouse.dim_campaign
-WHERE campaign_id <> 'UNKNOWN'
+WHERE campaign_id NOT IN ('UNKNOWN', 'INVALID')
 GROUP BY campaign_id, effective_from
 HAVING COUNT(*) > 1
 
@@ -912,7 +918,7 @@ SELECT
     NULL::TEXT AS fact_key,
     'current_row_count=' || COUNT(*) AS issue_details
 FROM warehouse.dim_customer
-WHERE customer_id <> 'UNKNOWN'
+WHERE customer_id NOT IN ('UNKNOWN', 'INVALID')
   AND is_current
 GROUP BY customer_id
 HAVING COUNT(*) > 1
@@ -927,7 +933,7 @@ SELECT
     NULL::TEXT AS fact_key,
     'current_row_count=' || COUNT(*) AS issue_details
 FROM warehouse.dim_product
-WHERE product_id <> 'UNKNOWN'
+WHERE product_id NOT IN ('UNKNOWN', 'INVALID')
   AND is_current
 GROUP BY product_id
 HAVING COUNT(*) > 1
@@ -942,7 +948,7 @@ SELECT
     NULL::TEXT AS fact_key,
     'current_row_count=' || COUNT(*) AS issue_details
 FROM warehouse.dim_campaign
-WHERE campaign_id <> 'UNKNOWN'
+WHERE campaign_id NOT IN ('UNKNOWN', 'INVALID')
   AND is_current
 GROUP BY campaign_id
 HAVING COUNT(*) > 1;
@@ -953,7 +959,7 @@ HAVING COUNT(*) > 1;
 
 WITH run_context AS (
     SELECT
-        to_char(clock_timestamp(), 'YYYYMMDDHH24MISSMS') AS validation_run_id,
+        NULLIF(current_setting('p2.run_id', true), '') AS validation_run_id,
         clock_timestamp() AS checked_at
 ),
 validation_counts AS (

@@ -4,9 +4,12 @@ Load lakehouse Gold/SCD2 Parquet outputs into PostgreSQL staging tables.
 
 Contract:
 - Source: data/gold/*
-- Target: PostgreSQL staging.stg_gold_*
+- Target: PostgreSQL staging.stg_gold_*, loaded as staging_next.stg_gold_*:
+  a fresh schema on every run. The warehouse build publishes it as staging in
+  the same transaction that publishes the new warehouse
+  (sql/warehouse/begin_generation.sql), so the staging tables that the live
+  warehouse and the dbt views were built on are never dropped or half-written.
 - Bronze/Silver are intentionally excluded.
-- Staging tables are replaced by default for idempotent local runs.
 - Audit results are written to audit.gold_to_staging_load_audit.
 """
 
@@ -59,6 +62,9 @@ SCD2_SOURCES: list[SourceSpec] = [
 ]
 
 ALL_SOURCES = GOLD_SOURCES + SCD2_SOURCES
+
+# The tables are loaded into <target schema>_next (see the module docstring).
+LOAD_SCHEMA_SUFFIX = "_next"
 
 
 def utc_now() -> datetime:
@@ -181,11 +187,13 @@ def build_engine() -> Engine:
     return create_engine(url, future=True, pool_pre_ping=True, connect_args={"options": "-c timezone=UTC"})
 
 
-def create_support_objects(engine: Engine, target_schema: str) -> None:
-    target_schema = validate_sql_identifier(target_schema)
+def create_support_objects(engine: Engine, load_schema: str) -> None:
+    load_schema = validate_sql_identifier(load_schema)
 
     with engine.begin() as conn:
-        conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{target_schema}"'))
+        # Nothing reads the load schema: it is replaced whole on every run.
+        conn.execute(text(f'DROP SCHEMA IF EXISTS "{load_schema}" CASCADE'))
+        conn.execute(text(f'CREATE SCHEMA "{load_schema}"'))
         conn.execute(text("CREATE SCHEMA IF NOT EXISTS audit"))
 
         conn.execute(
@@ -407,7 +415,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--target-schema",
         default=None,
-        help="PostgreSQL target schema. Default: PGSCHEMA env var or staging.",
+        help="PostgreSQL staging schema. Default: PGSCHEMA env var or staging. "
+             "The tables are loaded into <schema>_next for the warehouse build to publish.",
     )
     parser.add_argument(
         "--if-exists",
@@ -443,12 +452,14 @@ def main() -> int:
         gold_base_path = project_root / gold_base_path
 
     target_schema = validate_sql_identifier(args.target_schema or os.getenv("PGSCHEMA", "staging"))
+    # Loaded here; the warehouse build renames it to target_schema.
+    load_schema = validate_sql_identifier(f"{target_schema}{LOAD_SCHEMA_SUFFIX}")
     load_id = str(uuid.uuid4())
 
     engine: Engine | None = None
     if not args.dry_run:
         engine = build_engine()
-        create_support_objects(engine, target_schema)
+        create_support_objects(engine, load_schema)
 
     results: list[dict[str, Any]] = []
 
@@ -518,7 +529,7 @@ def main() -> int:
                 df.to_sql(
                     name=spec.target_table,
                     con=conn,
-                    schema=target_schema,
+                    schema=load_schema,
                     if_exists=args.if_exists,
                     index=False,
                     chunksize=1_000,
@@ -626,6 +637,8 @@ def main() -> int:
             "Use --strict once all required Gold outputs exist."
         )
 
+    if engine is not None:
+        print(f"\nLoaded into schema {load_schema}; the warehouse build publishes it as {target_schema}.")
     print(f"\nload_id={load_id}")
     return 0
 

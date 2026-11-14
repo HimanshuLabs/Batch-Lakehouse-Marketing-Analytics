@@ -10,7 +10,6 @@ from pyspark.sql.functions import (
     col,
     concat_ws,
     current_timestamp,
-    input_file_name,
     lit,
     sha2,
     to_date,
@@ -79,11 +78,16 @@ def create_spark_session() -> SparkSession:
 
 def read_source(spark: SparkSession, source_format: str, source_path: Path) -> DataFrame:
     if source_format == "csv":
+        # RFC 4180, as the generator (pandas) writes it: a quoted field keeps
+        # its commas and line breaks, and a doubled quote is one quote.
         return (
             spark.read
             .option("header", "true")
             .option("inferSchema", "false")
             .option("mode", "PERMISSIVE")
+            .option("multiLine", "true")
+            .option("quote", '"')
+            .option("escape", '"')
             .csv(str(source_path))
         )
 
@@ -97,7 +101,16 @@ def read_source(spark: SparkSession, source_format: str, source_path: Path) -> D
     raise ValueError(f"Unsupported source format: {source_format}")
 
 
-def add_bronze_metadata(df: DataFrame, source_name: str) -> DataFrame:
+def project_relative(path: Path) -> str:
+    # data/raw/batch_date=.../orders.csv: the same text wherever the project
+    # is checked out, so Bronze does not depend on the machine it ran on.
+    try:
+        return Path(path).resolve().relative_to(PROJECT_ROOT.resolve()).as_posix()
+    except ValueError:
+        return Path(path).name
+
+
+def add_bronze_metadata(df: DataFrame, source_name: str, source_path: Path) -> DataFrame:
     business_columns = df.columns
 
     return (
@@ -106,7 +119,7 @@ def add_bronze_metadata(df: DataFrame, source_name: str) -> DataFrame:
         .withColumn("ingestion_date", to_date(lit(BATCH_DATE)))
         .withColumn("batch_id", lit(BATCH_ID))
         .withColumn("source_system", lit(source_name))
-        .withColumn("source_file_name", input_file_name())
+        .withColumn("source_file_name", lit(project_relative(source_path)))
         .withColumn(
             "record_hash",
             sha2(concat_ws("||", *[col(c).cast("string") for c in business_columns]), 256),
@@ -148,10 +161,15 @@ def main() -> None:
         raw_df = read_source(spark, source_format, source_path)
         raw_count = raw_df.count()
 
-        bronze_df = add_bronze_metadata(raw_df, source_name)
-        bronze_count = bronze_df.count()
-
-        write_bronze_table(bronze_df, output_path)
+        if raw_count == 0:
+            # An empty batch (a header-only CSV, an empty JSON-lines file) is a
+            # valid batch with nothing to add: no partition is written.
+            bronze_count = 0
+            print(f"{source_name}: the raw file has no rows; nothing written for {BATCH_DATE}")
+        else:
+            bronze_df = add_bronze_metadata(raw_df, source_name, source_path)
+            bronze_count = bronze_df.count()
+            write_bronze_table(bronze_df, output_path)
 
         row_count_report.append(
             {

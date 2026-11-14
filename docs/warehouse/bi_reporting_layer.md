@@ -15,6 +15,7 @@ BI tools must consume the warehouse and marts schemas only. They should not read
 | marts.mart_product_sales | Product and category sales reporting |
 | marts.mart_revenue_daily | Daily executive revenue reporting |
 | marts.mart_marketing_funnel | Funnel movement and engagement reporting |
+| marts.mart_customer_daily_snapshot, marts.mart_product_daily_snapshot, marts.mart_campaign_daily_snapshot | The customer, product and campaign marts as of the end of each business date: history for trend reporting and leak-free model features |
 | sql/warehouse/dashboard_query_pack.sql | Reusable SQL pack for dashboards and interviews |
 
 ## Recommended Demo Flow
