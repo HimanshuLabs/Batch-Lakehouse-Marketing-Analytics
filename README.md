@@ -29,7 +29,7 @@ This project demonstrates practical Data Engineering and Analytics Engineering c
 | Reproducibility | Deterministic, incremental batches; reruns of a batch leave the lake and the warehouse unchanged |
 | BI readiness | Revenue, campaign, product, customer, and funnel marts built for reporting |
 | Analytics engineering | 24 dbt models and 82 dbt tests, docs, lineage, and exposures |
-| Orchestration | One Airflow 3 DAG of 20 tasks covering lakehouse, warehouse, dbt, and reporting |
+| Orchestration | A single Airflow DAG (Airflow 3.2) with 20 tasks covering the lakehouse, warehouse, dbt and reporting |
 | Reporting | Power BI Online dashboard assets, screenshots, CSV exports, and refresh flow documentation |
 | Infrastructure | Terraform for the S3 layer that serves the Power BI CSVs |
 | CI/CD | GitHub Actions: static checks, unit tests in two time zones, and a full end-to-end integration run |
