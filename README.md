@@ -25,7 +25,7 @@ This project demonstrates practical Data Engineering and Analytics Engineering c
 | Lakehouse processing | Raw, Bronze, Silver, and Gold Medallion layers using PySpark and Parquet |
 | Data quality | Row-count checks, metadata checks, null checks, metric checks, quarantine handling, row conservation, and reconciliation |
 | Warehouse modeling | PostgreSQL staging, warehouse, marts, and audit schemas |
-| Historical correctness | SCD Type 2 customer/product/campaign dimensions and point-in-time fact joins |
+| Historical correctness | Customer/product/campaign dimensions with SCD Type 0, 1 and 2 attributes, and point-in-time fact joins |
 | Reproducibility | Deterministic, incremental batches; reruns of a batch leave the lake and the warehouse unchanged |
 | BI readiness | Revenue, campaign, product, customer, and funnel marts built for reporting |
 | Analytics engineering | 24 dbt models and 82 dbt tests, docs, lineage, and exposures |
@@ -142,6 +142,7 @@ flowchart TD
 | Airflow | `airflow/dags/` | Orchestrates lakehouse, warehouse, dbt, and export tasks |
 | Power BI exports | `exports/power_bi/` (route A), `data/bi_exports/` (route B) | CSV datasets consumed by Power BI Online |
 | Power BI screenshots | `screenshots/power_bi/`, `docs/screenshots/power_bi/` | Provides dashboard proof assets |
+| Airflow screenshot | `docs/screenshots/airflow/` | Shows two successful scheduler runs of the 20-task DAG |
 | Terraform | `terraform/aws-bi-exports/` | Manages the S3 layer that serves the route B CSVs |
 | CI/CD | `.github/workflows/ci.yml` | Validates the merged analytics platform before merge |
 
@@ -180,11 +181,11 @@ Exact Python pins are in `requirements.txt` (runtime) and `requirements-dev.txt`
 | DuckDB | SQL analytics straight on the Gold Parquet files, and the route B export query engine | `sql/duckdb_gold_analytics.py`, `sql/run_scd2_duckdb_analytics.py`, `sql/export_power_bi_dataset.py` (DAG tasks `duckdb_gold_analytics`, `scd2_duckdb_analytics`, `power_bi_export`) | CI `integration` runs the three tasks; the tests also read the lake with DuckDB |
 | PostgreSQL | Staging, star-schema warehouse, marts, audit; each build is published atomically | `sql/warehouse/*.sql`, `scripts/run_warehouse_sql.sh` (DAG task `build_warehouse`) | CI `unit` (database tests in both time zones) and CI `integration` (29 reconciliation and 20 mart checks must pass; a reader loop sees no error during rebuilds) |
 | dbt | Models over the warehouse and marts, 82 tests (the SCD type tests included), docs, exposures | `dbt/` (DAG tasks `dbt_run`, `dbt_test`, `dbt_docs`) | CI `integration`: `dbt run` PASS=25, `dbt test` PASS=83 |
-| Airflow | The DAG: task order, one run at a time, `BATCH_DATE` from the logical date | `airflow/dags/batch_lakehouse_pipeline.py` | The DAG's tasks run in CI, but not under Airflow: `static` checks the DAG file, `unit` renders its `BATCH_DATE` template with Jinja2, and `integration` executes the DAG's own task commands through `tests/integration/run_dag.py` with Airflow stubbed. A real scheduler run is manual and local, recorded in `docs/warehouse/airflow_working_state.md` |
-| Docker | Runs PostgreSQL 16.14 (`project2_postgres` locally, throwaway containers in tests). The pipeline itself is not containerized: there is no Dockerfile | `scripts/run_warehouse_sql.sh` (`docker exec`), `tests/integration/run_local.sh` | CI `unit` and `integration` start PostgreSQL with `docker run` |
+| Airflow | The DAG: task order, one run at a time, `BATCH_DATE` from the logical date | `airflow/dags/batch_lakehouse_pipeline.py` | The DAG's tasks run in CI, but not under Airflow: `static` checks the DAG file, `unit` renders its `BATCH_DATE` template with Jinja2, and `integration` executes the DAG's own task commands through `tests/integration/run_dag.py` with Airflow stubbed. A real scheduler run is manual and local, recorded in `docs/warehouse/airflow_working_state.md`; a successful run of the 20-task DAG is shown in `docs/screenshots/airflow/01_dag_run_success.png` |
+| Docker | Runs PostgreSQL 16.14 (`project2_postgres` locally, throwaway containers in tests). The pipeline itself is not containerized: there is no Dockerfile | `scripts/run_warehouse_sql.sh` (`docker exec`), `tests/integration/run_local.sh` | CI `unit` runs PostgreSQL as a service container; CI `integration` starts one with `docker run` |
 | pytest | Unit tests in two time zones with the database tests required; integration assertions on the finished pipeline | `tests/unit/`, `tests/integration/` | CI `unit` and `integration`; locally `venv/bin/python -m pytest tests/unit` and `bash tests/integration/run_local.sh` |
 | GitHub Actions | The quality gate on every push and pull request | `.github/workflows/ci.yml` | The workflow runs themselves (five jobs) |
-| Power BI | The dashboard, built by hand in Power BI Online from the exported CSVs | `exports/power_bi/`, `data/bi_exports/`, `docs/warehouse/power_bi_*.md`, screenshots in `docs/screenshots/power_bi/` | Not run by the DAG or CI. CI `powerbi-assets` validates the CSVs, manifest and docs; CI `integration` produces the route B CSVs. The dashboard itself is shown by screenshots only |
+| Power BI | The dashboard, built by hand in Power BI Online from the exported CSVs | `exports/power_bi/`, `data/bi_exports/`, `docs/warehouse/power_bi_*.md`, screenshots in `docs/screenshots/power_bi/` | Not run by the DAG or CI. CI `powerbi-assets` validates the CSVs, their column order, the manifest and the docs; CI `integration` produces the route B CSVs. The dashboard itself is shown by screenshots only |
 | AWS S3 | Hosts five route B CSVs that Power BI Online reads over HTTPS | `terraform/aws-bi-exports/` | Not touched by the DAG or CI (no AWS credentials there). Upload is a manual `terraform apply`; the evidence is the bucket and the dashboard |
 | Terraform | Declares the S3 bucket, its policy and the five objects | `terraform/aws-bi-exports/*.tf` | CI `terraform`: `fmt -check`, `init -backend=false`, `validate`. `plan` and `apply` are manual and never run in CI |
 
@@ -205,10 +206,12 @@ Generated raw files:
 | `campaigns.csv` | Marketing campaign master data |
 | `orders.csv` | Order-level transaction data |
 | `order_items.csv` | Product-level order line items |
-| `ad_spend.csv` | Campaign spend, impressions, and clicks |
+| `ad_spend.csv` | The ad platform's feed per campaign, day and region: spend, impressions, clicks, conversions, and attributed revenue |
 | `web_events.json` | User behavior and engagement events |
 
 The behavioral event source includes customer, product, session, recommendation, campaign attribution, device/browser, engagement, fraud, schema version, and timestamp fields.
+
+Each batch folder also holds `generation_truth.json`: the generator version, the data contract, the hidden simulation labels and the row index of every deliberately dirty row. It is not a source file and no pipeline task reads it as data.
 
 ---
 
@@ -302,7 +305,7 @@ The `_scd2` facts join each row to the dimension version that was valid at the e
 
 **Marts tie out.** Every mart has one row for the unknown member and one for the invalid-reference member, flagged in `member_type` (`known`, `unknown_member`, `invalid_reference`); filter `member_type = 'known'` for real customers, products or campaigns only. With those rows each mart's revenue (sales less refunds), refunds, spend and units equal the fact totals, and the mart validation checks exactly that.
 
-**Consumer contract.** `tests/integration/test_warehouse.py` records every relation and column that Project 4 and Project 5 read (name, type, grain, key) and the integration run asserts it: adding a column is free; removing, renaming or retyping a recorded one, emptying the relation or breaking its key fails the run.
+**Consumer contract.** `tests/integration/test_warehouse.py` records every relation and column that Project 4 and Project 5 read (name, type, grain, key) and the integration run asserts it: adding a column is free; removing, renaming or retyping a recorded one, emptying the relation or breaking its key fails the run. The Power BI dashboards are protected the same way, by column position (section 12).
 
 ---
 
@@ -324,7 +327,7 @@ Warehouse capabilities:
 - Customer, product, and campaign dimensions with SCD Type 0, Type 1 and Type 2 attributes (table below).
 - Surrogate keys for historical dimension versions. Dimension keys are deterministic: a rebuild from the same data gives the same keys in any load order.
 - Point-in-time fact joins that only accept a version whose validity range covers the event.
-- Unknown-member handling where needed.
+- An unknown member (key 0) for a missing reference and an invalid-reference member (key -1) for a reference with no valid dimension row, so no fact is dropped for a bad reference.
 - BI-ready marts for revenue, campaign, product, customer, and funnel reporting.
 - Reconciliation checks stored under the audit layer.
 - Query performance tuning through indexes and `EXPLAIN ANALYZE` documentation.
@@ -402,7 +405,7 @@ Main dbt areas:
 ```text
 dbt/models/staging/      7 models
 dbt/models/warehouse/    8 models
-dbt/models/marts/        5 models
+dbt/models/marts/        8 models (5 marts, 3 daily snapshots)
 dbt/models/audit/        1 model
 dbt/models/exposures.yml
 dbt/models/schema.yml
@@ -461,12 +464,10 @@ The DAG has no schedule and allows one active run. Its tasks use `venv/bin/pytho
 
 **An empty first batch.** When the very first batch is declared empty and its raw files have no rows, Bronze ingests and checks them, and every later task succeeds without running and prints `NOTHING TO PROCESS`: no lake table and no warehouse is created, and the first batch with rows builds everything. An empty batch after an earlier one is processed normally.
 
-**Trigger from the UI.** Set the logical date to the day to process or rerun, at 12:00 on that day, or leave it at now to process today. The CLI's `-l` works the same way. Section 15 also has a scripted REST trigger with a render gate that shows the date before any task runs.
-
-The full setup, verified with a 23-of-23 successful run, is in:
+How to trigger a run (UI, CLI, or a scripted REST call with a render gate that shows the date before any task runs) is in section 15. The full setup and troubleshooting are in `docs/warehouse/airflow_working_state.md`. Two successful scheduler runs of the 20-task DAG (13 and 14 November 2026, no failed task) are shown in:
 
 ```text
-docs/warehouse/airflow_working_state.md
+docs/screenshots/airflow/01_dag_run_success.png
 ```
 
 ---
@@ -506,6 +507,8 @@ exports/power_bi/export_manifest.json
 - the bucket policy grants public `s3:GetObject` on exactly those five objects, with no listing and no write;
 - the module uploads the five files from `data/bi_exports/`.
 
+**The column order is a contract.** Power BI reads these CSVs by column position. `scripts/power_bi_dashboard_contract.json` records the columns each file of both routes was published with, in order. Both export scripts write those columns first, in that order, and append every newer column after them; `scripts/validate_powerbi_assets.py` (CI job `powerbi-assets`) and the tests fail when a published column is moved, renamed or dropped.
+
 `terraform output power_bi_csv_urls` prints the HTTPS URLs that Power BI uses. `data_quality_summary.csv` is built only from verified checks: warehouse reconciliation, SCD2 validation, Silver quarantine, point-in-time conservation, and the number of facts kept on the invalid-reference member per fact and dimension. See `docs/power_bi_dashboard_spec.md` and `docs/terraform_aws_bi_exports.md`.
 
 Power BI docs:
@@ -539,7 +542,7 @@ GitHub Actions (`.github/workflows/ci.yml`) runs on pushes and pull requests to 
 | Static checks | required files; no committed local paths, private keys, AWS keys, or dbt credentials; Python compile; shell syntax; warehouse SQL assets; Airflow DAG source; ruff; dbt project structure and `dbt parse` |
 | Unit tests | `pytest tests/unit` on Python 3.14 with Java 17, run twice: once with `TZ=UTC` and once with `TZ=Asia/Kolkata`. The job starts a PostgreSQL 16.14 service container on port 5546 for the tests that build a warehouse, and sets `P2_REQUIRE_DB=1`, so those tests fail instead of being skipped if the database is missing |
 | Integration | the whole pipeline end to end against PostgreSQL 16.14; see below |
-| Power BI artifact validation | `scripts/validate_powerbi_assets.py`: exports, manifest, docs, screenshots |
+| Power BI artifact validation | `scripts/validate_powerbi_assets.py`: exports, their published column order, manifest, docs, screenshots |
 | Terraform validation | Terraform 1.17.1: `fmt -check`, `init -backend=false`, `validate`, and no tracked state or tfvars |
 
 The integration job (`tests/integration/run_integration.sh`):
@@ -596,7 +599,13 @@ docs/screenshots/power_bi/02_campaign_performance.png
 docs/screenshots/power_bi/03_data_quality_reconciliation.png
 ```
 
-The screenshots were taken before the latest data fixes, so their numbers differ from the current exports (see Known Limitations).
+The dashboard screenshots were taken on 14 November 2026 from the current data; for example the executive overview's totals (revenue INR 3,984,959.66, spend INR 1,434,179.14) are those of `data/bi_exports/campaign_performance.csv`.
+
+Airflow screenshot:
+
+```text
+docs/screenshots/airflow/01_dag_run_success.png
+```
 
 Export proof:
 
@@ -641,16 +650,10 @@ curl -LsSf https://astral.sh/uv/install.sh | env UV_NO_MODIFY_PATH=1 sh
 ~/.local/bin/uv venv --python 3.13 --seed venv-dbt
 venv-dbt/bin/python -m pip install -r requirements-dev.txt
 venv-dbt/bin/dbt --version          # dbt-core 1.10.15, dbt-postgres 1.10.0
-
 cp dbt/profiles.yml.example dbt/profiles.yml
-cd dbt
-../venv-dbt/bin/dbt debug --profiles-dir .
-../venv-dbt/bin/dbt parse --profiles-dir . --no-partial-parse
-../venv-dbt/bin/dbt run --profiles-dir .
-../venv-dbt/bin/dbt test --profiles-dir .
-../venv-dbt/bin/dbt docs generate --profiles-dir .
-cd ..
 ```
+
+The dbt commands are in section 10.
 
 ### `venv-airflow`: Airflow 3.2.0 (Python 3.14)
 
@@ -894,11 +897,21 @@ ORDER BY viewname;
 "
 ```
 
-### SCD2 validation
+### SCD2 and mart validation
+
+Both run inside every warehouse build (the build fails if one fails); `scd2_validation_queries.sql` refuses to run on its own. Read the results of the latest build:
 
 ```bash
-bash scripts/run_warehouse_sql.sh sql/warehouse/scd2_validation_queries.sql
+docker exec project2_postgres psql -U project2 -d marketing_analytics -c "
+SELECT 'scd2' AS checks, status, COUNT(*) FROM audit.scd2_validation_results
+WHERE validation_run_id = (SELECT validation_run_id FROM audit.scd2_validation_results ORDER BY checked_at DESC LIMIT 1)
+GROUP BY status
+UNION ALL
+SELECT 'marts', status, COUNT(*) FROM audit.mart_validation_report GROUP BY status;
+"
 ```
+
+Expected: `scd2 | PASS | 9` and `marts | PASS | 20`.
 
 ### Data quality summary
 
@@ -921,7 +934,6 @@ Deliberate trade-offs for a portfolio project built on synthetic data:
 
 - **Public dashboard files.** Power BI Online reads five synthetic CSVs from S3 through public, read-only object URLs (no listing, no write access). The bucket policy does not enforce TLS, which is acceptable for synthetic data; a production setup would serve the files privately, for example through CloudFront with origin access control.
 - **Reproducibility scope.** Direct dependencies are pinned; transitive dependencies of the dev tools are not.
-- **Screenshots** show the dashboard layout; the current figures are in `exports/power_bi/`.
 
 **Known characteristics of the synthetic data.** The source is made coherent enough that nothing contradicts itself, not realistic. Left as they are, on purpose: the funnel converts far more often than a real shop (event types are drawn almost evenly, so about one event in six is a purchase); most orders are a single line; loyalty points do not grow with orders and stock does not fall with sales; the model-score fields (engagement, purchase and abandonment probability, fraud score) and the recommendation fields are random and unrelated to what the visitor did, which also keeps them from leaking outcomes; an IP address is not tied to the visit's city and names are not regional; every web event carries a product, page views and searches included; prime members pay shipping like everyone else, and the free-shipping value is high for the typical order; there is no price or campaign history before the first batch; the ad platform's conversions are independent of the shop's orders; and the channel names (`google`, `facebook`, `instagram`) are the real platforms, while product brands are invented.
 
