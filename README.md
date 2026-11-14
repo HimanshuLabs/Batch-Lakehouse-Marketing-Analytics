@@ -186,8 +186,8 @@ Exact Python pins are in `requirements.txt` (runtime) and `requirements-dev.txt`
 | pytest | Unit tests in two time zones with the database tests required; integration assertions on the finished pipeline | `tests/unit/`, `tests/integration/` | CI `unit` and `integration`; locally `venv/bin/python -m pytest tests/unit` and `bash tests/integration/run_local.sh` |
 | GitHub Actions | The quality gate on every push and pull request | `.github/workflows/ci.yml` | The workflow runs themselves (five jobs) |
 | Power BI | The dashboard, built by hand in Power BI Online from the exported CSVs | `exports/power_bi/`, `data/bi_exports/`, `docs/warehouse/power_bi_*.md`, screenshots in `docs/screenshots/power_bi/` | Not run by the DAG or CI. CI `powerbi-assets` validates the CSVs, their column order, the manifest and the docs; CI `integration` produces the route B CSVs. The dashboard itself is shown by screenshots only |
-| AWS S3 | Hosts five route B CSVs that Power BI Online reads over HTTPS | `terraform/aws-bi-exports/` | Not touched by the DAG or CI (no AWS credentials there). Upload is a manual `terraform apply`; the evidence is the bucket and the dashboard |
-| Terraform | Declares the S3 bucket, its policy and the five objects | `terraform/aws-bi-exports/*.tf` | CI `terraform`: `fmt -check`, `init -backend=false`, `validate`. `plan` and `apply` are manual and never run in CI |
+| AWS S3 | Hosts five route B CSVs that Power BI Online reads over HTTPS | `terraform/aws-bi-exports/` | Not touched by the DAG or CI (no AWS credentials there). Upload is a manual `terraform apply`; last applied from AWS CloudShell on 14 November 2026; the evidence is the bucket, the dashboard and a final `terraform plan` that reports no changes |
+| Terraform | Declares the S3 bucket, its policy and the five objects | `terraform/aws-bi-exports/*.tf` | CI `terraform`: `fmt -check`, `init -backend=false`, `validate`. `plan` and `apply` are manual and never run in CI. Applied from AWS CloudShell on 14 November 2026: the bucket settings and five files, first set up by hand, were imported (9 resources), the files re-uploaded, and a final `plan` reports no changes |
 
 Listed in this README but not exercised by the DAG or CI: Power BI Online, AWS S3 and `terraform apply` (manual, as above), the Airflow scheduler itself (manual, local), and the development environment (Ubuntu, VS Code). pandas, Parquet (pyarrow), psycopg and ruff are used by the code or the CI jobs above; uv only builds the local `venv-dbt`.
 
@@ -853,7 +853,7 @@ venv/bin/python scripts/validate_powerbi_assets.py
 
 ### Upload the route B files to S3
 
-The run's `power_bi_export` task writes the five files to `data/bi_exports/`. To upload them, run `terraform plan` and `terraform apply` in `terraform/aws-bi-exports`, with a `terraform.tfvars` based on `terraform.tfvars.example`.
+The run's `power_bi_export` task writes the five files to `data/bi_exports/`. To upload them, run `terraform plan` and `terraform apply` in `terraform/aws-bi-exports`, with a `terraform.tfvars` based on `terraform.tfvars.example`. If the bucket settings or files already exist, import them first (`terraform import`), as was done on 14 November 2026.
 
 ---
 
