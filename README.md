@@ -670,8 +670,8 @@ venv-airflow/bin/airflow version    # 3.2.0
 ```bash
 source scripts/airflow_local_env.sh          # create it first (below)
 docker volume create airflow_pgdata
-docker run -d --name airflow_postgres --restart unless-stopped \
-  -p 127.0.0.1:5435:5432 -v airflow_pgdata:/var/lib/postgresql/data \
+docker run -d --name airflow_postgres \
+  -p 127.0.0.1:5437:5432 -v airflow_pgdata:/var/lib/postgresql/data \
   -e POSTGRES_DB=airflow_metadata -e POSTGRES_USER=airflow \
   -e POSTGRES_PASSWORD="$AIRFLOW_PG_PASSWORD" postgres:16.14
 ```
@@ -684,7 +684,7 @@ export AIRFLOW_PG_PASSWORD='<SECRET>'
 export AIRFLOW_HOME="${REPO_ROOT}/.airflow"
 export AIRFLOW__CORE__DAGS_FOLDER="${REPO_ROOT}/airflow/dags"
 export AIRFLOW__CORE__LOAD_EXAMPLES=False
-export AIRFLOW__DATABASE__SQL_ALCHEMY_CONN="postgresql+psycopg2://airflow:${AIRFLOW_PG_PASSWORD}@127.0.0.1:5435/airflow_metadata"
+export AIRFLOW__DATABASE__SQL_ALCHEMY_CONN="postgresql+psycopg2://airflow:${AIRFLOW_PG_PASSWORD}@127.0.0.1:5437/airflow_metadata"
 export AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_PRE_PING=True
 export AIRFLOW__CORE__EXECUTOR=LocalExecutor
 export AIRFLOW__CORE__PARALLELISM=1
@@ -759,16 +759,16 @@ Details and troubleshooting are in `docs/warehouse/airflow_working_state.md`.
 
 ## 16. PostgreSQL
 
-The warehouse runs in the `project2_postgres` container, which holds the `marketing_analytics` database on host port 5434. Create it once, with a named volume so the data survives restarts:
+The warehouse runs in the `project2_postgres` container, which holds the `marketing_analytics` database on host port 5434, bound to 127.0.0.1 only so it is not reachable from the network. Create it once, with a named volume so the data survives restarts:
 
 ```bash
 docker volume create project2_pgdata
-docker run -d --name project2_postgres --restart unless-stopped \
+docker run -d --name project2_postgres \
   -e POSTGRES_USER=project2 \
   -e POSTGRES_PASSWORD=project2 \
   -e POSTGRES_DB=marketing_analytics \
   -v project2_pgdata:/var/lib/postgresql/data \
-  -p 5434:5432 \
+  -p 127.0.0.1:5434:5432 \
   postgres:16.14
 docker exec project2_postgres pg_isready -U project2 -d marketing_analytics
 ```
