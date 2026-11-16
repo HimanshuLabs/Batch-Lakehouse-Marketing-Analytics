@@ -60,8 +60,8 @@ Airflow's metadata lives in its own container, `airflow_postgres`, and never in 
 ```bash
 source scripts/airflow_local_env.sh
 docker volume create airflow_pgdata
-docker run -d --name airflow_postgres --restart unless-stopped \
-  -p 127.0.0.1:5435:5432 -v airflow_pgdata:/var/lib/postgresql/data \
+docker run -d --name airflow_postgres \
+  -p 127.0.0.1:5437:5432 -v airflow_pgdata:/var/lib/postgresql/data \
   -e POSTGRES_DB=airflow_metadata -e POSTGRES_USER=airflow \
   -e POSTGRES_PASSWORD="$AIRFLOW_PG_PASSWORD" postgres:16.14
 docker exec airflow_postgres pg_isready -U airflow -d airflow_metadata -h 127.0.0.1
@@ -83,7 +83,7 @@ export AIRFLOW_PG_PASSWORD='<SECRET>'
 export AIRFLOW_HOME="${REPO_ROOT}/.airflow"
 export AIRFLOW__CORE__DAGS_FOLDER="${REPO_ROOT}/airflow/dags"
 export AIRFLOW__CORE__LOAD_EXAMPLES=False
-export AIRFLOW__DATABASE__SQL_ALCHEMY_CONN="postgresql+psycopg2://airflow:${AIRFLOW_PG_PASSWORD}@127.0.0.1:5435/airflow_metadata"
+export AIRFLOW__DATABASE__SQL_ALCHEMY_CONN="postgresql+psycopg2://airflow:${AIRFLOW_PG_PASSWORD}@127.0.0.1:5437/airflow_metadata"
 export AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_PRE_PING=True
 export AIRFLOW__CORE__EXECUTOR=LocalExecutor
 export AIRFLOW__CORE__PARALLELISM=1
@@ -226,7 +226,7 @@ ps -eo pid,args | grep -E 'airflow (api_server|scheduler|dag-processor|dag_proce
 ss -ltn | grep ':8080 ' || echo "8080 free"
 ```
 
-Both containers keep running and restart with Docker (`--restart unless-stopped`).
+Both containers are started manually (`docker start airflow_postgres project2_postgres`) and do not auto-start at boot.
 
 ---
 
