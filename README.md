@@ -759,7 +759,7 @@ Details and troubleshooting are in `docs/warehouse/airflow_working_state.md`.
 
 ## 16. PostgreSQL
 
-The warehouse runs in the `project2_postgres` container, which holds the `marketing_analytics` database on host port 5434. Create it once, with a named volume so the data survives restarts:
+The warehouse runs in the `project2_postgres` container, which holds the `marketing_analytics` database on host port 5434, bound to 127.0.0.1 only so it is not reachable from the network. Create it once, with a named volume so the data survives restarts:
 
 ```bash
 docker volume create project2_pgdata
@@ -768,7 +768,7 @@ docker run -d --name project2_postgres \
   -e POSTGRES_PASSWORD=project2 \
   -e POSTGRES_DB=marketing_analytics \
   -v project2_pgdata:/var/lib/postgresql/data \
-  -p 5434:5432 \
+  -p 127.0.0.1:5434:5432 \
   postgres:16.14
 docker exec project2_postgres pg_isready -U project2 -d marketing_analytics
 ```
