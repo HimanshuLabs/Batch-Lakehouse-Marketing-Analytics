@@ -213,6 +213,10 @@ The behavioral event source includes customer, product, session, recommendation,
 
 Each batch folder also holds `generation_truth.json`: the generator version, the data contract, the hidden simulation labels and the row index of every deliberately dirty row. It is not a source file and no pipeline task reads it as data.
 
+### Relation to Project 1
+
+This generator is the shop's master data. Project 1 (real-time personalization) uses a read-only export of the current rows of `warehouse.dim_customer` and `warehouse.dim_product`, so both projects describe the same customers, with the same `customer_id`, and the same products. Project 1 streams the live clickstream of those customers, which feeds personalization, the Project 4 ML pipeline and the Project 5 AI layer. This project's own web events (`fact_web_events`) are the marketing feed: they tie sessions to campaigns for the funnel and ad-spend reporting. Limitation: purchases in Project 1 are not reconciled with this project's orders. If the generated data changes, Project 1's export (`reference-data/shop_master` in Project 1) must be refreshed.
+
 ---
 
 ## 8. Lakehouse Engine
