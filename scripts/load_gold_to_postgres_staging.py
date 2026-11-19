@@ -66,6 +66,72 @@ ALL_SOURCES = GOLD_SOURCES + SCD2_SOURCES
 # The tables are loaded into <target schema>_next (see the module docstring).
 LOAD_SCHEMA_SUFFIX = "_next"
 
+# pandas' to_sql turns its whole frame into Python objects before it inserts
+# the first chunk, so a table is handed to it in slices of this many rows, all
+# in the one transaction of the table. A table up to this size is one slice.
+def slice_rows_setting(value: str | None) -> int:
+    """The rows per slice P2_LOAD_SLICE_ROWS asks for (unset or empty: 200,000)."""
+    if not value:
+        return 200_000
+    try:
+        rows = int(value)
+    except ValueError:
+        raise SystemExit(f"P2_LOAD_SLICE_ROWS must be a whole number, got {value!r}") from None
+    if rows < 1:
+        raise SystemExit(f"P2_LOAD_SLICE_ROWS must be at least 1, got {rows}")
+    return rows
+
+
+LOAD_SLICE_ROWS = slice_rows_setting(os.environ.get("P2_LOAD_SLICE_ROWS"))
+
+
+def whole_frame_sql_types(df: pd.DataFrame) -> dict[str, Any]:
+    """The SQL type of every object column, decided once from the whole column.
+
+    pandas infers an object column's SQL type from its values (pandas.io.sql),
+    so a slice whose values are all missing would create TEXT where the whole
+    column holds dates. This is pandas' own mapping, applied to the whole
+    column; columns with a typed dtype get the same type from every slice.
+    """
+    from sqlalchemy.types import BigInteger, Boolean, Date, DateTime, Float, Text, Time
+
+    mapping = {
+        "datetime64": DateTime, "datetime": DateTime, "date": Date, "time": Time,
+        "floating": Float(precision=53), "integer": BigInteger, "boolean": Boolean, "timedelta64": BigInteger,
+    }
+    types: dict[str, Any] = {}
+    for column in df.columns:
+        if df[column].dtype != object:
+            continue
+        kind = pd.api.types.infer_dtype(df[column], skipna=True)
+        if kind == "complex":
+            raise ValueError(f"Complex datatypes not supported (column {column})")
+        types[column] = mapping.get(kind, Text)
+    return types
+
+
+def write_table(df: pd.DataFrame, conn: Connection, table: str, schema: str, if_exists: str,
+                slice_rows: int | None = None) -> None:
+    """df as schema.table, slice by slice: the first slice creates or replaces it, the others append.
+
+    The column types are those of the whole frame, so every slice writes into the same table definition.
+    """
+    slice_rows = slice_rows or LOAD_SLICE_ROWS
+    if slice_rows < 1:
+        raise ValueError(f"P2_LOAD_SLICE_ROWS must be at least 1, got {slice_rows}")
+    types = whole_frame_sql_types(df) or None
+    for start in range(0, max(len(df), 1), slice_rows):
+        df.iloc[start:start + slice_rows].to_sql(
+            name=table,
+            con=conn,
+            schema=schema,
+            if_exists=if_exists if start == 0 else "append",
+            index=False,
+            chunksize=1_000,
+            method=None,
+            dtype=types,
+        )
+
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -526,14 +592,12 @@ def main() -> int:
             # The table and its LOADED audit row commit together or not at all,
             # so a failure never leaves a half-written staging table.
             with engine.begin() as conn:
-                df.to_sql(
-                    name=spec.target_table,
-                    con=conn,
+                write_table(
+                    df,
+                    conn,
+                    table=spec.target_table,
                     schema=load_schema,
                     if_exists=args.if_exists,
-                    index=False,
-                    chunksize=1_000,
-                    method=None,
                 )
 
                 finished_at = utc_now()

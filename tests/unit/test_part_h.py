@@ -548,7 +548,7 @@ def test_every_database_test_uses_the_one_gate_and_ci_runs_them_in_both_time_zon
     assert own_gates == [], "a private skip rule would not fail in CI"
     gated = [path.name for path in (tests / "unit").glob("test_*.py") if "require_sandbox_database()" in path.read_text(encoding="utf-8")]
     assert sorted(gated) == ["test_generator_sessions_budgets.py", "test_order_lifecycle.py", "test_part_f.py",
-                             "test_part_g.py", "test_part_h.py", "test_part_h2.py"]
+                             "test_part_g.py", "test_part_h.py", "test_part_h2.py", "test_scale.py"]
 
     workflow = (CODE_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     unit_job = workflow[workflow.index("\n  unit:\n"):workflow.index("\n  integration:\n")]

@@ -847,6 +847,50 @@ done'
 
 Rerunning a batch date is safe. Generation is skipped when the raw files exist, and the lake and the warehouse come out identical.
 
+### Scale run
+
+The shop's size is a setting; without it everything is as above (500 customers), and the generated files are byte for byte the same (`tests/unit/test_scale.py`).
+
+| Setting | Default | What it does |
+|---|---|---|
+| `P2_NUM_CUSTOMERS` | 500 | Customers of the shop. Web events and the order ceiling follow at the default's per-customer rates; products, campaigns and ad spend keep their sizes. Every batch must use the same value (a different one is refused). |
+| `P2_EVENT_SPILL_ROWS` | 250,000 | Web events a batch holds in memory; beyond that they are sorted in runs on disk (`data/raw/.spill_*`, removed afterwards) and merged into the same `web_events.json`. |
+| `P2_LOAD_SLICE_ROWS` | 200,000 | Rows the two Gold loaders (`load_gold_scd2_to_staging`, `publish_gold_to_postgres`) hand to PostgreSQL at a time, all in one transaction per table. |
+
+Fact IDs (orders, order items, ad spend) are `BATCH_INDEX × ID_BLOCK + n`, kept within INTEGER (int32) in Silver, Gold and staging. Up to 10,000 customers `ID_BLOCK` is 100,000 (good for about 21,000 days after 2026-05-18). Above that it is 10,000,000, which allows `BATCH_INDEX` up to 213: the last valid batch date of a scaled shop is **2026-12-17**; a later one fails in the generator rather than overflow.
+
+Only `generate_data` reads `P2_NUM_CUSTOMERS`, so the run passes it to the DAG's tasks with `run_dag.py --env`. A scale run leaves out `power_bi_export`: it would write scaled files (among them the per-customer `customer_lifetime_value.csv`) to `data/bi_exports/`, which `terraform apply` uploads to S3.
+
+Silver, Gold and the warehouse are rebuilt from all of Bronze on every run, so a scale run takes every batch into Bronze first, in date order, and then runs everything from Silver on once, as the last batch. The Silver and Gold checks of the earlier batches run right after the last batch's: they only read the lake and write their own reports, and the Silver check of a batch looks at that batch's rows (by `ingestion_date`).
+
+```bash
+W=/tmp/p2-scale; mkdir -p "$W"
+run() { s=$(date +%s)
+  venv/bin/python -B tests/integration/run_dag.py --batch-date "$1" --from "$2" --to "$2" \
+    --log-dir "$W/run-$1" --env P2_NUM_CUSTOMERS=400000 \
+    || { echo "RUN STOPPED at $1 $2: see the newest log in $W/run-$1"; return 1; }
+  echo "$1 $2 $s $(date +%s)" >> "$W/tasks.tsv"; }
+
+scale_run() {
+  for day in 2026-05-18 2026-06-04 2026-06-18; do
+    for task in generate_data bronze_ingestion bronze_quality_checks; do run "$day" "$task" || return 1; done
+  done
+  for task in silver_transformations silver_quality_checks gold_transformations gold_quality_checks \
+      duckdb_gold_analytics publish_gold_to_postgres scd2_dimensions point_in_time_fact_joins scd2_gold_marts \
+      scd2_duckdb_analytics create_postgresql_schemas load_gold_scd2_to_staging \
+      build_warehouse dbt_run dbt_test dbt_docs; do
+    run 2026-06-18 "$task" || return 1
+    case "$task" in
+      silver_quality_checks|gold_quality_checks)
+        for day in 2026-05-18 2026-06-04; do run "$day" "$task" || return 1; done ;;
+    esac
+  done
+}
+scale_run; echo "scale_run exit: $?"
+```
+
+Do not run `terraform apply`, the route A export or a Power BI refresh while the warehouse holds a scaled shop.
+
 ### Export route A Power BI datasets
 
 ```bash
