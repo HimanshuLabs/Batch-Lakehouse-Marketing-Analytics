@@ -54,13 +54,91 @@ def ensure_gold_files_exist() -> None:
         raise FileNotFoundError(f"Missing Gold parquet files:\n{missing_text}")
 
 
-def read_gold_table(parquet_glob: Path) -> pd.DataFrame:
-    query = f"""
-        SELECT *
-        FROM read_parquet('{parquet_glob.as_posix()}');
-    """
+# A Gold table is read and published in chunks of about this many rows (whole
+# DuckDB vectors of 2,048 rows), all in one transaction, so a large table never
+# has to fit in memory at once. A table up to this size is one chunk.
+def chunk_rows_setting(value: str | None) -> int:
+    """The rows per chunk P2_LOAD_SLICE_ROWS asks for (unset or empty: 200,000)."""
+    if not value:
+        return 200_000
+    try:
+        rows = int(value)
+    except ValueError:
+        raise SystemExit(f"P2_LOAD_SLICE_ROWS must be a whole number, got {value!r}") from None
+    if rows < 1:
+        raise SystemExit(f"P2_LOAD_SLICE_ROWS must be at least 1, got {rows}")
+    return rows
 
-    return duckdb.sql(query).df()
+
+PUBLISH_CHUNK_ROWS = chunk_rows_setting(os.getenv("P2_LOAD_SLICE_ROWS"))
+DUCKDB_VECTOR_ROWS = 2048
+
+# DuckDB types that reach pandas with a dtype of their own; pandas derives the
+# SQL type from that dtype, the same for every chunk. Any other column (text,
+# time of day, ...) reaches pandas as objects, whose SQL type pandas infers
+# from the values, so a chunk without values would get another type.
+TYPED_DUCKDB_TYPES = ("BOOLEAN", "TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "UTINYINT", "USMALLINT",
+                      "UINTEGER", "UBIGINT", "UHUGEINT", "FLOAT", "DOUBLE", "DECIMAL", "DATE", "TIMESTAMP",
+                      "INTERVAL")
+TIME_OF_DAY_TYPES = ("TIME", "TIME WITH TIME ZONE", "TIME_NS")
+
+
+def gold_table_query(parquet_glob: Path) -> str:
+    """The one query that reads a Gold table, whole or in chunks."""
+    return f"SELECT * FROM read_parquet('{parquet_glob.as_posix()}')"
+
+
+def read_gold_table(parquet_glob: Path) -> pd.DataFrame:
+    return duckdb.sql(gold_table_query(parquet_glob)).df()
+
+
+def gold_table_sql_types(parquet_glob: Path) -> dict:
+    """The SQL type of every column that reaches pandas as objects, decided once from the whole table.
+
+    It is what pandas infers for the whole column (pandas.io.sql): a time of
+    day with at least one value is TIME, everything else (text, a column
+    without any value) is TEXT.
+    """
+    from sqlalchemy.types import Text, Time
+
+    connection = duckdb.connect()
+    try:
+        relation = connection.sql(gold_table_query(parquet_glob))
+        untyped = [(name, str(kind)) for name, kind in zip(relation.columns, relation.types)
+                   if not str(kind).startswith(TYPED_DUCKDB_TYPES) or str(kind) in TIME_OF_DAY_TYPES]
+        times = [name for name, kind in untyped if kind in TIME_OF_DAY_TYPES]
+        filled = {}
+        if times:
+            counts = connection.sql(
+                "SELECT " + ", ".join(f'count("{name}")' for name in times)
+                + f" FROM ({gold_table_query(parquet_glob)})"
+            ).fetchone()
+            filled = dict(zip(times, counts))
+        return {name: Time if filled.get(name, 0) > 0 else Text for name, _ in untyped}
+    finally:
+        connection.close()
+
+
+def read_gold_table_chunks(parquet_glob: Path, chunk_rows: int | None = None):
+    """The table as DataFrames of whole DuckDB vectors, converted as read_gold_table converts it; at least one."""
+    chunk_rows = chunk_rows or PUBLISH_CHUNK_ROWS
+    if chunk_rows < 1:
+        raise ValueError(f"P2_LOAD_SLICE_ROWS must be at least 1, got {chunk_rows}")
+    vectors = -(-chunk_rows // DUCKDB_VECTOR_ROWS)
+    connection = duckdb.connect()
+    try:
+        connection.execute(gold_table_query(parquet_glob))
+        first = True
+        while True:
+            chunk = connection.fetch_df_chunk(vectors)
+            if len(chunk) == 0 and not first:
+                return
+            yield chunk   # an empty first chunk still creates the (empty) table
+            if len(chunk) == 0:
+                return
+            first = False
+    finally:
+        connection.close()
 
 
 def prepare_dataframe_for_postgres(df: pd.DataFrame) -> pd.DataFrame:
@@ -81,20 +159,29 @@ def create_schema(engine) -> None:
         connection.execute(text(f"CREATE SCHEMA IF NOT EXISTS {POSTGRES_SCHEMA};"))
 
 
-def publish_table(engine, table_name: str, df: pd.DataFrame) -> int:
-    df = prepare_dataframe_for_postgres(df)
+def publish_table(engine, table_name: str, chunks, sql_types: dict | None = None) -> int:
+    """The chunks as one table, replaced in one transaction: the first chunk creates it, the others append.
 
-    df.to_sql(
-        name=table_name,
-        con=engine,
-        schema=POSTGRES_SCHEMA,
-        if_exists="replace",
-        index=False,
-        method="multi",
-        chunksize=1000,
-    )
+    sql_types (gold_table_sql_types) fixes the types pandas would otherwise infer per chunk.
+    """
+    rows = 0
+    with engine.begin() as connection:
+        for position, df in enumerate(chunks):
+            df = prepare_dataframe_for_postgres(df)
 
-    return len(df)
+            df.to_sql(
+                name=table_name,
+                con=connection,
+                schema=POSTGRES_SCHEMA,
+                if_exists="replace" if position == 0 else "append",
+                index=False,
+                method="multi",
+                chunksize=1000,
+                dtype=sql_types or None,
+            )
+            rows += len(df)
+
+    return rows
 
 
 def write_publish_audit(engine, audit_rows: list[dict]) -> None:
@@ -126,8 +213,8 @@ def main() -> None:
     audit_rows = []
 
     for table_name, parquet_glob in GOLD_TABLES.items():
-        df = read_gold_table(parquet_glob)
-        row_count = publish_table(engine, table_name, df)
+        row_count = publish_table(engine, table_name, read_gold_table_chunks(parquet_glob),
+                                  gold_table_sql_types(parquet_glob))
 
         audit_rows.append(
             {
