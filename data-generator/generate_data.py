@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import heapq
 import json
 import os
 import random
@@ -34,10 +35,37 @@ BATCH_DAY = date.fromisoformat(BATCH_DATE)
 BATCH_INDEX = (BATCH_DAY - ANCHOR_DATE).days
 IS_ANCHOR_BATCH = BATCH_INDEX == 0
 
+# The size of the shop: P2_NUM_CUSTOMERS customers (default 500). Orders and
+# web events scale with it at the default's per-customer rates; products,
+# campaigns and ad spend do not depend on the number of customers. 999999 is
+# the dirty records' unknown customer, so it can never be a real one.
+DEFAULT_NUM_CUSTOMERS = 500
+MAX_NUM_CUSTOMERS = 999_998
+
+
+def num_customers_setting(value: str | None) -> int:
+    """The number of customers P2_NUM_CUSTOMERS asks for (unset or empty: the default)."""
+    if not value:
+        return DEFAULT_NUM_CUSTOMERS
+    try:
+        count = int(value)
+    except ValueError:
+        raise SystemExit(f"P2_NUM_CUSTOMERS must be a whole number, got {value!r}") from None
+    if not DEFAULT_NUM_CUSTOMERS <= count <= MAX_NUM_CUSTOMERS:
+        raise SystemExit(
+            f"P2_NUM_CUSTOMERS must be between {DEFAULT_NUM_CUSTOMERS} and {MAX_NUM_CUSTOMERS}, got {count}"
+        )
+    return count
+
+
+NUM_CUSTOMERS = num_customers_setting(os.environ.get("P2_NUM_CUSTOMERS"))
+
 # Fact IDs are unique across batches: BATCH_INDEX * ID_BLOCK + n. Batch 0 keeps
 # the original 1..count IDs. Every count must stay below ID_BLOCK, and the IDs
-# fit Silver/Gold/staging INTEGER (int32) for ~21,000 days after the anchor.
-ID_BLOCK = 100_000
+# fit Silver/Gold/staging INTEGER (int32): with the 100,000 block for ~21,000
+# days after the anchor; with the 10,000,000 block of a scaled shop (more than
+# 10,000 customers) up to BATCH_INDEX 213, the batch date 2026-12-17.
+ID_BLOCK = 100_000 if NUM_CUSTOMERS <= 10_000 else 10_000_000
 INT32_MAX = 2_147_483_647
 
 # The anchor batch covers a 120-day window; later batches are increments over
@@ -47,8 +75,36 @@ INT32_MAX = 2_147_483_647
 # items are the lines of the cart that was bought, so they have no count.
 ANCHOR_WINDOW_DAYS = 120
 FACT_WINDOW_DAYS = 14
-ANCHOR_COUNTS = {"web_events": 8000, "orders": 2000, "ad_spend": 1000}
-INCREMENT_COUNTS = {"web_events": 1000, "orders": 250, "ad_spend": 125}
+# The counts are those of the default shop (500 customers); web events and the
+# order ceiling grow with the number of customers, ad spend does not.
+CUSTOMER_DRIVEN_FACTS = ("web_events", "orders")
+
+
+def scaled_counts(counts: dict[str, int], customers: int) -> dict[str, int]:
+    return {name: count * customers // DEFAULT_NUM_CUSTOMERS if name in CUSTOMER_DRIVEN_FACTS else count
+            for name, count in counts.items()}
+
+
+ANCHOR_COUNTS = scaled_counts({"web_events": 8000, "orders": 2000, "ad_spend": 1000}, NUM_CUSTOMERS)
+INCREMENT_COUNTS = scaled_counts({"web_events": 1000, "orders": 250, "ad_spend": 125}, NUM_CUSTOMERS)
+
+# A batch holds its web events in memory up to this many, and beyond that sorts
+# them in runs on disk (a hidden folder next to the batch) that are merged into
+# web_events.json; the file is the same either way.
+def spill_rows_setting(value: str | None) -> int:
+    """The number of web events P2_EVENT_SPILL_ROWS lets a batch hold in memory (unset or empty: 250,000)."""
+    if not value:
+        return 250_000
+    try:
+        rows = int(value)
+    except ValueError:
+        raise SystemExit(f"P2_EVENT_SPILL_ROWS must be a whole number, got {value!r}") from None
+    if rows < 1:
+        raise SystemExit(f"P2_EVENT_SPILL_ROWS must be at least 1, got {rows}")
+    return rows
+
+
+EVENT_SPILL_ROWS = spill_rows_setting(os.environ.get("P2_EVENT_SPILL_ROWS"))
 
 # Changed master records per batch. The anchor batch has a fixed change set
 # (customer 5, product 5, campaign 4) with its original timestamps; later
@@ -327,6 +383,13 @@ def fact_id(n: int) -> int:
     if value > INT32_MAX:
         raise ValueError(f"Fact ID {value} exceeds INT32_MAX for BATCH_DATE={BATCH_DATE}")
     return value
+
+
+def own_fact_id(n: int) -> int:
+    """The ID of a generated fact: below the batch's fixture IDs, so it can never reach them or the next batch."""
+    if n >= FIXTURE_ID_START:
+        raise ValueError(f"Fact number {n} reaches the fixture IDs of the block (ID_BLOCK={ID_BLOCK})")
+    return fact_id(n)
 
 
 def weighted(rng: random.Random, values: list, weights: list):
@@ -842,8 +905,13 @@ def generate_web_events(
     uuid_rng: random.Random,
     window_days: int,
     count: int,
-) -> tuple[list[dict], dict[str, list[dict]]]:
-    """Web events, visit by visit, and the cart bought by each purchase event.
+) -> tuple[list[dict] | SpilledEvents, list[dict], dict[str, list[dict]]]:
+    """Web events, visit by visit; the purchase events; and the cart bought by each purchase event.
+
+    The events come in file order (by event_timestamp, then event_id, the
+    dirty event last): a list while they fit in memory (EVENT_SPILL_ROWS),
+    otherwise SpilledEvents, their sorted runs on disk. The purchase events
+    are in the same order and carry what an order takes from them.
 
     A visit belongs to one customer on one device, from one place and one
     traffic source; more than 30 minutes of inactivity would end it, and so
@@ -864,7 +932,8 @@ def generate_web_events(
         return str(uuid.UUID(int=uuid_rng.getrandbits(128), version=4))
 
     fake.seed_instance(f"{MASTER_SEED}|visits|{BATCH_DATE}")
-    events: list[dict] = []
+    events = EventRuns(RAW_DIR, EVENT_SPILL_ROWS)
+    purchases: list[dict] = []
     carts: dict[str, list[dict]] = {}
     intervals: dict[int, list[tuple[datetime, datetime]]] = {}
     window = window_days if IS_ANCHOR_BATCH else window_days - 1
@@ -1013,26 +1082,125 @@ def generate_web_events(
                 "event_timestamp": timestamp,
                 "state": session["state"],
             }
-            events.append(event)
+            events.add(event)
             if event_type == "purchase":
+                purchases.append({field: event[field] for field in PURCHASE_FIELDS})
                 carts[event["event_id"]] = [
                     {"product": line["product"], "quantity": line["quantity"]} for line in cart.values()]
                 break   # a purchase ends the visit
 
-    events.sort(key=lambda event: (event["event_timestamp"], event["event_id"]))
+    purchases.sort(key=event_order)
 
     # Dirty event for quarantine testing
-    events.append({**DIRTY_EVENT, "session_id": new_uuid()})
-    return events, carts
+    return events.finish({**DIRTY_EVENT, "session_id": new_uuid()}), purchases, carts
 
 
-def generate_orders(web_events: list[dict], rng: random.Random, count: int) -> tuple[pd.DataFrame, list[str]]:
+# What an order takes from its purchase event (see generate_orders).
+PURCHASE_FIELDS = ("event_id", "event_type", "event_timestamp", "user_id", "campaign_id", "payment_method",
+                   "fraud_score", "country", "city", "state")
+
+
+def event_order(event: dict) -> tuple[str, str]:
+    """The order of web_events.json: by event_timestamp, then event_id."""
+    return event["event_timestamp"], event["event_id"]
+
+
+def event_line(event: dict) -> str:
+    return json.dumps(event, ensure_ascii=False) + "\n"
+
+
+# A spilled run's line: event_timestamp, event_id and the file line, joined by
+# a separator that json.dumps never writes unescaped.
+RUN_SEPARATOR = "\x1f"
+
+
+def spill_dir_prefix(raw_dir: Path) -> str:
+    return f".spill_{raw_dir.name}_"
+
+
+class EventRuns:
+    """A batch's web events while they are generated: in memory, and in sorted runs on disk beyond EVENT_SPILL_ROWS."""
+
+    def __init__(self, raw_dir: Path, limit: int) -> None:
+        self.raw_dir = raw_dir
+        self.limit = limit
+        self.buffer: list[dict] = []
+        self.runs: list[Path] = []
+        self.count = 0
+
+    def __len__(self) -> int:
+        return self.count
+
+    @property
+    def spill_dir(self) -> Path:
+        return self.raw_dir.parent / f"{spill_dir_prefix(self.raw_dir)}{os.getpid()}"
+
+    def add(self, event: dict) -> None:
+        self.buffer.append(event)
+        self.count += 1
+        if len(self.buffer) >= self.limit:
+            self.spill()
+
+    def spill(self) -> None:
+        if not self.runs:
+            # Runs of an interrupted earlier generation of this batch are never merged; remove them first.
+            for stale in self.raw_dir.parent.glob(f"{spill_dir_prefix(self.raw_dir)}*"):
+                shutil.rmtree(stale, ignore_errors=True)
+            self.spill_dir.mkdir(parents=True)
+        self.buffer.sort(key=event_order)
+        path = self.spill_dir / f"run_{len(self.runs):05d}.txt"
+        with path.open("w", encoding="utf-8") as file:
+            for event in self.buffer:
+                file.write(f"{event['event_timestamp']}{RUN_SEPARATOR}{event['event_id']}{RUN_SEPARATOR}{event_line(event)}")
+        self.runs.append(path)
+        self.buffer = []
+
+    def finish(self, dirty_event: dict) -> list[dict] | SpilledEvents:
+        """The events in file order with the dirty event last: the list itself if nothing was spilled."""
+        if not self.runs:
+            self.buffer.sort(key=event_order)
+            self.buffer.append(dirty_event)
+            return self.buffer
+        if self.buffer:
+            self.spill()
+        return SpilledEvents(self.spill_dir, self.runs, dirty_event, self.count + 1)
+
+
+class SpilledEvents:
+    """The web events of a batch too large for memory: sorted runs on disk, merged when the file is written."""
+
+    def __init__(self, folder: Path, runs: list[Path], dirty_event: dict, count: int) -> None:
+        self.folder = folder
+        self.runs = runs
+        self.dirty_event = dirty_event
+        self.count = count
+
+    def __len__(self) -> int:
+        return self.count
+
+    @staticmethod
+    def _read_run(path: Path):
+        with path.open(encoding="utf-8") as file:
+            for line in file:
+                yield tuple(line.split(RUN_SEPARATOR, 2))
+
+    def lines(self):
+        """Every line of web_events.json, in order."""
+        for _, _, line in heapq.merge(*(self._read_run(path) for path in self.runs)):
+            yield line
+        yield event_line(self.dirty_event)
+
+    def remove(self) -> None:
+        shutil.rmtree(self.folder, ignore_errors=True)
+
+
+def generate_orders(purchase_events: list[dict], rng: random.Random, count: int) -> tuple[pd.DataFrame, list[str]]:
     """One order per purchase event, without amounts; and each order's purchase event.
 
-    count is a ceiling, not a reason to fabricate transactions. The explicit
-    duplicate-ID quarantine fixture is applied after sampling.
+    purchase_events are in web_events.json order. count is a ceiling, not a
+    reason to fabricate transactions. The explicit duplicate-ID quarantine
+    fixture is applied after sampling.
     """
-    purchase_events = [event for event in web_events if event.get("event_type") == "purchase"]
     selected = purchase_events if len(purchase_events) <= count else sorted(
         rng.sample(purchase_events, count), key=lambda event: (event["event_timestamp"], event["event_id"]))
     if len(selected) < 12:
@@ -1040,7 +1208,7 @@ def generate_orders(web_events: list[dict], rng: random.Random, count: int) -> t
 
     rows = [
         {
-            "order_id": fact_id(n),
+            "order_id": own_fact_id(n),
             "user_id": event["user_id"],
             "campaign_id": event["campaign_id"],
             "order_timestamp": event["event_timestamp"],
@@ -1075,7 +1243,7 @@ def generate_order_items(orders: pd.DataFrame, purchases: list[str], carts: dict
             discounted_price = float(product["discounted_price"])
             rows.append(
                 {
-                    "order_item_id": fact_id(len(rows) + 1),
+                    "order_item_id": own_fact_id(len(rows) + 1),
                     "order_id": int(order_id),
                     "product_id": int(product["product_id"]),
                     "product_name": product["product_name"],
@@ -1187,7 +1355,7 @@ def add_order_status_and_charges(orders: pd.DataFrame) -> pd.DataFrame:
 
 
 def generate_orders_and_items(
-    web_events: list[dict],
+    purchase_events: list[dict],
     carts: dict[str, list[dict]],
     rng: random.Random,
     order_count: int,
@@ -1200,7 +1368,7 @@ def generate_orders_and_items(
        the cart value the purchase event shows
     3. the dirty records last, so they stay dirty
     """
-    orders, purchases = generate_orders(web_events, rng, order_count)
+    orders, purchases = generate_orders(purchase_events, rng, order_count)
     items = generate_order_items(orders, purchases, carts)
 
     totals = items.groupby("order_id")["line_amount"].sum().round(2)
@@ -1297,7 +1465,7 @@ def generate_ad_spend(campaigns: pd.DataFrame, rng: random.Random, window_days: 
             expected = regional_spend * roas / value
             conversions = min(clicks, int(expected) + (daily_rng.random() < expected - int(expected)))
             rows.append({
-                "spend_id": fact_id(len(rows) + 1), "campaign_id": campaign_id,
+                "spend_id": own_fact_id(len(rows) + 1), "campaign_id": campaign_id,
                 "traffic_source": campaign["traffic_source"], "spend_date": spend_day.isoformat(),
                 "country": "India", "state": region,
                 "impressions": impressions, "clicks": clicks,
@@ -1373,10 +1541,11 @@ def add_attribute_fixtures(outputs: dict[str, pd.DataFrame]) -> dict[str, dict[i
     return fixtures
 
 
-def write_json_lines(path: Path, records: list[dict]) -> None:
+def write_json_lines(path: Path, records: list[dict] | SpilledEvents) -> None:
+    lines = records.lines() if isinstance(records, SpilledEvents) else (event_line(record) for record in records)
     with path.open("w", encoding="utf-8") as file:
-        for record in records:
-            file.write(json.dumps(record, ensure_ascii=False) + "\n")
+        for line in lines:
+            file.write(line)
 
 
 def fsync_file(path: Path) -> None:
@@ -1403,7 +1572,7 @@ def raw_dir_is_complete(raw_dir: Path) -> bool:
 
 
 def build_batch() -> dict[str, object]:
-    customers = master_data("customers", generate_customers())
+    customers = master_data("customers", generate_customers(NUM_CUSTOMERS))
     products = master_data("products", generate_products())
     campaigns = master_data("campaigns", generate_campaigns())
 
@@ -1412,10 +1581,10 @@ def build_batch() -> dict[str, object]:
     validate_counts(counts)
 
     fact_rng = stream("facts", BATCH_DATE)
-    web_events, carts = generate_web_events(
+    web_events, purchases, carts = generate_web_events(
         customers, products, campaigns, fact_rng, stream("uuid", BATCH_DATE), window_days, counts["web_events"]
     )
-    orders, order_items = generate_orders_and_items(web_events, carts, fact_rng, counts["orders"])
+    orders, order_items = generate_orders_and_items(purchases, carts, fact_rng, counts["orders"])
     ad_spend = generate_ad_spend(campaigns, stream("spend", BATCH_DATE), window_days, counts["ad_spend"])
     truth = [{"kind": "contract", "generator_version": GENERATOR_VERSION, "currency": CURRENCY,
               "monetary_fields": "every amount and price in every file is in Indian rupees (INR)",
@@ -1431,7 +1600,8 @@ def build_batch() -> dict[str, object]:
         truth.append({"kind": "delivery_scenario", "spend_id": int(row["spend_id"]),
                       "delivery_surge": delivery_surge(int(row["campaign_id"]), date.fromisoformat(row["spend_date"]))})
     for table, fixtures in {
-        "customers.csv": {0: "invalid_email", 1: "missing_city", 2: "negative_age", 500: "duplicate_customer"},
+        # The duplicate customer is appended after the NUM_CUSTOMERS base rows.
+        "customers.csv": {0: "invalid_email", 1: "missing_city", 2: "negative_age", NUM_CUSTOMERS: "duplicate_customer"},
         "products.csv": {0: "missing_category", 1: "nonpositive_price", 2: "invalid_discount", 150: "duplicate_product"},
         "campaigns.csv": {0: "missing_id", 1: "invalid_channel", 2: "invalid_period"},
         "orders.csv": {0: "duplicate_order_id", 2: "negative_total", 3: "missing_customer", 4: "invalid_timestamp"},
@@ -1486,6 +1656,11 @@ def write_batch(raw_dir: Path, outputs: dict[str, object]) -> None:
     tmp_dir.rename(raw_dir)
     fsync_dir(raw_dir.parent)
 
+    # The spilled runs of the web events are in the file now.
+    for output in outputs.values():
+        if isinstance(output, SpilledEvents):
+            output.remove()
+
 
 def batch_generator_version(folder: Path) -> str:
     """The generator version a raw batch records in its truth file ('unrecorded' if it has none)."""
@@ -1504,6 +1679,17 @@ def earlier_batches_of_another_version() -> list[tuple[str, str]]:
         version = batch_generator_version(RAW_DIR.parent / f"batch_date={day.isoformat()}")
         if version != GENERATOR_VERSION:
             found.append((day.isoformat(), version))
+    return found
+
+
+def earlier_batches_of_another_size() -> list[tuple[str, int]]:
+    """(batch date, its number of customers) of every earlier raw batch whose shop size is not NUM_CUSTOMERS."""
+    found = []
+    for day in earlier_batch_days():
+        user_ids = pd.read_csv(RAW_DIR.parent / f"batch_date={day.isoformat()}" / "customers.csv", usecols=["user_id"])
+        count = int(pd.to_numeric(user_ids["user_id"], errors="coerce").max())
+        if count != NUM_CUSTOMERS:
+            found.append((day.isoformat(), count))
     return found
 
 
@@ -1542,6 +1728,16 @@ def main() -> None:
             f"were written by a different version: {listed}. A batch continues from the batches before it, so all "
             f"raw batches must come from one generator version. Regenerate the raw data from the first batch "
             f"({ANCHOR_DATE.isoformat()}) in date order, or remove those batches."
+        )
+
+    # A batch continues the customers of the batches before it: one shop size for all of them.
+    other_sizes = earlier_batches_of_another_size()
+    if other_sizes:
+        listed = ", ".join(f"{name} ({count} customers)" for name, count in other_sizes)
+        raise SystemExit(
+            f"Cannot generate BATCH_DATE={BATCH_DATE} with P2_NUM_CUSTOMERS={NUM_CUSTOMERS}: earlier raw batches "
+            f"have a different number of customers: {listed}. Use the same P2_NUM_CUSTOMERS for every batch, or "
+            f"remove those batches."
         )
 
     newer = newer_raw_batches()
