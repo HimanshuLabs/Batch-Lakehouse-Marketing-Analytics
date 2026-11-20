@@ -280,10 +280,10 @@ BEGIN
                 COALESCE(
                     SUM(
                         COALESCE(
-                            warehouse.safe_numeric(to_jsonb(src)->>'net_revenue'),
-                            warehouse.safe_numeric(to_jsonb(src)->>'revenue'),
-                            warehouse.safe_numeric(to_jsonb(src)->>'total_revenue'),
-                            warehouse.safe_numeric(to_jsonb(src)->>'cart_value'),
+                            warehouse.safe_numeric(src.r->>'net_revenue'),
+                            warehouse.safe_numeric(src.r->>'revenue'),
+                            warehouse.safe_numeric(src.r->>'total_revenue'),
+                            warehouse.safe_numeric(src.r->>'cart_value'),
                             0
                         )
                     ),
@@ -291,7 +291,7 @@ BEGIN
                 )::NUMERIC,
                 2
             )
-            FROM %s src
+            FROM (SELECT to_jsonb(s) AS r FROM %s s OFFSET 0) src
         $sql$, source_table)
         INTO source_value;
     END IF;
@@ -334,9 +334,9 @@ BEGIN
                 COALESCE(
                     SUM(
                         COALESCE(
-                            warehouse.safe_numeric(to_jsonb(src)->>'spend_amount'),
-                            warehouse.safe_numeric(to_jsonb(src)->>'ad_spend'),
-                            warehouse.safe_numeric(to_jsonb(src)->>'cost'),
+                            warehouse.safe_numeric(src.r->>'spend_amount'),
+                            warehouse.safe_numeric(src.r->>'ad_spend'),
+                            warehouse.safe_numeric(src.r->>'cost'),
                             0
                         )
                     ),
@@ -344,7 +344,7 @@ BEGIN
                 )::NUMERIC,
                 2
             )
-            FROM %s src
+            FROM (SELECT to_jsonb(s) AS r FROM %s s OFFSET 0) src
         $sql$, source_table)
         INTO source_value;
     END IF;
@@ -834,6 +834,7 @@ BEGIN
     FROM (
         SELECT to_jsonb(s) AS r
         FROM staging.stg_gold_fact_web_events s
+        OFFSET 0
     ) src
     JOIN warehouse.fact_web_events fwe
         ON fwe.event_id = NULLIF(src.r->>'event_id', '');

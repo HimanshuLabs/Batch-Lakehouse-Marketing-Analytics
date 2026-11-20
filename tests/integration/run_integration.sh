@@ -81,6 +81,11 @@ for part in lake warehouse marts; do
     fi
 done
 
+if [ -n "${P2_IT_EQUIVALENCE_BASE:-}" ]; then
+    echo "################ old SQL against new SQL"
+    bash tests/integration/equivalence_old_new.sh "$WORK/equivalence" "$P2_IT_EQUIVALENCE_BASE"
+fi
+
 echo "################ rebuild and insert-order checks"
 bash tests/integration/rebuild_warehouse.sh "$WORK/rebuild"
 

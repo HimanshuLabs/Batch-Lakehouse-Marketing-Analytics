@@ -58,6 +58,15 @@ if [[ -n "${P2_READER_PASSWORD:-}" ]]; then
   READER_ARGS=(-v "p2_reader_password=${P2_READER_PASSWORD}")
 fi
 
+# Session settings of the build (unset or empty: the defaults in
+# sql/warehouse/begin_generation.sql; temp_buffers defaults here).
+BUILD_ARGS=(
+  -v "build_work_mem=${P2_BUILD_WORK_MEM:-}"
+  -v "build_hash_mem_multiplier=${P2_BUILD_HASH_MEM_MULTIPLIER:-}"
+  -v "build_maintenance_work_mem=${P2_BUILD_MAINTENANCE_WORK_MEM:-}"
+  -v "build_temp_buffers=${P2_BUILD_TEMP_BUFFERS:-64MB}"
+)
+
 for sql_path in "${SQL_FILES[@]}"; do
   if [[ ! -f "$sql_path" ]]; then
     echo "ERROR: SQL file not found: $sql_path"
@@ -74,8 +83,17 @@ sql_input() {
   fi
   local last=$(( ${#SQL_FILES[@]} - 1 )) index
   printf 'BEGIN;\n'
+  # The build's session settings: begin_generation.sql applies them for the
+  # transaction. Every statement's time goes to the log (\timing).
+  printf "SELECT set_config('p2.build_work_mem', :'build_work_mem', false),\n"
+  printf "       set_config('p2.build_hash_mem_multiplier', :'build_hash_mem_multiplier', false),\n"
+  printf "       set_config('p2.build_maintenance_work_mem', :'build_maintenance_work_mem', false);\n"
+  printf '\\timing on\n'
+  # Only possible before the session's first temporary table, so it is set here.
+  printf "SET LOCAL temp_buffers = :'build_temp_buffers';\n"
   for index in "${!SQL_FILES[@]}"; do
     printf '\n-- ---- %s\n' "${SQL_FILES[$index]}"
+    printf '\\echo ---- p2 step: %s\n' "${SQL_FILES[$index]##*/}"
     if [[ "$index" -lt "$last" ]]; then
       grep -vxE '(BEGIN|COMMIT);[[:space:]]*' "${SQL_FILES[$index]}" || true
     else
@@ -120,7 +138,7 @@ if [[ "$RUN_MODE" == "docker" ]]; then
   fi
 
   docker exec -i "$PGCONTAINER" \
-    psql -v ON_ERROR_STOP=1 -v pipeline_run_id="${P2_RUN_ID}" "${READER_ARGS[@]}" -U "$PGUSER" -d "$PGDATABASE" \
+    psql -v ON_ERROR_STOP=1 -v pipeline_run_id="${P2_RUN_ID}" "${READER_ARGS[@]}" "${BUILD_ARGS[@]}" -U "$PGUSER" -d "$PGDATABASE" \
     < <(sql_input) \
     2>&1 | tee "$LOG_FILE" || SQL_STATUS=$?
 
@@ -142,6 +160,7 @@ elif [[ "$RUN_MODE" == "host" ]]; then
     --set ON_ERROR_STOP=1 \
     --set pipeline_run_id="${P2_RUN_ID}" \
     "${READER_ARGS[@]}" \
+    "${BUILD_ARGS[@]}" \
     --file <(sql_input) \
     2>&1 | tee "$LOG_FILE" || SQL_STATUS=$?
 
