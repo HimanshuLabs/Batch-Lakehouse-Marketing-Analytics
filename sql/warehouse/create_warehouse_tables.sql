@@ -792,7 +792,7 @@ BEGIN
                             coalesce(nullif(r->>'city', ''), nullif(r->>'home_city', ''), 'Unknown') AS city,
                             coalesce(nullif(r->>'state', ''), nullif(r->>'home_state', ''), 'Unknown') AS state,
                             coalesce(nullif(r->>'country', ''), 'Unknown') AS country
-                        FROM (SELECT to_jsonb(s) AS r FROM %s s) src
+                        FROM (SELECT to_jsonb(s) AS r FROM %s s OFFSET 0) src
                     ) mapped
                 ) keyed
                 WHERE region_nk <> 'unknown|unknown|unknown'
@@ -846,7 +846,7 @@ BEGIN
                             nullif(r->>'marketing_channel', ''),
                             'Unknown'
                         ) AS channel_value
-                        FROM (SELECT to_jsonb(s) AS r FROM %s s) src
+                        FROM (SELECT to_jsonb(s) AS r FROM %s s OFFSET 0) src
                     ) mapped
                 ) keyed
                 WHERE channel_nk <> 'unknown'
@@ -856,6 +856,8 @@ BEGIN
         END IF;
     END LOOP;
 END $$;
+
+ANALYZE warehouse.dim_region, warehouse.dim_channel;
 
 -- ---------------------------------------------------------------------------
 -- Load SCD2 dimensions
@@ -879,7 +881,7 @@ BEGIN
         EXECUTE format($sql$
             CREATE TEMP TABLE dimension_input ON COMMIT DROP AS
             WITH src AS (
-                SELECT to_jsonb(s) AS r FROM %s s
+                SELECT to_jsonb(s) AS r FROM %s s OFFSET 0
             ),
             mapped AS (
                 SELECT
@@ -1004,7 +1006,7 @@ BEGIN
         EXECUTE format($sql$
             CREATE TEMP TABLE dimension_input ON COMMIT DROP AS
             WITH src AS (
-                SELECT to_jsonb(s) AS r FROM %s s
+                SELECT to_jsonb(s) AS r FROM %s s OFFSET 0
             ),
             mapped AS (
                 SELECT
@@ -1115,7 +1117,7 @@ BEGIN
         EXECUTE format($sql$
             CREATE TEMP TABLE dimension_input ON COMMIT DROP AS
             WITH src AS (
-                SELECT to_jsonb(s) AS r FROM %s s
+                SELECT to_jsonb(s) AS r FROM %s s OFFSET 0
             ),
             mapped AS (
                 SELECT
@@ -1215,6 +1217,8 @@ BEGIN
     END IF;
 END $$;
 
+ANALYZE warehouse.dim_customer, warehouse.dim_product, warehouse.dim_campaign;
+
 -- ---------------------------------------------------------------------------
 -- Load dim_date from all available fact staging tables
 -- ---------------------------------------------------------------------------
@@ -1274,7 +1278,7 @@ BEGIN
                         warehouse.safe_date(r->>'date'),
                         warehouse.safe_date(r->>'gold_processed_date')
                     ) AS d
-                    FROM (SELECT to_jsonb(s) AS r FROM %s s) src
+                    FROM (SELECT to_jsonb(s) AS r FROM %s s OFFSET 0) src
                 ) dates
                 WHERE d IS NOT NULL
                 ON CONFLICT (date_sk) DO NOTHING;
@@ -1282,6 +1286,8 @@ BEGIN
         END IF;
     END LOOP;
 END $$;
+
+ANALYZE warehouse.dim_date;
 
 -- ---------------------------------------------------------------------------
 -- Load facts
@@ -1304,7 +1310,7 @@ BEGIN
     ELSE
         EXECUTE format($sql$
             WITH src AS (
-                SELECT to_jsonb(s) AS r FROM %s s
+                SELECT to_jsonb(s) AS r FROM %s s OFFSET 0
             ),
             base AS (
                 SELECT
@@ -1338,6 +1344,7 @@ BEGIN
                     (warehouse.safe_date(r->>'ingestion_date')::TIMESTAMP AT TIME ZONE 'UTC') AS source_updated_at,
                     md5(r::TEXT) AS row_fingerprint
                 FROM src
+                OFFSET 0
             )
             INSERT INTO warehouse.fact_orders (
                 order_sk, order_id, customer_sk, campaign_sk, order_date_sk, region_sk, channel_sk,
@@ -1423,6 +1430,8 @@ BEGIN
     END IF;
 END $$;
 
+ANALYZE warehouse.fact_orders;
+
 DO $$
 DECLARE
     source_table TEXT;
@@ -1440,7 +1449,7 @@ BEGIN
     ELSE
         EXECUTE format($sql$
             WITH src AS (
-                SELECT to_jsonb(s) AS r FROM %s s
+                SELECT to_jsonb(s) AS r FROM %s s OFFSET 0
             ),
             base AS (
                 SELECT
@@ -1479,6 +1488,7 @@ BEGIN
                     (warehouse.safe_date(r->>'ingestion_date')::TIMESTAMP AT TIME ZONE 'UTC') AS source_updated_at,
                     md5(r::TEXT) AS row_fingerprint
                 FROM src
+                OFFSET 0
             )
             INSERT INTO warehouse.fact_order_items (
                 order_item_sk, order_item_nk, order_sk, order_id, customer_sk, product_sk,
@@ -1564,6 +1574,7 @@ BEGIN
     END IF;
 END $$;
 
+ANALYZE warehouse.fact_order_items;
 
 -- ---------------------------------------------------------------------------
 -- Every calendar day from the first fact date to the last one, including the
@@ -1595,6 +1606,8 @@ FROM (
     WHERE span.first_day IS NOT NULL
 ) days
 ON CONFLICT (date_sk) DO NOTHING;
+
+ANALYZE warehouse.dim_date;
 
 -- ---------------------------------------------------------------------------
 -- Backfill order-level item_count from loaded order-item facts
@@ -1662,7 +1675,7 @@ BEGIN
     ELSE
         EXECUTE format($sql$
             WITH src AS (
-                SELECT to_jsonb(s) AS r FROM %s s
+                SELECT to_jsonb(s) AS r FROM %s s OFFSET 0
             ),
             base AS (
                 SELECT
@@ -1690,6 +1703,7 @@ BEGIN
                     (warehouse.safe_date(r->>'ingestion_date')::TIMESTAMP AT TIME ZONE 'UTC') AS source_updated_at,
                     md5(r::TEXT) AS row_fingerprint
                 FROM src
+                OFFSET 0
             )
             INSERT INTO warehouse.fact_campaign_spend (
                 campaign_spend_sk, campaign_spend_nk, campaign_sk, spend_date_sk, region_sk, channel_sk,
@@ -1744,6 +1758,8 @@ BEGIN
     END IF;
 END $$;
 
+ANALYZE warehouse.fact_campaign_spend;
+
 -- ---------------------------------------------------------------------------
 -- Web events
 -- ---------------------------------------------------------------------------
@@ -1774,7 +1790,7 @@ BEGIN
         EXECUTE format($sql$
             CREATE TEMP TABLE web_events_resolved ON COMMIT DROP AS
             WITH src AS (
-                SELECT to_jsonb(s) AS r FROM %s s
+                SELECT to_jsonb(s) AS r FROM %s s OFFSET 0
             ),
             base AS (
                 SELECT
@@ -1816,6 +1832,7 @@ BEGIN
                     (warehouse.safe_date(r->>'ingestion_date')::TIMESTAMP AT TIME ZONE 'UTC') AS source_updated_at,
                     md5(r::TEXT) AS row_fingerprint
                 FROM src
+                OFFSET 0
             ),
             deduplicated AS (
                 SELECT DISTINCT ON (event_id) *
@@ -1864,6 +1881,8 @@ BEGIN
             LEFT JOIN warehouse.dim_channel dch
                 ON dch.channel_nk = warehouse.channel_nk(b.channel_value);
         $sql$, source_table);
+
+        ANALYZE web_events_resolved;
 
         INSERT INTO warehouse.fact_web_events (
             event_sk, event_id, session_id, customer_sk, product_sk, campaign_sk,
@@ -1947,6 +1966,8 @@ BEGIN
     END IF;
 END $$;
 
+ANALYZE warehouse.fact_web_events;
+
 INSERT INTO warehouse.fact_conversions (
     conversion_sk, conversion_nk, event_sk, event_id, customer_sk, product_sk, campaign_sk,
     conversion_date_sk, region_sk, channel_sk, conversion_timestamp,
@@ -1998,6 +2019,7 @@ ON CONFLICT (conversion_nk) DO UPDATE SET
     source_updated_at = EXCLUDED.source_updated_at,
     warehouse_loaded_at = CURRENT_TIMESTAMP;
 
+ANALYZE warehouse.fact_conversions;
 
 -- ---------------------------------------------------------------------------
 -- record_hash: an md5 of each fact row's business columns (natural IDs, times
@@ -2090,6 +2112,9 @@ CREATE INDEX IF NOT EXISTS idx_fact_web_events_customer
 
 CREATE INDEX IF NOT EXISTS idx_fact_conversions_campaign_date
     ON warehouse.fact_conversions(campaign_sk, conversion_date_sk);
+
+ANALYZE warehouse.fact_orders, warehouse.fact_order_items, warehouse.fact_campaign_spend,
+        warehouse.fact_web_events, warehouse.fact_conversions;
 
 COMMIT;
 

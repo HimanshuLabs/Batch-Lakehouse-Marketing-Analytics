@@ -41,6 +41,27 @@ Run it only through the build, which supplies the transaction:
 SAVEPOINT generation_needs_the_build_transaction;
 RELEASE SAVEPOINT generation_needs_the_build_transaction;
 
+-- Session settings of the build, for this transaction only (SET LOCAL
+-- semantics). scripts/run_warehouse_sql.sh passes P2_BUILD_WORK_MEM,
+-- P2_BUILD_HASH_MEM_MULTIPLIER and P2_BUILD_MAINTENANCE_WORK_MEM as p2.build_*;
+-- unset or empty gives the defaults below. No parallel query inside the build:
+-- with a larger work_mem a parallel hash would not fit Docker's 64 MB /dev/shm.
+DO $$
+DECLARE
+    setting RECORD;
+BEGIN
+    FOR setting IN SELECT * FROM (VALUES
+        ('work_mem', 'p2.build_work_mem', '64MB'),
+        ('hash_mem_multiplier', 'p2.build_hash_mem_multiplier', '2'),
+        ('maintenance_work_mem', 'p2.build_maintenance_work_mem', '256MB')
+    ) AS settings(name, source, fallback)
+    LOOP
+        PERFORM set_config(setting.name,
+                           coalesce(nullif(current_setting(setting.source, true), ''), setting.fallback), true);
+    END LOOP;
+    PERFORM set_config('max_parallel_workers_per_gather', '0', true);
+END $$;
+
 -- ---------------------------------------------------------------------------
 -- 0. A view that someone else made on the warehouse (a consumer's own view on
 --    a mart, say) is bound to the tables of the generation it was created on.
@@ -197,4 +218,17 @@ BEGIN
     PERFORM set_config('p2.build_txid', txid_current()::TEXT, true);
 
     RAISE NOTICE 'New warehouse generation started; the live one is retired as *%.', tag;
+END $$;
+
+-- Planner statistics for the staging tables this build reads.
+DO $$
+DECLARE
+    staging_table REGCLASS;
+BEGIN
+    FOR staging_table IN
+        SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'staging' AND c.relkind = 'r' ORDER BY c.relname
+    LOOP
+        EXECUTE format('ANALYZE %s', staging_table);
+    END LOOP;
 END $$;

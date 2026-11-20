@@ -1033,6 +1033,9 @@ BEGIN
                            relation, column_list, day_end);
         END LOOP;
 
+        ANALYZE pg_temp.fact_orders, pg_temp.fact_order_items, pg_temp.fact_web_events, pg_temp.fact_campaign_spend,
+                pg_temp.fact_conversions, pg_temp.dim_customer, pg_temp.dim_product, pg_temp.dim_campaign;
+
         -- The lifetime marts' own queries on that day's knowledge; a row exists
         -- from the entity's first activity on.
         EXECUTE format('INSERT INTO marts.mart_customer_daily_snapshot SELECT $1, %s FROM (%s) m '
@@ -1046,6 +1049,7 @@ BEGIN
                        'WHERE m.order_count + m.cancelled_order_count + m.web_event_count + m.warehouse_conversion_count '
                        '+ m.impressions > 0 OR m.total_spend > 0',
                        as_of.full_date, campaign_query);
+        RAISE NOTICE 'p2-timing snapshot % done at %', as_of.full_date, clock_timestamp();
     END LOOP;
 
     -- The as-of copies carry the warehouse tables' names (the lifetime marts'
@@ -1064,6 +1068,8 @@ ALTER TABLE marts.mart_product_daily_snapshot
 ALTER TABLE marts.mart_campaign_daily_snapshot
     ALTER COLUMN snapshot_date SET NOT NULL, ALTER COLUMN campaign_id SET NOT NULL,
     ADD PRIMARY KEY (campaign_id, snapshot_date);
+
+ANALYZE marts.mart_customer_daily_snapshot, marts.mart_product_daily_snapshot, marts.mart_campaign_daily_snapshot;
 
 COMMENT ON TABLE marts.mart_customer_daily_snapshot IS
 'One row per customer and business date from the customer''s first activity: the columns of mart_customer_360 as of the end of snapshot_date, computed only from what was known then (orders, order statuses, refunds, web events and dimension versions up to that date).';
@@ -1618,8 +1624,9 @@ CROSS JOIN (
          WHERE s.snapshot_date = (SELECT MAX(snapshot_date) FROM marts.mart_customer_daily_snapshot)
            -- days_since_last_order is counted to snapshot_date in the snapshot
            -- and to the latest order date in the lifetime mart: compared apart.
-           AND (to_jsonb(s) - 'snapshot_date' - 'days_since_last_order')
-               NOT IN (SELECT to_jsonb(m) - 'days_since_last_order' FROM marts.mart_customer_360 m))
+           AND NOT EXISTS (SELECT 1 FROM marts.mart_customer_360 m
+                           WHERE to_jsonb(m) - 'days_since_last_order'
+                                 = to_jsonb(s) - 'snapshot_date' - 'days_since_last_order'))
       + (SELECT COUNT(*) FROM marts.mart_customer_daily_snapshot s
          WHERE s.days_since_last_order IS DISTINCT FROM s.snapshot_date - warehouse.business_date(s.last_order_timestamp))
       + (SELECT COUNT(*) FROM marts.mart_customer_360 m
@@ -1666,7 +1673,8 @@ CROSS JOIN (
     SELECT (
         (SELECT COUNT(*) FROM marts.mart_product_daily_snapshot s
          WHERE s.snapshot_date = (SELECT MAX(snapshot_date) FROM marts.mart_product_daily_snapshot)
-           AND (to_jsonb(s) - 'snapshot_date') NOT IN (SELECT to_jsonb(m) FROM marts.mart_product_sales m))
+           AND NOT EXISTS (SELECT 1 FROM marts.mart_product_sales m
+                           WHERE to_jsonb(m) = to_jsonb(s) - 'snapshot_date'))
       + (SELECT COUNT(*) FROM marts.mart_product_sales m
          WHERE (m.order_count + m.cancelled_units + m.product_web_event_count > 0)
            AND NOT EXISTS (SELECT 1 FROM marts.mart_product_daily_snapshot s
@@ -1711,7 +1719,8 @@ CROSS JOIN (
     SELECT (
         (SELECT COUNT(*) FROM marts.mart_campaign_daily_snapshot s
          WHERE s.snapshot_date = (SELECT MAX(snapshot_date) FROM marts.mart_campaign_daily_snapshot)
-           AND (to_jsonb(s) - 'snapshot_date') NOT IN (SELECT to_jsonb(m) FROM marts.mart_campaign_performance m))
+           AND NOT EXISTS (SELECT 1 FROM marts.mart_campaign_performance m
+                           WHERE to_jsonb(m) = to_jsonb(s) - 'snapshot_date'))
       + (SELECT COUNT(*) FROM marts.mart_campaign_performance m
          WHERE (m.order_count + m.cancelled_order_count + m.web_event_count + m.warehouse_conversion_count + m.impressions > 0 OR m.total_spend > 0)
            AND NOT EXISTS (SELECT 1 FROM marts.mart_campaign_daily_snapshot s
