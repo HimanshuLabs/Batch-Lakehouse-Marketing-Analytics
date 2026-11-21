@@ -1413,8 +1413,16 @@ BEGIN
                 order_item_sk, order_item_nk, order_sk, order_id, customer_sk, product_sk,
                 order_date_sk, region_sk, channel_sk, order_timestamp,
                 quantity, unit_price, discount_percent, gross_amount, discount_amount, line_revenue, refund_amount,
-                customer_id, product_id, source_updated_at
+                customer_id, product_id, source_updated_at, record_hash
             )
+            -- record_hash (see the record_hash section below), from each value as the column stores it.
+            SELECT f.*, md5(array_to_string(ARRAY[
+                f.order_item_nk, f.order_id, f.customer_id, f.product_id, (f.order_timestamp::TIMESTAMPTZ AT TIME ZONE 'UTC')::TEXT,
+                f.quantity::INTEGER::TEXT, f.unit_price::NUMERIC(18, 2)::TEXT, f.discount_percent::NUMERIC(9, 4)::TEXT,
+                f.gross_amount::NUMERIC(18, 2)::TEXT, f.discount_amount::NUMERIC(18, 2)::TEXT,
+                f.line_revenue::NUMERIC(18, 2)::TEXT, f.refund_amount::NUMERIC(18, 2)::TEXT
+            ], '|', '<NULL>'))
+            FROM (
             SELECT DISTINCT ON (b.order_item_nk)
                 warehouse.deterministic_fact_sk('order_item', b.order_item_nk) AS order_item_sk,
                 b.order_item_nk,
@@ -1468,7 +1476,8 @@ BEGIN
                 ON dr.region_nk = warehouse.region_nk(b.city, b.state, b.country)
             LEFT JOIN warehouse.dim_channel dch
                 ON dch.channel_nk = warehouse.channel_nk(b.channel_value)
-            ORDER BY b.order_item_nk, b.order_ts DESC NULLS LAST, b.row_fingerprint;
+            ORDER BY b.order_item_nk, b.order_ts DESC NULLS LAST, b.row_fingerprint
+            ) f;
         $sql$, source_table);
     END IF;
 END $$;
@@ -1607,8 +1616,15 @@ BEGIN
             INSERT INTO warehouse.fact_campaign_spend (
                 campaign_spend_sk, campaign_spend_nk, campaign_sk, spend_date_sk, region_sk, channel_sk,
                 spend_date, spend_amount, impressions, clicks, conversions, attributed_revenue,
-                campaign_id, source_updated_at
+                campaign_id, source_updated_at, record_hash
             )
+            -- record_hash (see the record_hash section below), from each value as the column stores it.
+            SELECT f.*, md5(array_to_string(ARRAY[
+                f.campaign_spend_nk, f.campaign_id, f.spend_date::DATE::TEXT, f.spend_amount::NUMERIC(18, 2)::TEXT,
+                f.impressions::BIGINT::TEXT, f.clicks::BIGINT::TEXT,
+                f.conversions::BIGINT::TEXT, f.attributed_revenue::NUMERIC(18, 2)::TEXT
+            ], '|', '<NULL>'))
+            FROM (
             SELECT DISTINCT ON (b.campaign_spend_nk)
                 warehouse.deterministic_fact_sk('campaign_spend', b.campaign_spend_nk) AS campaign_spend_sk,
                 b.campaign_spend_nk,
@@ -1638,7 +1654,8 @@ BEGIN
                 ON dr.region_nk = warehouse.region_nk(NULL, b.state, b.country)
             LEFT JOIN warehouse.dim_channel dch
                 ON dch.channel_nk = warehouse.channel_nk(b.channel_value)
-            ORDER BY b.campaign_spend_nk, b.spend_date DESC NULLS LAST, b.row_fingerprint;
+            ORDER BY b.campaign_spend_nk, b.spend_date DESC NULLS LAST, b.row_fingerprint
+            ) f;
         $sql$, source_table);
     END IF;
 END $$;
@@ -1777,8 +1794,18 @@ BEGIN
             engagement_score, purchase_probability, cart_abandonment_probability,
             event_value, api_latency_ms, page_load_time_ms, fraud_score,
             schema_version, source_system,
-            customer_id, product_id, campaign_id, source_updated_at
+            customer_id, product_id, campaign_id, source_updated_at, record_hash
         )
+        -- record_hash (see the record_hash section below), from each value as the column stores it.
+        SELECT f.*, md5(array_to_string(ARRAY[
+            f.event_id, f.session_id, f.customer_id, f.product_id, f.campaign_id, (f.event_ts::TIMESTAMPTZ AT TIME ZONE 'UTC')::TEXT, f.event_type,
+            f.user_journey_stage, f.device_type, f.operating_system, f.browser, f.network_type, f.traffic_source, f.search_query,
+            f.time_on_page_sec::INTEGER::TEXT, f.scroll_depth_percent::NUMERIC(9, 4)::TEXT, f.engagement_score::NUMERIC(18, 6)::TEXT,
+            f.purchase_probability::NUMERIC(18, 6)::TEXT, f.cart_abandonment_probability::NUMERIC(18, 6)::TEXT,
+            f.event_value::NUMERIC(18, 2)::TEXT, f.api_latency_ms::INTEGER::TEXT, f.page_load_time_ms::INTEGER::TEXT,
+            f.fraud_score::NUMERIC(18, 6)::TEXT, f.schema_version, f.source_system
+        ], '|', '<NULL>'))
+        FROM (
         SELECT
             warehouse.deterministic_fact_sk('web_event', b.event_id) AS event_sk,
             b.event_id,
@@ -1814,7 +1841,8 @@ BEGIN
             b.campaign_id,
             b.source_updated_at
         FROM web_events_resolved b
-        ORDER BY b.event_id;
+        ORDER BY b.event_id
+        ) f;
     END IF;
 END $$;
 
@@ -1824,8 +1852,14 @@ INSERT INTO warehouse.fact_conversions (
     conversion_sk, conversion_nk, event_sk, event_id, customer_sk, product_sk, campaign_sk,
     conversion_date_sk, region_sk, channel_sk, conversion_timestamp,
     conversion_type, conversion_value,
-    customer_id, product_id, campaign_id, source_updated_at
+    customer_id, product_id, campaign_id, source_updated_at, record_hash
 )
+-- record_hash (see the record_hash section below), from each value as the column stores it.
+SELECT f.*, md5(array_to_string(ARRAY[
+    f.conversion_nk, f.event_id, f.customer_id, f.product_id, f.campaign_id, (f.event_timestamp::TIMESTAMPTZ AT TIME ZONE 'UTC')::TEXT, f.conversion_type,
+    f.conversion_value::NUMERIC(18, 2)::TEXT
+], '|', '<NULL>'))
+FROM (
 SELECT
     warehouse.deterministic_fact_sk('conversion', 'conversion|' || event_id) AS conversion_sk,
     'conversion|' || event_id AS conversion_nk,
@@ -1852,44 +1886,26 @@ WHERE lower(event_type) IN (
     'checkout_completed',
     'order_completed',
     'payment_success'
-);
+)
+) f;
 
 ANALYZE warehouse.fact_conversions;
 
 -- ---------------------------------------------------------------------------
 -- record_hash: an md5 of each fact row's business columns (natural IDs, times
--- and measures; no surrogate key, no load time). Computed after every load and
--- backfill above, so it describes the row as consumers read it, and a rebuild
--- from the same data gives the same hash. NULL is hashed as the text <NULL>.
+-- and measures; no surrogate key, no load time), so it describes the row as
+-- consumers read it, and a rebuild from the same data gives the same hash.
+-- NULL is hashed as the text <NULL>. Each value is hashed as its column stores
+-- it (cast to the column's type), so NUMERIC(18, 2) hashes as 100.50.
+-- Order items, campaign spend, web events and conversions compute it in their
+-- INSERT. Orders compute it here: item_count, gross_amount and discount_amount
+-- are only final after the backfills above.
 -- ---------------------------------------------------------------------------
 
 UPDATE warehouse.fact_orders SET record_hash = md5(array_to_string(ARRAY[
     order_id, customer_id, campaign_id, (order_timestamp AT TIME ZONE 'UTC')::TEXT, order_status, (status_timestamp AT TIME ZONE 'UTC')::TEXT, refund_amount::TEXT,
     payment_method, item_count::TEXT,
     gross_amount::TEXT, discount_amount::TEXT, net_revenue::TEXT, tax_amount::TEXT, shipping_amount::TEXT, total_amount::TEXT
-], '|', '<NULL>'));
-
-UPDATE warehouse.fact_order_items SET record_hash = md5(array_to_string(ARRAY[
-    order_item_nk, order_id, customer_id, product_id, (order_timestamp AT TIME ZONE 'UTC')::TEXT, quantity::TEXT, unit_price::TEXT,
-    discount_percent::TEXT, gross_amount::TEXT, discount_amount::TEXT, line_revenue::TEXT, refund_amount::TEXT
-], '|', '<NULL>'));
-
-UPDATE warehouse.fact_campaign_spend SET record_hash = md5(array_to_string(ARRAY[
-    campaign_spend_nk, campaign_id, spend_date::TEXT, spend_amount::TEXT, impressions::TEXT, clicks::TEXT,
-    conversions::TEXT, attributed_revenue::TEXT
-], '|', '<NULL>'));
-
-UPDATE warehouse.fact_web_events SET record_hash = md5(array_to_string(ARRAY[
-    event_id, session_id, customer_id, product_id, campaign_id, (event_timestamp AT TIME ZONE 'UTC')::TEXT, event_type,
-    user_journey_stage, device_type, operating_system, browser, network_type, traffic_source, search_query,
-    time_on_page_sec::TEXT, scroll_depth_percent::TEXT, engagement_score::TEXT, purchase_probability::TEXT,
-    cart_abandonment_probability::TEXT, event_value::TEXT, api_latency_ms::TEXT, page_load_time_ms::TEXT,
-    fraud_score::TEXT, schema_version, source_system
-], '|', '<NULL>'));
-
-UPDATE warehouse.fact_conversions SET record_hash = md5(array_to_string(ARRAY[
-    conversion_nk, event_id, customer_id, product_id, campaign_id, (conversion_timestamp AT TIME ZONE 'UTC')::TEXT, conversion_type,
-    conversion_value::TEXT
 ], '|', '<NULL>'));
 
 ALTER TABLE warehouse.fact_orders ALTER COLUMN record_hash SET NOT NULL;
