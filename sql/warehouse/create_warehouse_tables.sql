@@ -690,8 +690,7 @@ VALUES (
     NULL, 'Invalid reference', 'Invalid reference', 'Invalid reference',
     TIMESTAMPTZ '1900-01-01 00:00:00+00', TIMESTAMPTZ '9999-12-31 00:00:00+00',
     TRUE, NULL, 'INVALID'
-)
-ON CONFLICT (customer_sk) DO NOTHING;
+);
 
 INSERT INTO warehouse.dim_product (
     product_sk, product_id, product_name, category, brand, product_status,
@@ -708,8 +707,7 @@ VALUES (
     0, 0, NULL,
     TIMESTAMPTZ '1900-01-01 00:00:00+00', TIMESTAMPTZ '9999-12-31 00:00:00+00',
     TRUE, NULL, 'INVALID'
-)
-ON CONFLICT (product_sk) DO NOTHING;
+);
 
 INSERT INTO warehouse.dim_campaign (
     campaign_sk, campaign_id, campaign_name, campaign_type, channel,
@@ -726,8 +724,7 @@ VALUES (
     'Invalid reference', 'Invalid reference', 'Invalid reference', 'Invalid reference', NULL, NULL,
     0, TIMESTAMPTZ '1900-01-01 00:00:00+00', TIMESTAMPTZ '9999-12-31 00:00:00+00',
     TRUE, NULL, 'INVALID'
-)
-ON CONFLICT (campaign_sk) DO NOTHING;
+);
 
 INSERT INTO warehouse.dim_date (
     date_sk, full_date, day_of_month, day_name, day_of_week,
@@ -738,8 +735,7 @@ VALUES (
     0, DATE '0001-01-01', 0, 'Unknown', 0,
     0, 0, 'Unknown', 0, 0,
     FALSE, DATE '0001-01-01', DATE '0001-01-01', DATE '0001-01-01'
-)
-ON CONFLICT (date_sk) DO NOTHING;
+);
 
 INSERT INTO warehouse.dim_region (region_sk, region_nk, country, state, city)
 VALUES (0, 'unknown|unknown|unknown', 'Unknown', 'Unknown', 'Unknown')
@@ -961,28 +957,7 @@ BEGIN
                 is_current, source_updated_at, scd_hash
             FROM dimension_input
             WHERE customer_sk IS NOT NULL
-            ORDER BY customer_sk, source_updated_at DESC NULLS LAST, row_fingerprint
-            ON CONFLICT (customer_sk) DO UPDATE SET
-                customer_id = EXCLUDED.customer_id,
-                customer_name = EXCLUDED.customer_name,
-                email = EXCLUDED.email,
-                gender = EXCLUDED.gender,
-                age = EXCLUDED.age,
-                membership_tier = EXCLUDED.membership_tier,
-                loyalty_points = EXCLUDED.loyalty_points,
-                preferred_language = EXCLUDED.preferred_language,
-                customer_segment = EXCLUDED.customer_segment,
-                is_prime_user = EXCLUDED.is_prime_user,
-                home_city = EXCLUDED.home_city,
-                home_state = EXCLUDED.home_state,
-                country = EXCLUDED.country,
-                signup_date = EXCLUDED.signup_date,
-                effective_from = EXCLUDED.effective_from,
-                effective_to = EXCLUDED.effective_to,
-                is_current = EXCLUDED.is_current,
-                source_updated_at = EXCLUDED.source_updated_at,
-                scd_hash = EXCLUDED.scd_hash,
-                warehouse_loaded_at = CURRENT_TIMESTAMP;
+            ORDER BY customer_sk, source_updated_at DESC NULLS LAST, row_fingerprint;
             DROP TABLE dimension_input;
         $sql$, source_table);
     END IF;
@@ -1078,22 +1053,7 @@ BEGIN
                 is_current, source_updated_at, scd_hash
             FROM dimension_input
             WHERE product_sk IS NOT NULL
-            ORDER BY product_sk, source_updated_at DESC NULLS LAST, row_fingerprint
-            ON CONFLICT (product_sk) DO UPDATE SET
-                product_id = EXCLUDED.product_id,
-                product_name = EXCLUDED.product_name,
-                category = EXCLUDED.category,
-                brand = EXCLUDED.brand,
-                product_status = EXCLUDED.product_status,
-                original_price = EXCLUDED.original_price,
-                current_price = EXCLUDED.current_price,
-                inventory_remaining = EXCLUDED.inventory_remaining,
-                effective_from = EXCLUDED.effective_from,
-                effective_to = EXCLUDED.effective_to,
-                is_current = EXCLUDED.is_current,
-                source_updated_at = EXCLUDED.source_updated_at,
-                scd_hash = EXCLUDED.scd_hash,
-                warehouse_loaded_at = CURRENT_TIMESTAMP;
+            ORDER BY product_sk, source_updated_at DESC NULLS LAST, row_fingerprint;
             DROP TABLE dimension_input;
         $sql$, source_table);
     END IF;
@@ -1193,25 +1153,7 @@ BEGIN
                 is_current, source_updated_at, scd_hash
             FROM dimension_input
             WHERE campaign_sk IS NOT NULL
-            ORDER BY campaign_sk, source_updated_at DESC NULLS LAST, row_fingerprint
-            ON CONFLICT (campaign_sk) DO UPDATE SET
-                campaign_id = EXCLUDED.campaign_id,
-                campaign_name = EXCLUDED.campaign_name,
-                channel = EXCLUDED.channel,
-                traffic_source = EXCLUDED.traffic_source,
-                target_segment = EXCLUDED.target_segment,
-                campaign_status = EXCLUDED.campaign_status,
-                campaign_type = EXCLUDED.campaign_type,
-                ab_test_group = EXCLUDED.ab_test_group,
-                campaign_start_date = EXCLUDED.campaign_start_date,
-                campaign_end_date = EXCLUDED.campaign_end_date,
-                budget = EXCLUDED.budget,
-                effective_from = EXCLUDED.effective_from,
-                effective_to = EXCLUDED.effective_to,
-                is_current = EXCLUDED.is_current,
-                source_updated_at = EXCLUDED.source_updated_at,
-                scd_hash = EXCLUDED.scd_hash,
-                warehouse_loaded_at = CURRENT_TIMESTAMP;
+            ORDER BY campaign_sk, source_updated_at DESC NULLS LAST, row_fingerprint;
             DROP TABLE dimension_input;
         $sql$, source_table);
     END IF;
@@ -1402,30 +1344,7 @@ BEGIN
             -- campaign, channel 'Unknown') is on the unknown channel (0).
             LEFT JOIN warehouse.dim_channel dch
                 ON dch.channel_nk = warehouse.channel_nk(dcamp.channel)
-            ORDER BY b.order_id, b.order_ts DESC NULLS LAST, b.source_record_hash, b.row_fingerprint
-            ON CONFLICT (order_id) DO UPDATE SET
-                customer_sk = EXCLUDED.customer_sk,
-                campaign_sk = EXCLUDED.campaign_sk,
-                order_date_sk = EXCLUDED.order_date_sk,
-                region_sk = EXCLUDED.region_sk,
-                channel_sk = EXCLUDED.channel_sk,
-                order_timestamp = EXCLUDED.order_timestamp,
-                order_status = EXCLUDED.order_status,
-                status_timestamp = EXCLUDED.status_timestamp,
-                refund_amount = EXCLUDED.refund_amount,
-                tax_amount = EXCLUDED.tax_amount,
-                shipping_amount = EXCLUDED.shipping_amount,
-                total_amount = EXCLUDED.total_amount,
-                payment_method = EXCLUDED.payment_method,
-                item_count = EXCLUDED.item_count,
-                gross_amount = EXCLUDED.gross_amount,
-                discount_amount = EXCLUDED.discount_amount,
-                net_revenue = EXCLUDED.net_revenue,
-                source_record_hash = EXCLUDED.source_record_hash,
-                customer_id = EXCLUDED.customer_id,
-                campaign_id = EXCLUDED.campaign_id,
-                source_updated_at = EXCLUDED.source_updated_at,
-                warehouse_loaded_at = CURRENT_TIMESTAMP;
+            ORDER BY b.order_id, b.order_ts DESC NULLS LAST, b.source_record_hash, b.row_fingerprint;
         $sql$, source_table);
     END IF;
 END $$;
@@ -1549,27 +1468,7 @@ BEGIN
                 ON dr.region_nk = warehouse.region_nk(b.city, b.state, b.country)
             LEFT JOIN warehouse.dim_channel dch
                 ON dch.channel_nk = warehouse.channel_nk(b.channel_value)
-            ORDER BY b.order_item_nk, b.order_ts DESC NULLS LAST, b.row_fingerprint
-            ON CONFLICT (order_item_nk) DO UPDATE SET
-                order_sk = EXCLUDED.order_sk,
-                order_id = EXCLUDED.order_id,
-                customer_sk = EXCLUDED.customer_sk,
-                product_sk = EXCLUDED.product_sk,
-                order_date_sk = EXCLUDED.order_date_sk,
-                region_sk = EXCLUDED.region_sk,
-                channel_sk = EXCLUDED.channel_sk,
-                order_timestamp = EXCLUDED.order_timestamp,
-                quantity = EXCLUDED.quantity,
-                unit_price = EXCLUDED.unit_price,
-                discount_percent = EXCLUDED.discount_percent,
-                gross_amount = EXCLUDED.gross_amount,
-                discount_amount = EXCLUDED.discount_amount,
-                line_revenue = EXCLUDED.line_revenue,
-                refund_amount = EXCLUDED.refund_amount,
-                customer_id = EXCLUDED.customer_id,
-                product_id = EXCLUDED.product_id,
-                source_updated_at = EXCLUDED.source_updated_at,
-                warehouse_loaded_at = CURRENT_TIMESTAMP;
+            ORDER BY b.order_item_nk, b.order_ts DESC NULLS LAST, b.row_fingerprint;
         $sql$, source_table);
     END IF;
 END $$;
@@ -1739,21 +1638,7 @@ BEGIN
                 ON dr.region_nk = warehouse.region_nk(NULL, b.state, b.country)
             LEFT JOIN warehouse.dim_channel dch
                 ON dch.channel_nk = warehouse.channel_nk(b.channel_value)
-            ORDER BY b.campaign_spend_nk, b.spend_date DESC NULLS LAST, b.row_fingerprint
-            ON CONFLICT (campaign_spend_nk) DO UPDATE SET
-                campaign_sk = EXCLUDED.campaign_sk,
-                spend_date_sk = EXCLUDED.spend_date_sk,
-                region_sk = EXCLUDED.region_sk,
-                channel_sk = EXCLUDED.channel_sk,
-                spend_date = EXCLUDED.spend_date,
-                spend_amount = EXCLUDED.spend_amount,
-                impressions = EXCLUDED.impressions,
-                clicks = EXCLUDED.clicks,
-                conversions = EXCLUDED.conversions,
-                attributed_revenue = EXCLUDED.attributed_revenue,
-                campaign_id = EXCLUDED.campaign_id,
-                source_updated_at = EXCLUDED.source_updated_at,
-                warehouse_loaded_at = CURRENT_TIMESTAMP;
+            ORDER BY b.campaign_spend_nk, b.spend_date DESC NULLS LAST, b.row_fingerprint;
         $sql$, source_table);
     END IF;
 END $$;
@@ -1929,40 +1814,7 @@ BEGIN
             b.campaign_id,
             b.source_updated_at
         FROM web_events_resolved b
-        ORDER BY b.event_id
-        ON CONFLICT (event_id) DO UPDATE SET
-            session_id = EXCLUDED.session_id,
-            customer_sk = EXCLUDED.customer_sk,
-            product_sk = EXCLUDED.product_sk,
-            campaign_sk = EXCLUDED.campaign_sk,
-            event_date_sk = EXCLUDED.event_date_sk,
-            region_sk = EXCLUDED.region_sk,
-            channel_sk = EXCLUDED.channel_sk,
-            event_timestamp = EXCLUDED.event_timestamp,
-            event_type = EXCLUDED.event_type,
-            user_journey_stage = EXCLUDED.user_journey_stage,
-            device_type = EXCLUDED.device_type,
-            operating_system = EXCLUDED.operating_system,
-            browser = EXCLUDED.browser,
-            network_type = EXCLUDED.network_type,
-            traffic_source = EXCLUDED.traffic_source,
-            search_query = EXCLUDED.search_query,
-            time_on_page_sec = EXCLUDED.time_on_page_sec,
-            scroll_depth_percent = EXCLUDED.scroll_depth_percent,
-            engagement_score = EXCLUDED.engagement_score,
-            purchase_probability = EXCLUDED.purchase_probability,
-            cart_abandonment_probability = EXCLUDED.cart_abandonment_probability,
-            event_value = EXCLUDED.event_value,
-            api_latency_ms = EXCLUDED.api_latency_ms,
-            page_load_time_ms = EXCLUDED.page_load_time_ms,
-            fraud_score = EXCLUDED.fraud_score,
-            schema_version = EXCLUDED.schema_version,
-            source_system = EXCLUDED.source_system,
-            customer_id = EXCLUDED.customer_id,
-            product_id = EXCLUDED.product_id,
-            campaign_id = EXCLUDED.campaign_id,
-            source_updated_at = EXCLUDED.source_updated_at,
-            warehouse_loaded_at = CURRENT_TIMESTAMP;
+        ORDER BY b.event_id;
     END IF;
 END $$;
 
@@ -2000,24 +1852,7 @@ WHERE lower(event_type) IN (
     'checkout_completed',
     'order_completed',
     'payment_success'
-)
-ON CONFLICT (conversion_nk) DO UPDATE SET
-    event_sk = EXCLUDED.event_sk,
-    event_id = EXCLUDED.event_id,
-    customer_sk = EXCLUDED.customer_sk,
-    product_sk = EXCLUDED.product_sk,
-    campaign_sk = EXCLUDED.campaign_sk,
-    conversion_date_sk = EXCLUDED.conversion_date_sk,
-    region_sk = EXCLUDED.region_sk,
-    channel_sk = EXCLUDED.channel_sk,
-    conversion_timestamp = EXCLUDED.conversion_timestamp,
-    conversion_type = EXCLUDED.conversion_type,
-    conversion_value = EXCLUDED.conversion_value,
-    customer_id = EXCLUDED.customer_id,
-    product_id = EXCLUDED.product_id,
-    campaign_id = EXCLUDED.campaign_id,
-    source_updated_at = EXCLUDED.source_updated_at,
-    warehouse_loaded_at = CURRENT_TIMESTAMP;
+);
 
 ANALYZE warehouse.fact_conversions;
 
