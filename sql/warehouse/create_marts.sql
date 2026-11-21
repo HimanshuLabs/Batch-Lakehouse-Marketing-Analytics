@@ -1589,6 +1589,16 @@ CROSS JOIN (
     SELECT COALESCE(SUM(refund_amount), 0)::NUMERIC AS target_amount FROM marts.mart_product_sales
 ) tgt;
 
+-- 4j-4l each read their lifetime mart twice: the whole row, then the activity
+-- columns; check 7 reads them again. These checks read a copy instead, made
+-- here in this transaction from the view (the same rows, column names, column
+-- order and types). The copies are only ever named pg_temp.<copy>, so they
+-- never stand in for marts.*, and they are dropped after check 7.
+CREATE TEMP TABLE validation_customer_360 ON COMMIT DROP AS SELECT * FROM marts.mart_customer_360;
+CREATE TEMP TABLE validation_product_sales ON COMMIT DROP AS SELECT * FROM marts.mart_product_sales;
+CREATE TEMP TABLE validation_campaign_performance ON COMMIT DROP AS SELECT * FROM marts.mart_campaign_performance;
+ANALYZE pg_temp.validation_customer_360, pg_temp.validation_product_sales, pg_temp.validation_campaign_performance;
+
 -- 4j. The last date's snapshot is the lifetime mart.
 INSERT INTO audit.mart_validation_report (
     validation_run_id,
@@ -1624,12 +1634,12 @@ CROSS JOIN (
          WHERE s.snapshot_date = (SELECT MAX(snapshot_date) FROM marts.mart_customer_daily_snapshot)
            -- days_since_last_order is counted to snapshot_date in the snapshot
            -- and to the latest order date in the lifetime mart: compared apart.
-           AND NOT EXISTS (SELECT 1 FROM marts.mart_customer_360 m
+           AND NOT EXISTS (SELECT 1 FROM pg_temp.validation_customer_360 m
                            WHERE to_jsonb(m) - 'days_since_last_order'
                                  = to_jsonb(s) - 'snapshot_date' - 'days_since_last_order'))
       + (SELECT COUNT(*) FROM marts.mart_customer_daily_snapshot s
          WHERE s.days_since_last_order IS DISTINCT FROM s.snapshot_date - warehouse.business_date(s.last_order_timestamp))
-      + (SELECT COUNT(*) FROM marts.mart_customer_360 m
+      + (SELECT COUNT(*) FROM pg_temp.validation_customer_360 m
          WHERE (m.total_order_count + m.cancelled_order_count + m.web_event_count > 0)
            AND NOT EXISTS (SELECT 1 FROM marts.mart_customer_daily_snapshot s
                            WHERE s.customer_id = m.customer_id
@@ -1673,9 +1683,9 @@ CROSS JOIN (
     SELECT (
         (SELECT COUNT(*) FROM marts.mart_product_daily_snapshot s
          WHERE s.snapshot_date = (SELECT MAX(snapshot_date) FROM marts.mart_product_daily_snapshot)
-           AND NOT EXISTS (SELECT 1 FROM marts.mart_product_sales m
+           AND NOT EXISTS (SELECT 1 FROM pg_temp.validation_product_sales m
                            WHERE to_jsonb(m) = to_jsonb(s) - 'snapshot_date'))
-      + (SELECT COUNT(*) FROM marts.mart_product_sales m
+      + (SELECT COUNT(*) FROM pg_temp.validation_product_sales m
          WHERE (m.order_count + m.cancelled_units + m.product_web_event_count > 0)
            AND NOT EXISTS (SELECT 1 FROM marts.mart_product_daily_snapshot s
                            WHERE s.product_id = m.product_id
@@ -1719,9 +1729,9 @@ CROSS JOIN (
     SELECT (
         (SELECT COUNT(*) FROM marts.mart_campaign_daily_snapshot s
          WHERE s.snapshot_date = (SELECT MAX(snapshot_date) FROM marts.mart_campaign_daily_snapshot)
-           AND NOT EXISTS (SELECT 1 FROM marts.mart_campaign_performance m
+           AND NOT EXISTS (SELECT 1 FROM pg_temp.validation_campaign_performance m
                            WHERE to_jsonb(m) = to_jsonb(s) - 'snapshot_date'))
-      + (SELECT COUNT(*) FROM marts.mart_campaign_performance m
+      + (SELECT COUNT(*) FROM pg_temp.validation_campaign_performance m
          WHERE (m.order_count + m.cancelled_order_count + m.web_event_count + m.warehouse_conversion_count + m.impressions > 0 OR m.total_spend > 0)
            AND NOT EXISTS (SELECT 1 FROM marts.mart_campaign_daily_snapshot s
                            WHERE s.campaign_id = m.campaign_id
@@ -1837,17 +1847,17 @@ FROM mart_validation_context mvc
 CROSS JOIN (
     SELECT
         (
-            SELECT COUNT(*) FROM marts.mart_customer_360
+            SELECT COUNT(*) FROM pg_temp.validation_customer_360
             WHERE customer_conversion_rate_pct < 0 OR customer_conversion_rate_pct > 100
         )
         +
         (
-            SELECT COUNT(*) FROM marts.mart_campaign_performance
+            SELECT COUNT(*) FROM pg_temp.validation_campaign_performance
             WHERE session_to_order_conversion_rate_pct < 0 OR session_to_order_conversion_rate_pct > 100
         )
         +
         (
-            SELECT COUNT(*) FROM marts.mart_product_sales
+            SELECT COUNT(*) FROM pg_temp.validation_product_sales
             WHERE product_conversion_rate_pct < 0 OR product_conversion_rate_pct > 100
         )
         +
@@ -1856,6 +1866,8 @@ CROSS JOIN (
             WHERE funnel_conversion_rate_pct < 0 OR funnel_conversion_rate_pct > 100
         ) AS bad_row_count
 ) bad_rows;
+
+DROP TABLE pg_temp.validation_customer_360, pg_temp.validation_product_sales, pg_temp.validation_campaign_performance;
 
 -- 8. Mart views are queryable and non-empty.
 INSERT INTO audit.mart_validation_report (
