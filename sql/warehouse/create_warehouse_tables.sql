@@ -59,52 +59,41 @@ AS $$
 $$;
 
 
+-- The safe_* casts return NULL for text their type does not accept. They test
+-- the text with pg_input_is_valid() (the type's own input rules) instead of
+-- catching the error, because an EXCEPTION block opens a subtransaction on
+-- every call. safe_bigint, safe_int, safe_numeric and safe_date are SQL
+-- functions the planner inlines into the query (STABLE: the date input depends
+-- on DateStyle). safe_timestamp stays plpgsql with SET timezone = 'UTC', so
+-- text without an offset is read as UTC in every session; a function with SET
+-- is never inlined. safe_bool never raises (it compares the text with fixed
+-- lists) and is unchanged.
 CREATE OR REPLACE FUNCTION warehouse.safe_bigint(value TEXT)
 RETURNS BIGINT
-LANGUAGE plpgsql
-IMMUTABLE
+LANGUAGE SQL
+STABLE
+PARALLEL SAFE
 AS $$
-BEGIN
-    IF value IS NULL OR btrim(value) = '' THEN
-        RETURN NULL;
-    END IF;
-
-    RETURN btrim(value)::BIGINT;
-EXCEPTION WHEN OTHERS THEN
-    RETURN NULL;
-END;
+    SELECT CASE WHEN pg_input_is_valid(btrim(value), 'bigint') THEN btrim(value)::BIGINT END;
 $$;
 
 CREATE OR REPLACE FUNCTION warehouse.safe_int(value TEXT)
 RETURNS INTEGER
-LANGUAGE plpgsql
-IMMUTABLE
+LANGUAGE SQL
+STABLE
+PARALLEL SAFE
 AS $$
-BEGIN
-    IF value IS NULL OR btrim(value) = '' THEN
-        RETURN NULL;
-    END IF;
-
-    RETURN btrim(value)::INTEGER;
-EXCEPTION WHEN OTHERS THEN
-    RETURN NULL;
-END;
+    SELECT CASE WHEN pg_input_is_valid(btrim(value), 'integer') THEN btrim(value)::INTEGER END;
 $$;
 
 CREATE OR REPLACE FUNCTION warehouse.safe_numeric(value TEXT)
 RETURNS NUMERIC
-LANGUAGE plpgsql
-IMMUTABLE
+LANGUAGE SQL
+STABLE
+PARALLEL SAFE
 AS $$
-BEGIN
-    IF value IS NULL OR btrim(value) = '' THEN
-        RETURN NULL;
-    END IF;
-
-    RETURN regexp_replace(btrim(value), ',', '', 'g')::NUMERIC;
-EXCEPTION WHEN OTHERS THEN
-    RETURN NULL;
-END;
+    SELECT CASE WHEN pg_input_is_valid(regexp_replace(btrim(value), ',', '', 'g'), 'numeric')
+                THEN regexp_replace(btrim(value), ',', '', 'g')::NUMERIC END;
 $$;
 
 CREATE OR REPLACE FUNCTION warehouse.safe_bool(value TEXT)
@@ -137,6 +126,7 @@ CREATE OR REPLACE FUNCTION warehouse.safe_timestamp(value TEXT)
 RETURNS TIMESTAMPTZ
 LANGUAGE plpgsql
 IMMUTABLE
+PARALLEL SAFE
 SET timezone = 'UTC'
 AS $$
 BEGIN
@@ -144,26 +134,21 @@ BEGIN
         RETURN NULL;
     END IF;
 
-    RETURN btrim(value)::TIMESTAMPTZ;
-EXCEPTION WHEN OTHERS THEN
+    IF pg_input_is_valid(btrim(value), 'timestamptz') THEN
+        RETURN btrim(value)::TIMESTAMPTZ;
+    END IF;
+
     RETURN NULL;
 END;
 $$;
 
 CREATE OR REPLACE FUNCTION warehouse.safe_date(value TEXT)
 RETURNS DATE
-LANGUAGE plpgsql
-IMMUTABLE
+LANGUAGE SQL
+STABLE
+PARALLEL SAFE
 AS $$
-BEGIN
-    IF value IS NULL OR btrim(value) = '' THEN
-        RETURN NULL;
-    END IF;
-
-    RETURN btrim(value)::DATE;
-EXCEPTION WHEN OTHERS THEN
-    RETURN NULL;
-END;
+    SELECT CASE WHEN pg_input_is_valid(btrim(value), 'date') THEN btrim(value)::DATE END;
 $$;
 
 CREATE OR REPLACE FUNCTION warehouse.date_sk(input_date DATE)
