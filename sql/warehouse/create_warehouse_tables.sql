@@ -424,14 +424,14 @@ CREATE TABLE warehouse.fact_orders (
     -- collision fails the load on this primary key.
     order_sk BIGINT PRIMARY KEY,
     order_id TEXT NOT NULL UNIQUE,
-    customer_sk BIGINT NOT NULL REFERENCES warehouse.dim_customer(customer_sk),
-    campaign_sk BIGINT NOT NULL REFERENCES warehouse.dim_campaign(campaign_sk),
+    customer_sk BIGINT NOT NULL,
+    campaign_sk BIGINT NOT NULL,
     -- The source natural IDs beside the keys ('UNKNOWN' when the source has none).
     customer_id TEXT NOT NULL,
     campaign_id TEXT NOT NULL,
-    order_date_sk INTEGER NOT NULL REFERENCES warehouse.dim_date(date_sk),
-    region_sk BIGINT NOT NULL REFERENCES warehouse.dim_region(region_sk),
-    channel_sk BIGINT NOT NULL REFERENCES warehouse.dim_channel(channel_sk),
+    order_date_sk INTEGER NOT NULL,
+    region_sk BIGINT NOT NULL,
+    channel_sk BIGINT NOT NULL,
     order_timestamp TIMESTAMPTZ,
     -- completed, cancelled or returned, from the source. Only a completed
     -- order is a sale: the marts count revenue from completed orders.
@@ -486,15 +486,15 @@ CREATE TABLE warehouse.fact_order_items (
     -- collision fails the load on this primary key.
     order_item_sk BIGINT PRIMARY KEY,
     order_item_nk TEXT NOT NULL UNIQUE,
-    order_sk BIGINT REFERENCES warehouse.fact_orders(order_sk),
+    order_sk BIGINT,
     order_id TEXT,
-    customer_sk BIGINT NOT NULL REFERENCES warehouse.dim_customer(customer_sk),
-    product_sk BIGINT NOT NULL REFERENCES warehouse.dim_product(product_sk),
+    customer_sk BIGINT NOT NULL,
+    product_sk BIGINT NOT NULL,
     customer_id TEXT NOT NULL,
     product_id TEXT NOT NULL,
-    order_date_sk INTEGER NOT NULL REFERENCES warehouse.dim_date(date_sk),
-    region_sk BIGINT NOT NULL REFERENCES warehouse.dim_region(region_sk),
-    channel_sk BIGINT NOT NULL REFERENCES warehouse.dim_channel(channel_sk),
+    order_date_sk INTEGER NOT NULL,
+    region_sk BIGINT NOT NULL,
+    channel_sk BIGINT NOT NULL,
     order_timestamp TIMESTAMPTZ,
     quantity INTEGER NOT NULL DEFAULT 1,
     unit_price NUMERIC(18, 2) NOT NULL DEFAULT 0,
@@ -573,15 +573,15 @@ CREATE TABLE warehouse.fact_web_events (
     event_sk BIGINT PRIMARY KEY,
     event_id TEXT NOT NULL UNIQUE,
     session_id TEXT,
-    customer_sk BIGINT NOT NULL REFERENCES warehouse.dim_customer(customer_sk),
-    product_sk BIGINT NOT NULL REFERENCES warehouse.dim_product(product_sk),
-    campaign_sk BIGINT NOT NULL REFERENCES warehouse.dim_campaign(campaign_sk),
+    customer_sk BIGINT NOT NULL,
+    product_sk BIGINT NOT NULL,
+    campaign_sk BIGINT NOT NULL,
     customer_id TEXT NOT NULL,
     product_id TEXT NOT NULL,
     campaign_id TEXT NOT NULL,
-    event_date_sk INTEGER NOT NULL REFERENCES warehouse.dim_date(date_sk),
-    region_sk BIGINT NOT NULL REFERENCES warehouse.dim_region(region_sk),
-    channel_sk BIGINT NOT NULL REFERENCES warehouse.dim_channel(channel_sk),
+    event_date_sk INTEGER NOT NULL,
+    region_sk BIGINT NOT NULL,
+    channel_sk BIGINT NOT NULL,
     event_timestamp TIMESTAMPTZ,
     event_type TEXT NOT NULL,
     user_journey_stage TEXT,
@@ -618,17 +618,17 @@ CREATE TABLE warehouse.fact_conversions (
     -- collision fails the load on this primary key.
     conversion_sk BIGINT PRIMARY KEY,
     conversion_nk TEXT NOT NULL UNIQUE,
-    event_sk BIGINT REFERENCES warehouse.fact_web_events(event_sk),
+    event_sk BIGINT,
     event_id TEXT,
-    customer_sk BIGINT NOT NULL REFERENCES warehouse.dim_customer(customer_sk),
-    product_sk BIGINT NOT NULL REFERENCES warehouse.dim_product(product_sk),
-    campaign_sk BIGINT NOT NULL REFERENCES warehouse.dim_campaign(campaign_sk),
+    customer_sk BIGINT NOT NULL,
+    product_sk BIGINT NOT NULL,
+    campaign_sk BIGINT NOT NULL,
     customer_id TEXT NOT NULL,
     product_id TEXT NOT NULL,
     campaign_id TEXT NOT NULL,
-    conversion_date_sk INTEGER NOT NULL REFERENCES warehouse.dim_date(date_sk),
-    region_sk BIGINT NOT NULL REFERENCES warehouse.dim_region(region_sk),
-    channel_sk BIGINT NOT NULL REFERENCES warehouse.dim_channel(channel_sk),
+    conversion_date_sk INTEGER NOT NULL,
+    region_sk BIGINT NOT NULL,
+    channel_sk BIGINT NOT NULL,
     conversion_timestamp TIMESTAMPTZ,
     conversion_type TEXT NOT NULL,
     conversion_value NUMERIC(18, 2) NOT NULL DEFAULT 0,
@@ -1907,6 +1907,41 @@ ALTER TABLE warehouse.fact_order_items ALTER COLUMN record_hash SET NOT NULL;
 ALTER TABLE warehouse.fact_campaign_spend ALTER COLUMN record_hash SET NOT NULL;
 ALTER TABLE warehouse.fact_web_events ALTER COLUMN record_hash SET NOT NULL;
 ALTER TABLE warehouse.fact_conversions ALTER COLUMN record_hash SET NOT NULL;
+
+-- Foreign keys of the four large facts, added after their loads: one check of
+-- each table instead of a trigger call per row and key. The names are the ones
+-- PostgreSQL gives an inline REFERENCES (<table>_<column>_fkey), written out so
+-- the catalog stays the same. A violation fails here instead of at the INSERT;
+-- either way the whole build rolls back. fact_campaign_spend keeps its inline
+-- references (a small table).
+ALTER TABLE warehouse.fact_orders
+    ADD CONSTRAINT fact_orders_customer_sk_fkey FOREIGN KEY (customer_sk) REFERENCES warehouse.dim_customer(customer_sk),
+    ADD CONSTRAINT fact_orders_campaign_sk_fkey FOREIGN KEY (campaign_sk) REFERENCES warehouse.dim_campaign(campaign_sk),
+    ADD CONSTRAINT fact_orders_order_date_sk_fkey FOREIGN KEY (order_date_sk) REFERENCES warehouse.dim_date(date_sk),
+    ADD CONSTRAINT fact_orders_region_sk_fkey FOREIGN KEY (region_sk) REFERENCES warehouse.dim_region(region_sk),
+    ADD CONSTRAINT fact_orders_channel_sk_fkey FOREIGN KEY (channel_sk) REFERENCES warehouse.dim_channel(channel_sk);
+ALTER TABLE warehouse.fact_order_items
+    ADD CONSTRAINT fact_order_items_order_sk_fkey FOREIGN KEY (order_sk) REFERENCES warehouse.fact_orders(order_sk),
+    ADD CONSTRAINT fact_order_items_customer_sk_fkey FOREIGN KEY (customer_sk) REFERENCES warehouse.dim_customer(customer_sk),
+    ADD CONSTRAINT fact_order_items_product_sk_fkey FOREIGN KEY (product_sk) REFERENCES warehouse.dim_product(product_sk),
+    ADD CONSTRAINT fact_order_items_order_date_sk_fkey FOREIGN KEY (order_date_sk) REFERENCES warehouse.dim_date(date_sk),
+    ADD CONSTRAINT fact_order_items_region_sk_fkey FOREIGN KEY (region_sk) REFERENCES warehouse.dim_region(region_sk),
+    ADD CONSTRAINT fact_order_items_channel_sk_fkey FOREIGN KEY (channel_sk) REFERENCES warehouse.dim_channel(channel_sk);
+ALTER TABLE warehouse.fact_web_events
+    ADD CONSTRAINT fact_web_events_customer_sk_fkey FOREIGN KEY (customer_sk) REFERENCES warehouse.dim_customer(customer_sk),
+    ADD CONSTRAINT fact_web_events_product_sk_fkey FOREIGN KEY (product_sk) REFERENCES warehouse.dim_product(product_sk),
+    ADD CONSTRAINT fact_web_events_campaign_sk_fkey FOREIGN KEY (campaign_sk) REFERENCES warehouse.dim_campaign(campaign_sk),
+    ADD CONSTRAINT fact_web_events_event_date_sk_fkey FOREIGN KEY (event_date_sk) REFERENCES warehouse.dim_date(date_sk),
+    ADD CONSTRAINT fact_web_events_region_sk_fkey FOREIGN KEY (region_sk) REFERENCES warehouse.dim_region(region_sk),
+    ADD CONSTRAINT fact_web_events_channel_sk_fkey FOREIGN KEY (channel_sk) REFERENCES warehouse.dim_channel(channel_sk);
+ALTER TABLE warehouse.fact_conversions
+    ADD CONSTRAINT fact_conversions_event_sk_fkey FOREIGN KEY (event_sk) REFERENCES warehouse.fact_web_events(event_sk),
+    ADD CONSTRAINT fact_conversions_customer_sk_fkey FOREIGN KEY (customer_sk) REFERENCES warehouse.dim_customer(customer_sk),
+    ADD CONSTRAINT fact_conversions_product_sk_fkey FOREIGN KEY (product_sk) REFERENCES warehouse.dim_product(product_sk),
+    ADD CONSTRAINT fact_conversions_campaign_sk_fkey FOREIGN KEY (campaign_sk) REFERENCES warehouse.dim_campaign(campaign_sk),
+    ADD CONSTRAINT fact_conversions_conversion_date_sk_fkey FOREIGN KEY (conversion_date_sk) REFERENCES warehouse.dim_date(date_sk),
+    ADD CONSTRAINT fact_conversions_region_sk_fkey FOREIGN KEY (region_sk) REFERENCES warehouse.dim_region(region_sk),
+    ADD CONSTRAINT fact_conversions_channel_sk_fkey FOREIGN KEY (channel_sk) REFERENCES warehouse.dim_channel(channel_sk);
 
 -- ---------------------------------------------------------------------------
 -- ---------------------------------------------------------------------------
