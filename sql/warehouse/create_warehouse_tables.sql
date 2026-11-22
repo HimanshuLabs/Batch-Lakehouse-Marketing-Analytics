@@ -1682,9 +1682,14 @@ BEGIN
         RAISE EXCEPTION 'Missing staging table: no web-events fact staging table found; load Gold into staging first.';
     ELSE
         DROP TABLE IF EXISTS pg_temp.web_events_resolved;
+        DROP TABLE IF EXISTS pg_temp.web_events_deduplicated;
 
+        -- Two steps (Tier 2 j): the deduplicated events are materialised and
+        -- analysed first, so the per-event lookups below are planned with their
+        -- real row count. Both statements keep the one-statement text: the same
+        -- CTEs, and the same select list, lookups and joins.
         EXECUTE format($sql$
-            CREATE TEMP TABLE web_events_resolved ON COMMIT DROP AS
+            CREATE TEMP TABLE web_events_deduplicated ON COMMIT DROP AS
             WITH src AS (
                 SELECT to_jsonb(s) AS r FROM %s s OFFSET 0
             ),
@@ -1735,6 +1740,13 @@ BEGIN
                 FROM base
                 ORDER BY event_id, event_ts DESC NULLS LAST, row_fingerprint
             )
+            SELECT * FROM deduplicated
+        $sql$, source_table);
+
+        ANALYZE web_events_deduplicated;
+
+        EXECUTE $sql$
+            CREATE TEMP TABLE web_events_resolved ON COMMIT DROP AS
             SELECT
                 b.*,
                 warehouse.member_sk(dc.customer_sk, b.customer_id IN (SELECT known.customer_id FROM warehouse.dim_customer known)) AS customer_sk,
@@ -1742,7 +1754,7 @@ BEGIN
                 warehouse.member_sk(dcamp.campaign_sk, b.campaign_id IN (SELECT known.campaign_id FROM warehouse.dim_campaign known)) AS campaign_sk,
                 coalesce(dr.region_sk, 0) AS region_sk,
                 coalesce(dch.channel_sk, 0) AS channel_sk
-            FROM deduplicated b
+            FROM web_events_deduplicated b
             -- A NULL key is 'UNKNOWN' here, which the unknown member (0, open
             -- from 1900 to 9999) matches; any other key must match a real version.
             LEFT JOIN LATERAL (
@@ -1776,7 +1788,12 @@ BEGIN
                 ON dr.region_nk = warehouse.region_nk(b.city, b.state, b.country)
             LEFT JOIN warehouse.dim_channel dch
                 ON dch.channel_nk = warehouse.channel_nk(b.channel_value);
-        $sql$, source_table);
+        $sql$;
+
+        -- TRUNCATE frees the space at once (the table is new in this transaction);
+        -- DROP alone would keep the files until the end of the build.
+        TRUNCATE web_events_deduplicated;
+        DROP TABLE web_events_deduplicated;
 
         ANALYZE web_events_resolved;
 
