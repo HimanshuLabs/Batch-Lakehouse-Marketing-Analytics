@@ -769,6 +769,8 @@ BEGIN
             -- The key is a hash of the natural key, so it never depends on insert
             -- order. Within a source the attributes are picked by a full ORDER BY;
             -- across sources the first source in the fixed list above wins.
+            -- Identical mapped rows are grouped first, so DISTINCT ON and the
+            -- key hash see each distinct row once, not once per staging row.
             EXECUTE format($sql$
                 INSERT INTO warehouse.dim_region (region_sk, region_nk, country, state, city)
                 SELECT DISTINCT ON (region_nk)
@@ -792,6 +794,7 @@ BEGIN
                     ) mapped
                 ) keyed
                 WHERE region_nk <> 'unknown|unknown|unknown'
+                GROUP BY region_nk, city, state, country
                 ORDER BY region_nk, city, state, country
                 ON CONFLICT (region_nk) DO NOTHING;
             $sql$, source_table);
@@ -816,7 +819,8 @@ BEGIN
     LOOP
         IF to_regclass(source_table) IS NOT NULL THEN
             -- Same rules as dim_region: hashed key, full ORDER BY within a source,
-            -- first source in the fixed list wins across sources.
+            -- first source in the fixed list wins across sources, identical
+            -- mapped rows grouped first.
             EXECUTE format($sql$
                 INSERT INTO warehouse.dim_channel (channel_sk, channel_nk, channel_name, channel_group)
                 SELECT DISTINCT ON (channel_nk)
@@ -846,6 +850,7 @@ BEGIN
                     ) mapped
                 ) keyed
                 WHERE channel_nk <> 'unknown'
+                GROUP BY channel_nk, channel_name, channel_group
                 ORDER BY channel_nk, channel_name, channel_group
                 ON CONFLICT (channel_nk) DO NOTHING;
             $sql$, source_table);
@@ -1187,13 +1192,16 @@ BEGIN
     ]
     LOOP
         IF to_regclass(source_table) IS NOT NULL THEN
+            -- One row per date: GROUP BY d comes before the attributes, which
+            -- depend on the date alone, so they are computed once per date and
+            -- not once per staging row (the same rows as a DISTINCT over them).
             EXECUTE format($sql$
                 INSERT INTO warehouse.dim_date (
                     date_sk, full_date, day_of_month, day_name, day_of_week,
                     week_of_year, month_number, month_name, quarter_number, year_number,
                     is_weekend, month_start_date, quarter_start_date, year_start_date
                 )
-                SELECT DISTINCT
+                SELECT
                     warehouse.date_sk(d) AS date_sk,
                     d AS full_date,
                     extract(day from d)::INTEGER AS day_of_month,
@@ -1223,6 +1231,7 @@ BEGIN
                     FROM (SELECT to_jsonb(s) AS r FROM %s s OFFSET 0) src
                 ) dates
                 WHERE d IS NOT NULL
+                GROUP BY d
                 ON CONFLICT (date_sk) DO NOTHING;
             $sql$, source_table);
         END IF;
