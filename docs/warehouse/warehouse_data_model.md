@@ -8,7 +8,7 @@ The warehouse data model turns trusted Gold/SCD2 lakehouse outputs into a relati
 
 | Schema | Purpose |
 |---|---|
-| staging | Loaded Project 2 Gold/SCD2 outputs |
+| staging | Loaded lakehouse Gold/SCD2 outputs |
 | warehouse | Star schema facts and dimensions |
 | marts | BI-ready reporting views |
 | audit | Reconciliation and validation results |

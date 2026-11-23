@@ -4,7 +4,7 @@ PostgreSQL Warehouse Star Schema Layer
 ===============================================================================
 
 Purpose:
-- Build the Project 3 warehouse core inside the Project 2 lakehouse repo.
+- Build the warehouse core inside the lakehouse repository.
 - Promote trusted Gold/SCD2 staging data into warehouse dimensions and facts.
 - Preserve point-in-time correctness by using SCD2 surrogate keys when present.
 - Keep Bronze/Silver away from BI. BI reads warehouse/marts only.

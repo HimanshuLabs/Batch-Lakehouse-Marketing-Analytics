@@ -1,4 +1,4 @@
--- Project 2 — SCD2 Gold Mart Validation Queries
+-- Batch-Lakehouse-Marketing-Analytics — SCD2 Gold Mart Validation Queries
 -- These queries validate marts rebuilt from SCD2-aware Gold facts.
 
 -- 1. Campaign mart revenue reconciles to fact_orders_scd2

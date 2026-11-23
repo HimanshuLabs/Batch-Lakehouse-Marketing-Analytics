@@ -218,7 +218,7 @@ def test_data_quality_summary_counts_invalid_references_per_fact_and_dimension(l
 
 # --- The dashboards read the export files by column position ----------------------
 #
-# Power BI is a consumer like Project 4. Its models were built on the files of
+# Power BI is a consumer like ML-Pipeline-Anomaly-Detection. Its models were built on the files of
 # commit d1b32c3 (route A) and on the last files uploaded to S3 (route B), and
 # they read columns by position. Inserting a column in the middle of a mart, or
 # dropping one, broke six of seven models. scripts/power_bi_dashboard_contract.json

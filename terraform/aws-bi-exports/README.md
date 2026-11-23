@@ -1,6 +1,6 @@
 # Terraform — AWS Power BI Export Hosting
 
-This Terraform module manages the AWS S3 configuration used to host Power BI CSV exports for Project 2: Batch Data Lakehouse.
+This Terraform module manages the AWS S3 configuration used to host Power BI CSV exports for Batch-Lakehouse-Marketing-Analytics.
 
 ## Purpose
 

@@ -253,8 +253,8 @@ def normalize_dimension_columns(
     """
     Normalize source-specific column names into the dimension contract.
 
-    Project 1-style user behavior data uses user_id/home_city/home_state/event_time.
-    Project 2-style lakehouse dimensions may use customer_id/city/state/updated_at.
+    Real-time-personalization-pipeline-style user behavior data uses user_id/home_city/home_state/event_time.
+    This lakehouse's dimensions may use customer_id/city/state/updated_at.
     This function bridges that contract cleanly before SCD2 logic runs.
 
     column_map holds per-dimension {target: source} copies (for example

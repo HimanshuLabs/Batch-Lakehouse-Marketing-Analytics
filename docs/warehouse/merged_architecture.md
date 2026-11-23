@@ -2,9 +2,9 @@
 
 ## Purpose
 
-This repository now combines the Project 2 batch lakehouse engine with the warehouse/reporting layer that was originally planned as Project 3.
+This repository now combines the batch lakehouse engine with the warehouse/reporting layer that was first planned as a separate repository.
 
-Project 2 remains responsible for:
+The lakehouse remains responsible for:
 
 - Raw ingestion
 - Bronze processing

@@ -72,7 +72,7 @@ Power BI Online Reports and Dashboard
 GitHub Actions CI/CD Validation
 ```
 
-Project 2 remains the lakehouse engine. The former Project 3 scope now lives inside the same repository as the PostgreSQL warehouse, dbt, BI, reconciliation, and reporting layer.
+The lakehouse remains the engine. The PostgreSQL warehouse, dbt, BI, reconciliation and reporting layer, first planned as a separate repository, now lives in this one.
 
 ---
 
@@ -213,9 +213,9 @@ The behavioral event source includes customer, product, session, recommendation,
 
 Each batch folder also holds `generation_truth.json`: the generator version, the data contract, the hidden simulation labels and the row index of every deliberately dirty row. It is not a source file and no pipeline task reads it as data.
 
-### Relation to Project 1
+### Relation to Real-time-personalization-pipeline
 
-This generator is the shop's master data. Project 1 (real-time personalization) uses a read-only export of the current rows of `warehouse.dim_customer` and `warehouse.dim_product`, so both projects describe the same customers, with the same `customer_id`, and the same products. Project 1 streams the live clickstream of those customers, which feeds personalization, the Project 4 ML pipeline and the Project 5 AI layer. This project's own web events (`fact_web_events`) are the marketing feed: they tie sessions to campaigns for the funnel and ad-spend reporting. Limitation: purchases in Project 1 are not reconciled with this project's orders. If the generated data changes, Project 1's export (`reference-data/shop_master` in Project 1) must be refreshed.
+This generator is the shop's master data. The Real-time-personalization-pipeline repository uses a read-only export of the current rows of `warehouse.dim_customer` and `warehouse.dim_product`, so both projects describe the same customers, with the same `customer_id`, and the same products. That repository streams the live clickstream of those customers, which feeds personalization, the ML-Pipeline-Anomaly-Detection pipeline and the AI-Decision-Intelligence-Layer. This project's own web events (`fact_web_events`) are the marketing feed: they tie sessions to campaigns for the funnel and ad-spend reporting. Limitation: purchases in Real-time-personalization-pipeline are not reconciled with this project's orders. If the generated data changes, that repository's export (`reference-data/shop_master` there) must be refreshed.
 
 ---
 
@@ -309,7 +309,7 @@ The `_scd2` facts join each row to the dimension version that was valid at the e
 
 **Marts tie out.** Every mart has one row for the unknown member and one for the invalid-reference member, flagged in `member_type` (`known`, `unknown_member`, `invalid_reference`); filter `member_type = 'known'` for real customers, products or campaigns only. With those rows each mart's revenue (sales less refunds), refunds, spend and units equal the fact totals, and the mart validation checks exactly that.
 
-**Consumer contract.** `tests/integration/test_warehouse.py` records every relation and column that Project 4 and Project 5 read (name, type, grain, key) and the integration run asserts it: adding a column is free; removing, renaming or retyping a recorded one, emptying the relation or breaking its key fails the run. The Power BI dashboards are protected the same way, by column position (section 12).
+**Consumer contract.** `tests/integration/test_warehouse.py` records every relation and column that ML-Pipeline-Anomaly-Detection and AI-Decision-Intelligence-Layer read (name, type, grain, key) and the integration run asserts it: adding a column is free; removing, renaming or retyping a recorded one, emptying the relation or breaking its key fails the run. The Power BI dashboards are protected the same way, by column position (section 12).
 
 ---
 
@@ -794,7 +794,7 @@ docker start project2_postgres
 
 The `project2` password is a local development default; it is also the default in `.env.example` and `dbt/profiles.yml.example`.
 
-**Read-only access.** Consumers (BI tools, Project 4, Project 5) connect as `p2_reader`, not as the owner. The role is created by `sql/warehouse/create_schemas.sql` on every run. It can `SELECT` from the `warehouse`, `marts` and `audit` schemas and from the dbt schemas (`dbt_staging`, `dbt_warehouse`, `dbt_marts`, `dbt_audit`); it cannot read `staging` and cannot write. Timestamps in the warehouse and the marts are `timestamptz`, shown in UTC (the database's time zone); business dates and date keys are Asia/Kolkata dates. Its password comes from `P2_READER_PASSWORD` in `.env` (the local default in `.env.example` is `p2_reader`); without one the role exists but cannot log in.
+**Read-only access.** Consumers (BI tools, ML-Pipeline-Anomaly-Detection, AI-Decision-Intelligence-Layer) connect as `p2_reader`, not as the owner. The role is created by `sql/warehouse/create_schemas.sql` on every run. It can `SELECT` from the `warehouse`, `marts` and `audit` schemas and from the dbt schemas (`dbt_staging`, `dbt_warehouse`, `dbt_marts`, `dbt_audit`); it cannot read `staging` and cannot write. Timestamps in the warehouse and the marts are `timestamptz`, shown in UTC (the database's time zone); business dates and date keys are Asia/Kolkata dates. Its password comes from `P2_READER_PASSWORD` in `.env` (the local default in `.env.example` is `p2_reader`); without one the role exists but cannot log in.
 
 | Setting | Value |
 |---|---|

@@ -939,15 +939,16 @@ def test_total_amount_means_the_charged_amount_in_every_layer():
                                       "from warehouse.fact_orders")[0][0])
 
 
-# What Project 4 and Project 5 read from this warehouse, recorded from their
-# repositories (P4: src/anomaly_detection/source_extract.py and
-# configs/source_extract.yaml; P5: contracts/project2_project3_sources.yaml and
+# What ML-Pipeline-Anomaly-Detection and AI-Decision-Intelligence-Layer read from this
+# warehouse, recorded from their repositories (ML-Pipeline-Anomaly-Detection:
+# src/anomaly_detection/source_extract.py and configs/source_extract.yaml;
+# AI-Decision-Intelligence-Layer: contracts/project2_project3_sources.yaml and
 # src/project5_ai/sources/). Adding a column to a relation is free. Removing,
 # renaming or retyping a column listed here, emptying the relation or breaking
 # its key fails this test: change the consumer first, then this contract.
 CONSUMER_CONTRACT = {
     "marts.mart_customer_360": {
-        "consumer": "P4 transform_customer_360 (SELECT *; entity_id = customer_id)",
+        "consumer": "ML-Pipeline-Anomaly-Detection transform_customer_360 (SELECT *; entity_id = customer_id)",
         "grain": "one row per customer, plus the unknown and the invalid-reference member (member_type)",
         "key": ["customer_id"],
         "columns": {
@@ -962,7 +963,7 @@ CONSUMER_CONTRACT = {
         },
     },
     "marts.mart_campaign_performance": {
-        "consumer": "P4 transform_campaign_performance (SELECT *; entity_id = campaign_id)",
+        "consumer": "ML-Pipeline-Anomaly-Detection transform_campaign_performance (SELECT *; entity_id = campaign_id)",
         "grain": "one row per campaign, plus the unknown and the invalid-reference member (member_type)",
         "key": ["campaign_id"],
         "columns": {
@@ -977,7 +978,7 @@ CONSUMER_CONTRACT = {
         },
     },
     "marts.mart_marketing_funnel": {
-        "consumer": "P4 transform_marketing_funnel (SELECT *; entity_id = campaign_id + event_date + channel_name)",
+        "consumer": "ML-Pipeline-Anomaly-Detection transform_marketing_funnel (SELECT *; entity_id = campaign_id + event_date + channel_name)",
         "grain": "one row per event date, channel and campaign (the unknown and invalid campaigns included)",
         "key": ["event_date", "channel_name", "campaign_id"],
         "columns": {
@@ -989,7 +990,7 @@ CONSUMER_CONTRACT = {
         },
     },
     "marts.mart_product_sales": {
-        "consumer": "P4 transform_product_sales (SELECT *; entity_id = product_id)",
+        "consumer": "ML-Pipeline-Anomaly-Detection transform_product_sales (SELECT *; entity_id = product_id)",
         "grain": "one row per product, plus the unknown and the invalid-reference member (member_type)",
         "key": ["product_id"],
         "columns": {
@@ -1003,7 +1004,7 @@ CONSUMER_CONTRACT = {
         },
     },
     "warehouse.fact_web_events": {
-        "consumer": "P4 transform_web_events (SELECT *; grouped by customer_sk)",
+        "consumer": "ML-Pipeline-Anomaly-Detection transform_web_events (SELECT *; grouped by customer_sk)",
         "grain": "one row per web event",
         "key": ["event_id"],
         "columns": {
@@ -1022,7 +1023,7 @@ CONSUMER_CONTRACT = {
 # and the refunds that make up its revenue.
 AVAILABLE_RELATIONS = {
     f"marts.{snapshot}": {
-        "consumer": f"available: {mart} as of each business date, for time-based train/test splits (P4)",
+        "consumer": f"available: {mart} as of each business date, for time-based train/test splits (ML-Pipeline-Anomaly-Detection)",
         "grain": f"one row per {key} and business date, from the first activity to the last date in the data",
         "key": [key, "snapshot_date"],
         "columns": {"snapshot_date": "date", **CONSUMER_CONTRACT[f"marts.{mart}"]["columns"],
@@ -1034,7 +1035,7 @@ AVAILABLE_RELATIONS = {
         ("mart_campaign_daily_snapshot", "mart_campaign_performance", "campaign_id"),
     )
 }
-# P5 reads no relation yet: it verifies that the database has these schemas
+# AI-Decision-Intelligence-Layer reads no relation yet: it verifies that the database has these schemas
 # before it activates a source (its adapter says it does not extract rows yet).
 CONSUMER_SCHEMAS = {"P5 contracts/project2_project3_sources.yaml": ["staging", "warehouse", "marts", "audit"]}
 

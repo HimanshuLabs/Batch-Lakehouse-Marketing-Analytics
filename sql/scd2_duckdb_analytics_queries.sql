@@ -1,4 +1,4 @@
--- Project 2 — SCD2-Aware DuckDB Analytics Query Pack
+-- Batch-Lakehouse-Marketing-Analytics — SCD2-Aware DuckDB Analytics Query Pack
 -- Purpose:
 -- Business-facing analytical queries over SCD2-aware Gold marts.
 

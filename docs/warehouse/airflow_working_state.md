@@ -76,7 +76,7 @@ The file is `scripts/airflow_local_env.sh`. It is git-ignored because it holds l
 Generate each `<SECRET>` with `openssl rand -hex 16` for the password and `openssl rand -hex 32` for the two keys:
 
 ```bash
-# Local Airflow 3.2.0 dev environment for Project 2 (git-ignored; holds local secrets).
+# Local Airflow 3.2.0 dev environment for this repository (git-ignored; holds local secrets).
 # Usage: source scripts/airflow_local_env.sh
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export AIRFLOW_PG_PASSWORD='<SECRET>'

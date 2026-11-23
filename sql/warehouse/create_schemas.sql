@@ -8,7 +8,7 @@ PostgreSQL Warehouse Schema Layer
 ==================================
 
 Boundary:
-- Project 2 lakehouse owns Raw/Bronze/Silver/Gold.
+- The lakehouse owns Raw/Bronze/Silver/Gold.
 - PostgreSQL starts from trusted Gold/SCD2 outputs.
 - No duplicate lakehouse raw/bronze/silver logic belongs here.
 
@@ -41,7 +41,7 @@ COMMENT ON SCHEMA audit IS
 'Trust and control schema for reconciliation checks, data quality results, freshness checks, and warehouse publish validation.';
 
 -- ---------------------------------------------------------------------------
--- p2_reader: the read-only role for consumers (BI tools, Project 4, Project 5).
+-- p2_reader: the read-only role for consumers (BI tools, ML-Pipeline-Anomaly-Detection, AI-Decision-Intelligence-Layer).
 -- It can SELECT from warehouse, marts and audit, and from the dbt schemas (dbt
 -- grants those itself: dbt/dbt_project.yml). It cannot read staging and cannot
 -- write anything. Every build creates new schemas and tables, so the grants

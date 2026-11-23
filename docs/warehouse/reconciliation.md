@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Reconciliation proves that PostgreSQL warehouse outputs match trusted Project 2 Gold/SCD2 outputs.
+Reconciliation proves that PostgreSQL warehouse outputs match trusted lakehouse Gold/SCD2 outputs.
 
 The goal is simple: dashboards should not become beautiful lies.
 

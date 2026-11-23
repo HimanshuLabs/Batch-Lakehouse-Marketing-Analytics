@@ -1,4 +1,4 @@
-"""Shared fixtures for the Project 2 tests.
+"""Shared fixtures for this repository's tests.
 
 Jobs are loaded from a copy of their source file inside tmp_path, so each job's
 PROJECT_ROOT (the parent of its folder) is a temporary project and nothing is

@@ -13,7 +13,7 @@ Connection priority:
 1. WAREHOUSE_DB_URL, if set
 2. PGHOST / PGPORT / PGDATABASE / PGUSER / PGPASSWORD
 
-Default local values match the Project 2 warehouse container pattern:
+Default local values match the warehouse container (project2_postgres):
 - PGHOST=localhost
 - PGPORT=5434
 - PGDATABASE=marketing_analytics
