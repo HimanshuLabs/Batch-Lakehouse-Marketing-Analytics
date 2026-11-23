@@ -10,7 +10,7 @@ What was measured when the pipeline ran at 4,00,000 customers, and what was not.
 | Size | about 79 lakh web events, about 13 lakh orders, 152 days of daily snapshots; the PostgreSQL database about 42 GB on disk |
 | Machine | one Linux desktop, 16 hardware threads, about 15 GB RAM, SSD; PostgreSQL 16.14 in Docker; `/tmp` a 7.3 GB RAM disk |
 | How | `tests/integration/run_dag.py`, one task at a time, as in the README's "Scale run"; every task but `power_bi_export` |
-| Full run | 19-20 November 2026, commit `01fdaae` (the same tree as `3ebaf50`, the commit the run used on a working branch) |
+| Full run | 19-20 November 2026, commit `01fdaae` (the run itself used a working-branch commit with the identical tree) |
 | Build timed again | the warehouse build only, on `b223266`, 23 November 2026, on a copy of the same database |
 | Settings | `SPARK_LOCAL_DIRS` and `TMPDIR` on the SSD; Spark driver heap 4 GB (`SPARK_DRIVER_MEMORY=4g`); `P2_BUILD_WORK_MEM=256MB`, `P2_BUILD_HASH_MEM_MULTIPLIER=4`, `P2_BUILD_MAINTENANCE_WORK_MEM=1GB`, `P2_BUILD_TEMP_BUFFERS=1GB`; server `shared_buffers=2GB`, `max_wal_size=8GB`, `work_mem=128MB`, `maintenance_work_mem=1GB`, `dynamic_shared_memory_type=mmap`, reverted afterwards (README, "Running at scale") |
 
