@@ -20,7 +20,7 @@ concurrency:
 jobs:
   static:
     name: Static checks
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
 
     steps:
@@ -78,7 +78,7 @@ jobs:
           shopt -s nullglob
           scripts_found=0
 
-          for script_path in scripts/*.sh; do
+          for script_path in scripts/*.sh tests/integration/*.sh; do
             scripts_found=1
             test -s "$script_path" || {
               echo "Empty shell script: $script_path"
@@ -88,7 +88,7 @@ jobs:
           done
 
           test "$scripts_found" -eq 1 || {
-            echo "No shell scripts found under scripts/"
+            echo "No shell scripts found under scripts/ or tests/integration/"
             exit 1
           }
 
@@ -192,7 +192,7 @@ jobs:
 
   unit:
     name: Unit tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
 
     # The throwaway PostgreSQL of the database tests (tests/conftest.py,
@@ -269,7 +269,7 @@ jobs:
   integration:
     name: Integration (full pipeline, warehouse, dbt)
     needs: [static, unit]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 75
 
     steps:
@@ -351,7 +351,7 @@ jobs:
 
   powerbi-assets:
     name: Power BI artifact validation
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
 
     steps:
@@ -369,7 +369,7 @@ jobs:
 
   terraform:
     name: Terraform validation
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
 
     steps:
