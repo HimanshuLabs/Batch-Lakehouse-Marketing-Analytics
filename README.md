@@ -862,15 +862,52 @@ The shop's size is a setting; without it everything is as above (500 customers),
 
 Fact IDs (orders, order items, ad spend) are `BATCH_INDEX × ID_BLOCK + n`, kept within INTEGER (int32) in Silver, Gold and staging. Up to 10,000 customers `ID_BLOCK` is 100,000 (good for about 21,000 days after 2026-05-18). Above that it is 10,000,000, which allows `BATCH_INDEX` up to 213: the last valid batch date of a scaled shop is **2026-12-17**; a later one fails in the generator rather than overflow.
 
-Only `generate_data` reads `P2_NUM_CUSTOMERS`, so the run passes it to the DAG's tasks with `run_dag.py --env`. A scale run leaves out `power_bi_export`: it would write scaled files (among them the per-customer `customer_lifetime_value.csv`) to `data/bi_exports/`, which `terraform apply` uploads to S3.
+**What was run, and how it was measured.** The scale run was done **once, by hand, on one machine; it is not part of CI**, which runs the default 500-customer shop only.
+- **The shop:** 4,00,000 customers (`P2_NUM_CUSTOMERS=400000`), three batches (2026-05-18, 2026-06-04, 2026-06-18), synthetic data: about 79 lakh web events, about 13 lakh orders and 152 days of daily snapshots. The PostgreSQL database then takes about 42 GB on disk.
+- **The machine:** one Linux desktop with 16 hardware threads, about 15 GB of RAM and an SSD; PostgreSQL 16.14 in Docker; `/tmp` is a 7.3 GB RAM disk there.
+- **The settings:** the ones in [Running at scale](#running-at-scale) below: the four `P2_BUILD_*` build settings, Spark scratch space on the SSD, a 4 GB Spark driver heap, and larger PostgreSQL server settings that were reverted afterwards.
+- **The full DAG run** (every task but `power_bi_export`, through `tests/integration/run_dag.py`) ran on 19-20 November 2026 on commit `01fdaae`. That commit added the build settings and the step timings. The warehouse build (`build_warehouse`) took **397.4 min** of the run's 570.7 task minutes.
+- **The warehouse build was then made faster** in eight commits (`96a02f6`, `9e9fd7a`, `6a19f35`, `1502186`, `eaab432`, `b075324`, `54e03fc`, `fa6a425`), each proven to give the same output at the default size. It was timed again at scale on `b223266`, on a copy of the same database: **88 min** instead of 397.4 (23 November 2026).
+  - **Same output:** the warehouse, marts and reports it built match the 4,00,000-customer warehouse of the full run, row for row (a fingerprint of 965 lines). The only difference is the five `warehouse.safe_*` function definitions that `b075324` changed on purpose.
+- **Not re-timed:** the other tasks.
+
+Every step's time, the fingerprint chain, the disk use and what was not measured are in [`docs/scale_run_evidence.md`](docs/scale_run_evidence.md).
+
+### Running at scale
+
+At the default size none of this is needed. At 4,00,000 customers, the run above needed all of it:
+
+1. **Run the tasks with `run_dag.py --env`, not through Airflow.** Each Airflow task gets a fixed environment (`DEFAULT_ENV` in the DAG), so the variables below cannot reach it.
+2. **Spark scratch space on a real disk.** Set `SPARK_LOCAL_DIRS` and `TMPDIR` to folders on a disk with room (the run used a folder on the SSD). By default Spark and Python write to `/tmp`; on the machine above that is a 7.3 GB RAM disk, and `silver_transformations` failed there.
+3. **A 4 GB Spark driver heap.** The Silver and Gold jobs set it themselves. `point_in_time_fact_joins` failed with the default 1 GB heap in the run (`OutOfMemoryError`), and the run was resumed with `SPARK_DRIVER_MEMORY=4g`. Since `66d77e0`, `point_in_time_fact_joins`, `scd2_dimensions` and `scd2_gold_marts` set 4 GB themselves too. That change has not been run at scale yet, so passing `SPARK_DRIVER_MEMORY=4g` as well does no harm.
+4. **The warehouse build's session settings**, read by `scripts/run_warehouse_sql.sh` (`sql/warehouse/begin_generation.sql` applies the first three to the build transaction). The build always runs with parallel query off (`max_parallel_workers_per_gather = 0`): Docker's 64 MB `/dev/shm` cannot hold a parallel hash.
+
+   | Variable | Default | Scale run |
+   |---|---|---|
+   | `P2_BUILD_WORK_MEM` | 64MB | 256MB |
+   | `P2_BUILD_HASH_MEM_MULTIPLIER` | 2 | 4 |
+   | `P2_BUILD_MAINTENANCE_WORK_MEM` | 256MB | 1GB |
+   | `P2_BUILD_TEMP_BUFFERS` | 64MB | 1GB |
+
+5. **PostgreSQL server settings for the run, reverted afterwards.**
+   - **Set before the run** (`ALTER SYSTEM SET`, then a restart of `project2_postgres`): `shared_buffers = '2GB'`, `max_wal_size = '8GB'`, `work_mem = '128MB'`, `maintenance_work_mem = '1GB'`, `dynamic_shared_memory_type = 'mmap'` (the last keeps shared memory out of the 64 MB `/dev/shm`).
+   - **Revert afterwards:** `ALTER SYSTEM RESET ALL;` and another restart, which returns to the image's defaults. No code reads these settings, but every time above was measured with them, so a timing after the revert is not comparable.
+6. **Free disk.**
+   - **Why:** a build writes the new warehouse beside the live one and drops the old one only when it commits, plus temporary files.
+   - **Measured:** the scale database is about 42 GB. The timed build on `b223266` started with 93 GB free on Docker's disk and had 32 GB left at its lowest, with up to 31.6 GB of temporary files and tables at once.
+   - **Recommendation:** start a scale build with at least 80 GB free.
+7. **Leave out `power_bi_export`.** It would write scaled files (among them the per-customer `customer_lifetime_value.csv`) to `data/bi_exports/`, which `terraform apply` uploads to S3. Do not run `terraform apply`, the route A export or a Power BI refresh while the warehouse holds a scaled shop.
 
 Silver, Gold and the warehouse are rebuilt from all of Bronze on every run, so a scale run takes every batch into Bronze first, in date order, and then runs everything from Silver on once, as the last batch. The Silver and Gold checks of the earlier batches run right after the last batch's: they only read the lake and write their own reports, and the Silver check of a batch looks at that batch's rows (by `ingestion_date`).
 
 ```bash
-W=/tmp/p2-scale; mkdir -p "$W"
+W=$HOME/p2-scale; mkdir -p "$W/spark-tmp" "$W/tmp"     # on a disk with room, not /tmp
+SCALE_ENV="P2_NUM_CUSTOMERS=400000 SPARK_LOCAL_DIRS=$W/spark-tmp TMPDIR=$W/tmp SPARK_DRIVER_MEMORY=4g
+  P2_BUILD_WORK_MEM=256MB P2_BUILD_HASH_MEM_MULTIPLIER=4 P2_BUILD_MAINTENANCE_WORK_MEM=1GB P2_BUILD_TEMP_BUFFERS=1GB"
 run() { s=$(date +%s)
+  # shellcheck disable=SC2086  # SCALE_ENV is a list of KEY=VALUE words
   venv/bin/python -B tests/integration/run_dag.py --batch-date "$1" --from "$2" --to "$2" \
-    --log-dir "$W/run-$1" --env P2_NUM_CUSTOMERS=400000 \
+    --log-dir "$W/run-$1" --env $SCALE_ENV \
     || { echo "RUN STOPPED at $1 $2: see the newest log in $W/run-$1"; return 1; }
   echo "$1 $2 $s $(date +%s)" >> "$W/tasks.tsv"; }
 
@@ -891,8 +928,6 @@ scale_run() {
 }
 scale_run; echo "scale_run exit: $?"
 ```
-
-Do not run `terraform apply`, the route A export or a Power BI refresh while the warehouse holds a scaled shop.
 
 ### Export route A Power BI datasets
 
