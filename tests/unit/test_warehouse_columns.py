@@ -281,7 +281,7 @@ def test_the_consumer_contract_names_columns_that_exist_and_catches_every_breaki
     module = consumer_contract_module()
     contract = module.CONSUMER_CONTRACT
     assert set(contract) == {"marts.mart_customer_360", "marts.mart_campaign_performance", "marts.mart_marketing_funnel",
-                             "marts.mart_product_sales", "warehouse.fact_web_events"}, "the five relations ML-Pipeline-Anomaly-Detection reads"
+                             "marts.mart_product_sales", "warehouse.fact_web_events", "warehouse.dim_customer"}, "the six relations ML-Pipeline-Anomaly-Detection reads"
     assert module.CONSUMER_SCHEMAS == {"P5 contracts/project2_project3_sources.yaml": ["staging", "warehouse", "marts", "audit"]}
     # Without a database: every column a consumer reads is in the SQL that builds the relation.
     for relation, expected in contract.items():
@@ -296,7 +296,7 @@ def test_the_consumer_contract_names_columns_that_exist_and_catches_every_breaki
     current = {relation: dict(expected["columns"]) for relation, expected in contract.items()}
     assert check(current) == []
     # Adding a column is free.
-    assert check({**current, "marts.mart_customer_360": {**current["marts.mart_customer_360"], "member_type": "text"}}) == []
+    assert check({**current, "marts.mart_customer_360": {**current["marts.mart_customer_360"], "a_column_added_later": "text"}}) == []
     # Removing, renaming or retyping a column a consumer reads fails, and so does an empty relation or a broken key.
     campaign = current["marts.mart_campaign_performance"]
     removed = {key: value for key, value in campaign.items() if key != "ad_platform_conversions"}

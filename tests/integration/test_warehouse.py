@@ -960,6 +960,7 @@ CONSUMER_CONTRACT = {
             "purchase_intent_event_count": "bigint", "customer_conversion_rate_pct": "numeric",
             "avg_engagement_score": "numeric", "avg_purchase_probability": "numeric",
             "avg_cart_abandonment_probability": "numeric", "repeat_purchase_signal": "boolean",
+            "member_type": "text",
         },
     },
     "marts.mart_campaign_performance": {
@@ -974,7 +975,7 @@ CONSUMER_CONTRACT = {
             "average_order_value": "numeric", "roas": "numeric", "click_through_rate_pct": "numeric",
             "cost_per_click": "numeric", "cost_per_order": "numeric",
             "session_to_order_conversion_rate_pct": "numeric", "avg_engagement_score": "numeric",
-            "avg_purchase_probability": "numeric",
+            "avg_purchase_probability": "numeric", "member_type": "text",
         },
     },
     "marts.mart_marketing_funnel": {
@@ -986,7 +987,7 @@ CONSUMER_CONTRACT = {
             "session_count": "bigint", "product_view_event_count": "bigint", "cart_event_count": "bigint",
             "purchase_event_count": "bigint", "funnel_conversion_rate_pct": "numeric",
             "avg_engagement_score": "numeric", "avg_purchase_probability": "numeric",
-            "avg_cart_abandonment_probability": "numeric",
+            "avg_cart_abandonment_probability": "numeric", "member_type": "text",
         },
     },
     "marts.mart_product_sales": {
@@ -1001,6 +1002,7 @@ CONSUMER_CONTRACT = {
             "product_view_event_count": "bigint", "cart_event_count": "bigint", "purchase_event_count": "bigint",
             "product_conversion_rate_pct": "numeric", "avg_product_engagement_score": "numeric",
             "category_revenue_rank": "bigint", "category_revenue_share_pct": "numeric",
+            "member_type": "text",
         },
     },
     "warehouse.fact_web_events": {
@@ -1014,6 +1016,12 @@ CONSUMER_CONTRACT = {
             "cart_abandonment_probability": "numeric", "event_value": "numeric", "api_latency_ms": "integer",
             "page_load_time_ms": "integer", "fraud_score": "numeric",
         },
+    },
+    "warehouse.dim_customer": {
+        "consumer": "ML-Pipeline-Anomaly-Detection transform_web_events (SELECT *; maps customer_sk to customer_id, drops UNKNOWN and INVALID)",
+        "grain": "one row per customer version (SCD2), plus the unknown (customer_sk 0) and the invalid-reference member (-1)",
+        "key": ["customer_sk"],
+        "columns": {"customer_sk": "bigint", "customer_id": "text"},
     },
 }
 # K1: relations this warehouse offers consumers and no consumer reads yet. They
