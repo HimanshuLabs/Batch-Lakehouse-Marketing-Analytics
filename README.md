@@ -4,7 +4,7 @@
 
 End-to-end marketing analytics platform combining lakehouse processing, PostgreSQL warehouse modeling, dbt analytics engineering, Airflow orchestration, Power BI Online reporting, Terraform-backed BI exports, and GitHub Actions CI/CD validation.
 
-This repository started as a batch marketing lakehouse and has been extended into one merged production-style analytics platform. The lakehouse engine remains the foundation: it generates synthetic marketing/customer data, processes it through Raw, Bronze, Silver, and Gold layers, applies quality checks, handles quarantined records, and produces business-ready marts. The warehouse/reporting layer then promotes trusted Gold outputs into PostgreSQL schemas, models SCD Type 2 dimensions and fact tables, validates point-in-time correctness, builds BI-ready marts, exports dashboard datasets, and documents Power BI Online proof assets.
+This repository started as a batch marketing lakehouse and has been extended into one merged analytics platform, run on synthetic data on one machine. The lakehouse engine remains the foundation: it generates synthetic marketing/customer data, processes it through Raw, Bronze, Silver, and Gold layers, applies quality checks, handles quarantined records, and produces business-ready marts. The warehouse/reporting layer then promotes trusted Gold outputs into PostgreSQL schemas, models SCD Type 2 dimensions and fact tables, validates point-in-time correctness, builds BI-ready marts, exports dashboard datasets, and documents Power BI Online proof assets.
 
 The result is one coherent data product:
 
@@ -187,7 +187,7 @@ Exact Python pins are in `requirements.txt` (runtime) and `requirements-dev.txt`
 | GitHub Actions | The quality gate on every push and pull request | `.github/workflows/ci.yml` | The workflow runs themselves (five jobs) |
 | Power BI | The dashboard, built by hand in Power BI Online from the exported CSVs | `exports/power_bi/`, `data/bi_exports/`, `docs/warehouse/power_bi_*.md`, screenshots in `docs/screenshots/power_bi/` | Not run by the DAG or CI. CI `powerbi-assets` validates the CSVs, their column order, the manifest and the docs; CI `integration` produces the route B CSVs. The dashboard itself is shown by screenshots only |
 | AWS S3 | Hosts five route B CSVs that Power BI Online reads over HTTPS | `terraform/aws-bi-exports/` | Not touched by the DAG or CI (no AWS credentials there). Upload is a manual `terraform apply`; last applied from AWS CloudShell on 14 November 2026; the evidence is the bucket, the dashboard and a final `terraform plan` that reports no changes |
-| Terraform | Declares the S3 bucket, its policy and the five objects | `terraform/aws-bi-exports/*.tf` | CI `terraform`: `fmt -check`, `init -backend=false`, `validate`. `plan` and `apply` are manual and never run in CI. Applied from AWS CloudShell on 14 November 2026: the bucket settings and five files, first set up by hand, were imported (9 resources), the files re-uploaded, and a final `plan` reports no changes |
+| Terraform | Looks up the existing S3 bucket and declares its ownership, encryption, public-access and policy settings and the five objects | `terraform/aws-bi-exports/*.tf` | CI `terraform`: `fmt -check`, `init -backend=false`, `validate`. `plan` and `apply` are manual and never run in CI. Applied from AWS CloudShell on 14 November 2026: the bucket settings and five files, first set up by hand, were imported (9 resources), the files re-uploaded, and a final `plan` reports no changes |
 
 Listed in this README but not exercised by the DAG or CI: Power BI Online, AWS S3 and `terraform apply` (manual, as above), the Airflow scheduler itself (manual, local), and the development environment (Ubuntu, VS Code). pandas, Parquet (pyarrow), psycopg and ruff are used by the code or the CI jobs above; uv only builds the local `venv-dbt`.
 
@@ -450,8 +450,9 @@ Airflow coordinates the platform execution flow. One DAG, `batch_lakehouse_marke
 
 ```text
 generate_data → bronze_ingestion → bronze_quality_checks → silver_transformations →
-silver_quality_checks → gold_transformations → gold_quality_checks → duckdb_gold_analytics →
-publish_gold_to_postgres → scd2_dimensions → point_in_time_fact_joins → scd2_gold_marts →
+silver_quality_checks → gold_transformations → gold_quality_checks →
+[duckdb_gold_analytics, publish_gold_to_postgres] (in parallel) →
+scd2_dimensions → point_in_time_fact_joins → scd2_gold_marts →
 scd2_duckdb_analytics → create_postgresql_schemas → load_gold_scd2_to_staging →
 build_warehouse → dbt_run → dbt_test → dbt_docs → power_bi_export
 ```
@@ -566,6 +567,8 @@ bash tests/integration/run_local.sh            # add --keep to keep the work fol
 
 It runs a copy of the working tree under `/tmp` against a throwaway PostgreSQL 16.14 container, `p2it_postgres_<pid>` on port 5440. It removes only that container afterwards. Locally it skips the three dbt tasks; CI runs them.
 
+pytest deselects the integration tests unless it is given `-m integration`: `pyproject.toml` sets `addopts = "-ra -m 'not integration'"`, so a bare `pytest tests/integration` selects nothing and reports them as deselected. `run_integration.sh` passes `-m integration` itself.
+
 Run the unit tests locally the way CI does. The tests that build a warehouse need a throwaway PostgreSQL on port 5546; they drop and rebuild its schemas, so they only run when `P2_F_SANDBOX=1` says that database is theirs to use:
 
 ```bash
@@ -573,7 +576,7 @@ docker run -d --name p2-part-f-sandbox -p 127.0.0.1:5546:5432 \
   -e POSTGRES_USER=project2 -e POSTGRES_PASSWORD=project2 -e POSTGRES_DB=marketing_analytics postgres:16.14
 P2_F_SANDBOX=1 P2_REQUIRE_DB=1 TZ=UTC venv/bin/python -m pytest tests/unit -p no:cacheprovider -rs
 P2_F_SANDBOX=1 P2_REQUIRE_DB=1 TZ=Asia/Kolkata venv/bin/python -m pytest tests/unit -p no:cacheprovider -rs
-docker rm -f p2-part-f-sandbox
+docker rm -fv p2-part-f-sandbox
 ```
 
 Without `P2_F_SANDBOX=1` those tests are skipped; with `P2_REQUIRE_DB=1` a missing database is a failure, never a skip.

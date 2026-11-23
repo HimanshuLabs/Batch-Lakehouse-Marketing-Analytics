@@ -45,7 +45,7 @@ Instead, it proves:
 2. dashboard queries are index-eligible,
 3. selective drilldown queries use indexes,
 4. broad aggregate queries may still use sequential scans locally,
-5. the design is ready for larger warehouse-scale data.
+5. the same design was also built once at a larger scale by hand, on one machine (not in CI).
 
 
 ## Index Strategy

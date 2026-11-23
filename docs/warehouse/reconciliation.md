@@ -10,9 +10,9 @@ The goal is simple: dashboards should not become beautiful lies.
 
 | Check | Source | Target |
 |---|---|---|
-| Order count | staging.gold_fact_orders_scd2 | warehouse.fact_orders |
-| Revenue total | staging.gold_fact_orders_scd2 | warehouse.fact_orders |
-| Campaign spend | staging.gold_fact_campaign_spend_scd2 | warehouse.fact_campaign_spend |
+| Order count | staging.stg_gold_fact_orders_scd2 | warehouse.fact_orders |
+| Revenue total | staging.stg_gold_fact_orders_scd2 | warehouse.fact_orders |
+| Campaign spend | staging.stg_gold_fact_campaign_spend_scd2 | warehouse.fact_campaign_spend |
 | Null customer keys | expected zero | warehouse.fact_orders |
 | Duplicate order ids | expected zero | warehouse.fact_orders |
 | Web event rows | staging.stg_gold_fact_web_events | warehouse.fact_web_events (every event is loaded) |

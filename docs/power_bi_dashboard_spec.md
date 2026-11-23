@@ -6,7 +6,7 @@ Batch Lakehouse Marketing Analytics Dashboard
 
 ## Purpose
 
-This dashboard visualizes a production-style batch lakehouse pipeline for marketing analytics. It uses SCD2-aware Gold facts and marts, including point-in-time joins and quarantine handling for invalid fact-dimension relationships.
+This dashboard visualizes a batch lakehouse pipeline for marketing analytics, built on synthetic data. It uses SCD2-aware Gold facts and marts, including point-in-time joins and quarantine handling for invalid fact-dimension relationships.
 
 ## Data Sources
 

@@ -19,10 +19,6 @@ REQUIRED_FILES = {
     "sql/warehouse/dashboard_query_pack.sql": ["select"],
 }
 
-OPTIONAL_FILES = {
-    "sql/warehouse/powerbi_export_queries.sql": [],
-}
-
 FORBIDDEN_PATTERNS = [
     r"REPLACE_ME",
     r"FIXME",
@@ -166,9 +162,6 @@ def main() -> int:
 
     for path_text, keywords in REQUIRED_FILES.items():
         validate_sql_file(path_text, keywords, required=True, errors=errors)
-
-    for path_text, keywords in OPTIONAL_FILES.items():
-        validate_sql_file(path_text, keywords, required=False, errors=errors)
 
     warehouse_sql_files = sorted(Path("sql/warehouse").glob("*.sql"))
 

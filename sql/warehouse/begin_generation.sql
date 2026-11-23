@@ -44,8 +44,11 @@ RELEASE SAVEPOINT generation_needs_the_build_transaction;
 -- Session settings of the build, for this transaction only (SET LOCAL
 -- semantics). scripts/run_warehouse_sql.sh passes P2_BUILD_WORK_MEM,
 -- P2_BUILD_HASH_MEM_MULTIPLIER and P2_BUILD_MAINTENANCE_WORK_MEM as p2.build_*;
--- unset or empty gives the defaults below. No parallel query inside the build:
--- with a larger work_mem a parallel hash would not fit Docker's 64 MB /dev/shm.
+-- unset or empty gives the defaults below. The fourth, P2_BUILD_TEMP_BUFFERS,
+-- the runner sets itself (SET LOCAL temp_buffers, default 64MB), because it
+-- must be set before the session's first temporary table.
+-- No parallel query inside the build: with a larger work_mem a parallel hash
+-- would not fit Docker's 64 MB /dev/shm.
 DO $$
 DECLARE
     setting RECORD;

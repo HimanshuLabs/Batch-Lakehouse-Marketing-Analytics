@@ -43,7 +43,6 @@ data/quarantine/*
 !data/gold/.gitkeep
 !data/quarantine/.gitkeep
 !logs/.gitkeep
-!images/.gitkeep
 
 # Spark
 spark-warehouse/
