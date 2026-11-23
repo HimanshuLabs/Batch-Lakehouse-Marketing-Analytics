@@ -12,10 +12,14 @@ The project produces Power BI CSVs in two ways:
 
 | Route | Script | Source | Output | How Power BI Online gets it |
 |---|---|---|---|---|
-| A. Warehouse marts | `scripts/export_power_bi_marts.py` (run by hand) | PostgreSQL `marts.*` | `exports/power_bi/*.csv` (committed) | upload the files in Power BI Online |
+| A. Warehouse marts | `scripts/export_power_bi_marts.py` (run by hand) | PostgreSQL `marts.*` | `exports/power_bi/*.csv` (committed) | the five CSVs are copied by hand to a second S3 bucket, not managed by Terraform; each route A semantic model reads its file by web URL (Text/CSV) and refreshes daily |
 | B. Gold SCD2 marts | `sql/export_power_bi_dataset.py` (the DAG's `power_bi_export` task) | Gold SCD2 marts and facts, plus verified pipeline checks | `data/bi_exports/*.csv` (git-ignored) | five files are uploaded to S3 by `terraform/aws-bi-exports`; Power BI reads them through public HTTPS URLs |
 
 Route B serves the dashboard through S3 because the available Microsoft account had no OneDrive for Business upload. Its five public files are `campaign_performance.csv`, `customer_lifetime_value.csv`, `product_performance.csv`, `marketing_funnel.csv` and `data_quality_summary.csv`: read-only, exactly those objects, synthetic data only. `data_quality_summary.csv` is built from verified checks (warehouse reconciliation, SCD2 validation, Silver quarantine, point-in-time conservation), never by hand.
+
+Route A is also served through S3, from a second bucket that was set up by hand and is not in Terraform's state. Its policy allows public `s3:GetObject` on named files only. The five route A semantic models (Revenue Trends, Campaign Performance, Product Performance, Customer 360, Marketing Funnel) each read one CSV from it by web URL, with a daily scheduled refresh. `export_manifest.json` is never uploaded: written outside the checkout, it holds local paths.
+
+The committed `exports/power_bi/` files are the default-size run (500 customers), which CI checks. Since 23 November 2026 both buckets hold the 4,00,000-customer run's files, except `customer_lifetime_value.csv`, which stays the default-size file; see `docs/scale_run_evidence.md`, "Power BI and S3".
 
 The rest of this document describes route A; the route B refresh steps are under "Recurring refresh".
 
@@ -38,7 +42,9 @@ scripts/export_power_bi_marts.py
     ↓
 exports/power_bi/*.csv
     ↓
-Power BI Online upload / refresh
+route A S3 bucket (files replaced by hand)
+    ↓
+Power BI Online web sources, daily scheduled refresh
     ↓
 Dashboard visuals
 ```
@@ -164,8 +170,8 @@ python -m json.tool exports/power_bi/export_manifest.json
 
 1. Open Power BI Service in the browser.
 2. Open the target workspace.
-3. Route A: upload the CSV files from `exports/power_bi/`. Route B: create Text/CSV (web) sources from the URLs in `terraform output power_bi_csv_urls`.
-4. Create a semantic model or report from the uploaded CSV datasets, depending on the workspace features available.
+3. Route A: upload the five CSV files to the route A S3 bucket (S3 console) and create Text/CSV (web) sources from their object URLs. Route B: create Text/CSV (web) sources from the URLs in `terraform output power_bi_csv_urls`.
+4. Create a semantic model or report from the web sources, depending on the workspace features available, and give each semantic model a daily scheduled refresh.
 5. Confirm data types:
    - Date columns as Date
    - Revenue/spend fields as Decimal number or Currency. Every monetary field in the exports of both routes is in Indian rupees (INR); set the currency format to ₹ (English (India))
@@ -183,12 +189,12 @@ python -m json.tool exports/power_bi/export_manifest.json
 
 ### Recurring refresh
 
-Route A (warehouse marts, uploaded files):
+Route A (warehouse marts, S3 bucket set up by hand):
 
 1. Run or confirm the Airflow/warehouse pipeline.
 2. Run `scripts/export_power_bi_marts.py`.
-3. Upload or replace the CSV files in Power BI Online.
-4. Refresh the report/dataset if required by the workspace flow.
+3. Replace the five CSV files in the route A S3 bucket by hand (S3 console), under the same names; do not upload `export_manifest.json`.
+4. The daily scheduled refresh picks them up; refresh the five semantic models by hand to see them at once.
 5. Confirm dashboard visuals reflect the latest exported data.
 
 Route B (Gold SCD2 marts, S3 URLs):
@@ -384,14 +390,14 @@ python -m pip install "pip>=25,<26"
 python -m pip install "psycopg2-binary>=2.9,<3"
 ```
 
-### Power BI CSV upload issues
+### Power BI CSV refresh issues
 
 Possible causes:
 
-- CSV schema changed after the first upload.
+- CSV schema changed after the semantic model was built.
 - Date columns were inferred as text.
 - Numeric fields were inferred as text.
-- Browser upload used an old cached file.
+- An old file was uploaded to the S3 bucket.
 - A CSV file was replaced while still being read.
 
 Fix:
@@ -400,7 +406,7 @@ Fix:
 2. Confirm file timestamps with `ls -lh exports/power_bi`.
 3. Confirm headers with `head -n 1`.
 4. Confirm row counts with `wc -l`.
-5. Re-upload the CSV files.
+5. Replace the CSV files in the S3 bucket again and refresh the semantic models.
 6. Correct inferred data types in Power BI Online.
 
 ## Optional `.pbix` note

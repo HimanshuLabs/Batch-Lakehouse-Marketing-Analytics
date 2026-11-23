@@ -356,23 +356,23 @@ Show user movement through the marketing funnel and identify drop-off points.
 
 ## Power BI Online manual build instructions
 
-### Upload CSV files
+### Connect the CSV files
 
 1. Open Power BI Service in the browser.
 2. Go to the target workspace.
-3. Choose upload/import options for local files.
-4. Upload these CSV files from `exports/power_bi/`:
+3. Copy these CSV files from `exports/power_bi/` by hand (S3 console) to the route A S3 bucket, a second bucket that was set up by hand and is not managed by Terraform; never upload `export_manifest.json`:
    - `revenue_daily.csv`
    - `campaign_performance.csv`
    - `product_sales.csv`
    - `customer_360.csv`
    - `marketing_funnel.csv`
+4. Create a Text/CSV (Web) source for each file from its object URL.
 
 ### Create semantic model/report
 
 Depending on available Power BI Service workspace features:
 
-1. Create a semantic model from the uploaded CSV files, or create a report directly from each uploaded dataset.
+1. Create a semantic model from each web source, or create a report directly from each one, and give each semantic model a daily scheduled refresh.
 2. Confirm column data types:
    - date fields as Date
    - revenue/spend/order metrics as decimal or whole number
@@ -416,13 +416,13 @@ Suggested slicers:
    - Funnel conversion rate
 4. Arrange tiles from executive summary at the top to detailed analysis below.
 
-### Refresh / re-upload flow
+### Refresh flow
 
 For this Ubuntu-friendly demo:
 
 1. Airflow runs the lakehouse and warehouse pipeline.
 2. PostgreSQL marts are refreshed.
-3. Route A: `scripts/export_power_bi_marts.py` writes fresh CSV files into `exports/power_bi/`, and they are uploaded in Power BI Online.
+3. Route A: `scripts/export_power_bi_marts.py` writes fresh CSV files into `exports/power_bi/`; they are copied by hand to the route A S3 bucket, and the semantic models' daily refresh reads them by web URL.
 4. Route B: the DAG's `power_bi_export` task writes five files into `data/bi_exports/` (including `data_quality_summary.csv`, built from verified checks), `terraform apply` in `terraform/aws-bi-exports` uploads them to S3, and Power BI Online refreshes them from their public HTTPS URLs (read-only, synthetic data only).
 5. Dashboard visuals reflect the latest data.
 

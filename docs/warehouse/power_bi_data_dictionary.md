@@ -322,7 +322,7 @@ Supports funnel progression reporting, conversion analysis, and drop-off identif
 
 ## Data quality expectations
 
-Before CSV files are uploaded to Power BI Online:
+Before the CSV files are copied to S3 for Power BI Online:
 
 1. Every required CSV file must exist.
 2. Every CSV file must contain a header row.
@@ -354,6 +354,6 @@ python -m json.tool exports/power_bi/export_manifest.json
 - Use CSV files as imported datasets.
 - Keep base business logic in PostgreSQL marts.
 - Use Power BI measures only for presentation-level calculations when needed.
-- Correct inferred data types after upload.
+- Correct inferred data types after a web source is first loaded.
 - Prefer slicers for date, campaign, product category, and customer segment.
 - Keep dashboard visuals aligned to the mart grain.

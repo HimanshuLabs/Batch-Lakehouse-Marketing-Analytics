@@ -31,7 +31,7 @@ This project demonstrates practical Data Engineering and Analytics Engineering c
 | Analytics engineering | 24 dbt models and 82 dbt tests, docs, lineage, and exposures |
 | Orchestration | A single Airflow DAG (Airflow 3.2) with 20 tasks covering the lakehouse, warehouse, dbt and reporting |
 | Reporting | Power BI Online dashboard assets, screenshots, CSV exports, and refresh flow documentation |
-| Infrastructure | Terraform for the S3 layer that serves the Power BI CSVs |
+| Infrastructure | Terraform for the S3 layer that serves the route B Power BI CSVs |
 | CI/CD | GitHub Actions: static checks, unit tests in two time zones, and a full end-to-end integration run |
 
 ---
@@ -102,7 +102,8 @@ flowchart TD
     M --> P["Route A exports<br/>exports/power_bi/*.csv"]
     J --> P2["Route B exports<br/>data/bi_exports/*.csv"]
     P2 --> Q["S3 public HTTPS URLs<br/>five CSVs"]
-    P --> R["Power BI Online<br/>semantic model, reports, dashboard"]
+    P --> QA["Second S3 bucket, not in Terraform<br/>five CSVs, replaced by hand"]
+    QA --> R["Power BI Online<br/>semantic model, reports, dashboard"]
     Q --> R
 
     S["Airflow DAG"] --> C
@@ -161,7 +162,7 @@ flowchart TD
 | Analytics engineering | dbt-core 1.10.15, dbt-postgres 1.10.0 |
 | Orchestration | Apache Airflow 3.2.0 |
 | BI/reporting | Power BI Online |
-| BI exports | CSV datasets; five of them served from S3 over public HTTPS URLs |
+| BI exports | CSV datasets; ten of them, five per route, served from S3 over public HTTPS URLs |
 | Infrastructure | Terraform (CI validates with 1.17.1) |
 | CI/CD | GitHub Actions |
 | Container runtime | Docker |
@@ -186,8 +187,8 @@ Exact Python pins are in `requirements.txt` (runtime) and `requirements-dev.txt`
 | pytest | Unit tests in two time zones with the database tests required; integration assertions on the finished pipeline | `tests/unit/`, `tests/integration/` | CI `unit` and `integration`; locally `venv/bin/python -m pytest tests/unit` and `bash tests/integration/run_local.sh` |
 | GitHub Actions | The quality gate on every push and pull request | `.github/workflows/ci.yml` | The workflow runs themselves (five jobs) |
 | Power BI | The dashboard, built by hand in Power BI Online from the exported CSVs | `exports/power_bi/`, `data/bi_exports/`, `docs/warehouse/power_bi_*.md`, screenshots in `docs/screenshots/power_bi/` | Not run by the DAG or CI. CI `powerbi-assets` validates the CSVs, their column order, the manifest and the docs; CI `integration` produces the route B CSVs. The dashboard itself is shown by screenshots only |
-| AWS S3 | Hosts five route B CSVs that Power BI Online reads over HTTPS | `terraform/aws-bi-exports/` | Not touched by the DAG or CI (no AWS credentials there). Upload is a manual `terraform apply`; last applied from AWS CloudShell on 14 November 2026; the evidence is the bucket, the dashboard and a final `terraform plan` that reports no changes |
-| Terraform | Looks up the existing S3 bucket and declares its ownership, encryption, public-access and policy settings and the five objects | `terraform/aws-bi-exports/*.tf` | CI `terraform`: `fmt -check`, `init -backend=false`, `validate`. `plan` and `apply` are manual and never run in CI. Applied from AWS CloudShell on 14 November 2026: the bucket settings and five files, first set up by hand, were imported (9 resources), the files re-uploaded, and a final `plan` reports no changes |
+| AWS S3 | Hosts the CSVs that Power BI Online reads over HTTPS: five route B CSVs in the bucket Terraform manages, and five route A CSVs in a second bucket that was set up by hand and is not in Terraform | `terraform/aws-bi-exports/` (the route B bucket only) | Not touched by the DAG or CI (no AWS credentials there). Route B: upload is a manual `terraform apply`; last applied from AWS CloudShell on 23 November 2026; the evidence is the bucket, the dashboard and a final `terraform plan` that reports no changes. Route A: the five files are replaced by hand in the S3 console |
+| Terraform | Looks up the existing S3 bucket and declares its ownership, encryption, public-access and policy settings and the five objects | `terraform/aws-bi-exports/*.tf` | CI `terraform`: `fmt -check`, `init -backend=false`, `validate`. `plan` and `apply` are manual and never run in CI. Applied from AWS CloudShell on 14 November 2026: the bucket settings and five files, first set up by hand, were imported (9 resources), the files re-uploaded, and a final `plan` reports no changes. Applied again on 23 November 2026 with four summary files of the 4,00,000-customer run (0 added, 4 changed, 0 destroyed); the `plan` after it reports no changes |
 
 Listed in this README but not exercised by the DAG or CI: Power BI Online, AWS S3 and `terraform apply` (manual, as above), the Airflow scheduler itself (manual, local), and the development environment (Ubuntu, VS Code). pandas, Parquet (pyarrow), psycopg and ruff are used by the code or the CI jobs above; uv only builds the local `venv-dbt`.
 
@@ -483,7 +484,7 @@ The reporting layer turns warehouse and Gold marts into Power BI Online assets. 
 
 | Route | Script | Source | Output | How Power BI Online gets it |
 |---|---|---|---|---|
-| A. Warehouse marts | `scripts/export_power_bi_marts.py` (run by hand) | PostgreSQL `marts.*` | `exports/power_bi/*.csv` and `export_manifest.json` (committed) | upload the files in Power BI Online |
+| A. Warehouse marts | `scripts/export_power_bi_marts.py` (run by hand) | PostgreSQL `marts.*` | `exports/power_bi/*.csv` and `export_manifest.json` (committed) | the five CSVs are copied by hand to a second S3 bucket, not managed by Terraform; each route A semantic model reads its file by web URL (Text/CSV) and refreshes daily |
 | B. Gold SCD2 marts | `sql/export_power_bi_dataset.py` (the DAG's `power_bi_export` task) | Gold SCD2 marts and facts, plus verified pipeline checks | `data/bi_exports/*.csv` (git-ignored) | five files uploaded to S3; Power BI reads them through public HTTPS URLs |
 
 Route A exported datasets:
@@ -511,6 +512,10 @@ exports/power_bi/export_manifest.json
 - the module sets ownership controls, SSE-S3 encryption, and the public access block settings;
 - the bucket policy grants public `s3:GetObject` on exactly those five objects, with no listing and no write;
 - the module uploads the five files from `data/bi_exports/`.
+
+**Route A and S3.** Route A's five CSVs are served the same way, from a second S3 bucket that was set up by hand and is not managed by Terraform. Its policy allows public `s3:GetObject` on named files only. Each of the five route A semantic models (Revenue Trends, Campaign Performance, Product Performance, Customer 360, Marketing Funnel) reads one file by web URL and refreshes daily. A new export reaches the dashboard when its five CSVs replace the objects in that bucket.
+
+**Which size each copy is.** The CSVs committed in `exports/power_bi/` are the default-size run (500 customers): they are what CI checks. The files in S3, what Power BI Online shows and the screenshots in section 14 are the 4,00,000-customer run of 23 November 2026, with one exception: `customer_lifetime_value.csv`, the per-customer file in the Terraform bucket, stays the default-size file. At scale it is 11,22,12,255 bytes. The AWS provider uploads a file that large in parts, S3's ETag for it is then not an MD5, and `etag = filemd5(...)` in `main.tf` would show a change on every later `terraform plan`. No Power BI semantic model reads that file. The evidence is in [`docs/scale_run_evidence.md`](docs/scale_run_evidence.md#power-bi-and-s3).
 
 **The column order is a contract.** Power BI reads these CSVs by column position. `scripts/power_bi_dashboard_contract.json` records the columns each file of both routes was published with, in order. Both export scripts write those columns first, in that order, and append every newer column after them; `scripts/validate_powerbi_assets.py` (CI job `powerbi-assets`) and the tests fail when a published column is moved, renamed or dropped.
 
@@ -606,7 +611,7 @@ docs/screenshots/power_bi/02_campaign_performance.png
 docs/screenshots/power_bi/03_data_quality_reconciliation.png
 ```
 
-The dashboard screenshots were taken on 14 November 2026 from the current data; for example the executive overview's totals (revenue INR 3,984,959.66, spend INR 1,434,179.14) are those of `data/bi_exports/campaign_performance.csv`.
+The dashboard screenshots were taken on 23 November 2026, after the 4,00,000-customer files were placed in S3 and every semantic model was refreshed; money is shown in rupees (₹). For example, the executive overview's totals (revenue INR 3,142,927,795.52, spend INR 1,434,179.14) are those of the scale run's route B `campaign_performance.csv`, which is not committed. The committed exports in `exports/power_bi/` are the default-size run and give smaller figures.
 
 Airflow screenshot:
 
@@ -614,7 +619,7 @@ Airflow screenshot:
 docs/screenshots/airflow/01_dag_run_success.png
 ```
 
-Export proof:
+Export proof (the default-size run, which CI checks; the 4,00,000-customer exports are not committed):
 
 ```text
 exports/power_bi/*.csv
@@ -896,7 +901,10 @@ At the default size none of this is needed. At 4,00,000 customers, the run above
    - **Why:** a build writes the new warehouse beside the live one and drops the old one only when it commits, plus temporary files.
    - **Measured:** the scale database is about 42 GB. The timed build on `b223266` started with 93 GB free on Docker's disk and had 32 GB left at its lowest, with up to 31.6 GB of temporary files and tables at once.
    - **Recommendation:** start a scale build with at least 80 GB free.
-7. **Leave out `power_bi_export`.** It would write scaled files (among them the per-customer `customer_lifetime_value.csv`) to `data/bi_exports/`, which `terraform apply` uploads to S3. Do not run `terraform apply`, the route A export or a Power BI refresh while the warehouse holds a scaled shop.
+7. **Leave out `power_bi_export`, and export to a folder outside the checkout.**
+   - **Why:** the task writes to `data/bi_exports/`, which `terraform apply` uploads, and the route A script writes by default to `exports/power_bi/`, whose committed files are the default-size run that CI checks.
+   - **How it was done on 23 November 2026:** both export scripts were run once by hand with `--export-dir` (and, for route B, `--report-path`) set to a folder outside the checkout, route B with `BATCH_DATE=2026-06-18`, and route A in a read-only session with parallel query off (`PGOPTIONS="-c default_transaction_read_only=on -c max_parallel_workers_per_gather=0"`).
+   - **What was published:** route A's five CSVs, never its `export_manifest.json`, which holds local paths when written outside the checkout. Only four route B files went to the Terraform bucket: `customer_lifetime_value.csv` stays the default-size file there (section 12 says why).
 
 Silver, Gold and the warehouse are rebuilt from all of Bronze on every run, so a scale run takes every batch into Bronze first, in date order, and then runs everything from Silver on once, as the last batch. The Silver and Gold checks of the earlier batches run right after the last batch's: they only read the lake and write their own reports, and the Silver check of a batch looks at that batch's rows (by `ingestion_date`).
 
@@ -936,6 +944,8 @@ PGHOST=localhost PGPORT=5434 PGDATABASE=marketing_analytics PGUSER=project2 PGPA
   venv/bin/python scripts/export_power_bi_marts.py
 venv/bin/python scripts/validate_powerbi_assets.py
 ```
+
+To show a new export in Power BI Online, replace the five CSVs in the route A S3 bucket by hand (S3 console), under the same names; do not upload `export_manifest.json`. The semantic models' daily refresh picks them up, or they can be refreshed by hand.
 
 ### Upload the route B files to S3
 
@@ -1018,7 +1028,7 @@ cat exports/power_bi/export_manifest.json
 
 Deliberate trade-offs for a portfolio project built on synthetic data:
 
-- **Public dashboard files.** Power BI Online reads five synthetic CSVs from S3 through public, read-only object URLs (no listing, no write access). The bucket policy does not enforce TLS, which is acceptable for synthetic data; a production setup would serve the files privately, for example through CloudFront with origin access control.
+- **Public dashboard files.** Power BI Online reads synthetic CSVs from two S3 buckets, five per route, through public, read-only object URLs: both bucket policies grant only `s3:GetObject` on named files (no listing, no write access). Neither policy enforces TLS, which is acceptable for synthetic data; a production setup would serve the files privately, for example through CloudFront with origin access control.
 - **Reproducibility scope.** Direct dependencies are pinned; transitive dependencies of the dev tools are not.
 
 **Known characteristics of the synthetic data.** The source is made coherent enough that nothing contradicts itself, not realistic. Left as they are, on purpose: the funnel converts far more often than a real shop (event types are drawn almost evenly, so about one event in six is a purchase); most orders are a single line; loyalty points do not grow with orders and stock does not fall with sales; the model-score fields (engagement, purchase and abandonment probability, fraud score) and the recommendation fields are random and unrelated to what the visitor did, which also keeps them from leaking outcomes; an IP address is not tied to the visit's city and names are not regional; every web event carries a product, page views and searches included; prime members pay shipping like everyone else, and the free-shipping value is high for the typical order; there is no price or campaign history before the first batch; the ad platform's conversions are independent of the shop's orders; and the channel names (`google`, `facebook`, `instagram`) are the real platforms, while product brands are invented.

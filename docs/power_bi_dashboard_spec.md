@@ -29,7 +29,7 @@ Export location:
 data/bi_exports/
 ```
 
-Power BI Online reads the five uploaded files through public HTTPS S3 URLs managed by `terraform/aws-bi-exports` (read-only, exactly those five objects). Only synthetic data is ever uploaded.
+The five uploaded files are served through public HTTPS S3 URLs managed by `terraform/aws-bi-exports` (read-only, exactly those five objects). Two of them, `campaign_performance.csv` and `data_quality_summary.csv`, are connected to a Power BI Online semantic model. Only synthetic data is ever uploaded.
 
 ## Data Quality Summary
 

@@ -113,11 +113,105 @@ So the scale warehouse built by `b223266` has the same rows, marts, reports and 
 
 The peaks were sampled once a minute, so a shorter peak can have been higher.
 
+## Power BI and S3
+
+On 23 November 2026, from the scale lake and warehouse above, on commit `ca25502`.
+
+**The exports.** Both export scripts were run once, by hand, writing to a folder outside the checkout:
+- route B with `BATCH_DATE=2026-06-18`;
+- route A in a read-only session with parallel query off.
+
+Afterwards:
+- the live database's row counts and server settings were the same as before;
+- nothing in the checkout had changed;
+- the committed `exports/power_bi/` files are still the default-size run.
+
+| Route B file | Rows | Route A file | Rows |
+|---|---|---|---|
+| `campaign_performance.csv` | 55 | `revenue_daily.csv` | 152 |
+| `customer_lifetime_value.csv` | 3,84,062 | `campaign_performance.csv` | 39 |
+| `product_performance.csv` | 141 | `product_sales.csv` | 149 |
+| `marketing_funnel.csv` | 34 | `customer_360.csv` | 3,99,999 |
+| `data_quality_summary.csv` | 87, every check PASS | `marketing_funnel.csv` | 1,324 |
+| `fact_orders.csv` | 12,89,899 | | |
+| `fact_order_items.csv` | 14,29,440 | | |
+| `fact_campaign_spend.csv` | 4,284 | | |
+
+The route B report's overall status was PASS. All five route A manifest records were SUCCESS. The three fact files are not published.
+
+**Route A: the second S3 bucket.** Route A's five semantic models read their CSVs by web URL from an S3 bucket that was set up by hand and is not in Terraform's state. On 14 November its five objects were byte-identical to the committed `exports/power_bi/` files. On 23 November they were replaced by hand in the S3 console. Two checks followed, for each object:
+- it was read back from S3 with the account's own credentials, and its md5 equals the export's;
+- a public HTTPS request for it, without credentials, returned HTTP 200 with the right Content-Length.
+
+| File | Bytes, 14 Nov | Bytes, 23 Nov | Public read | md5, 23 Nov |
+|---|---|---|---|---|
+| `campaign_performance.csv` | 12,362 | 13,892 | HTTP 200 | `b96d1a8129ff3858285e641fc13afd23` |
+| `customer_360.csv` | 1,43,947 | 11,73,24,284 | HTTP 200 | `f098d82bb24fe09dbfa3dc035ca78a77` |
+| `marketing_funnel.csv` | 1,79,789 | 2,48,186 | HTTP 200 | `c8ee2500b5657cbdf69dad274932127d` |
+| `product_sales.csv` | 30,039 | 35,685 | HTTP 200 | `e6ddb180ad4c96eee07d877ad3dffdc6` |
+| `revenue_daily.csv` | 23,173 | 30,739 | HTTP 200 | `a9421b2d5087e965f98dfc7ac6904556` |
+
+**Route B: the Terraform bucket.** Terraform v1.17.1 in AWS CloudShell, with the state unchanged since 14 November. Four summary files went up at scale. `customer_lifetime_value.csv` stays the default-size file of 14 November (1,36,893 bytes), for two reasons:
+- **Size:** at scale it is 11,22,12,255 bytes.
+- **ETag:** the AWS provider uploads objects over 5 MiB in parts, and S3's ETag is then not an MD5. `etag = filemd5(...)` in `main.tf` would therefore show one change on every later plan.
+
+`main.tf` is unchanged. The steps:
+
+1. `terraform plan` with the 14 November files: `No changes. Your infrastructure matches the configuration.`
+2. The four files placed, md5 checked; `terraform fmt -check -recursive` passed.
+
+   | File | Bytes | md5 |
+   |---|---|---|
+   | `campaign_performance.csv` | 26,081 | `620a2771ff9c0aa26ee964ef5720b8cf` |
+   | `product_performance.csv` | 44,129 | `da6f880307d3aa73563b8c6a54e8a555` |
+   | `marketing_funnel.csv` | 10,256 | `1f7645f6533e5c07fe26eb1709270e32` |
+   | `data_quality_summary.csv` | 7,124 | `86c77c54a9869b1204ca3a312cedc9dc` |
+
+3. `terraform plan`: four `aws_s3_object.power_bi_exports[...] will be updated in-place`, then `Plan: 0 to add, 4 to change, 0 to destroy.`
+4. `terraform apply`: four `Modifications complete`, then `Apply complete! Resources: 0 added, 4 changed, 0 destroyed.`
+5. `terraform plan` again: `No changes. Your infrastructure matches the configuration.`
+6. The bucket:
+   - for all five objects, the S3 ETag equals the local md5;
+   - a public read of each returns HTTP 200 with Content-Length 26,081, 44,129, 10,256, 7,124 and 1,36,893;
+   - another key returns HTTP 403, and so does listing the bucket;
+   - four objects are dated 23 November 2026 and `customer_lifetime_value.csv` 14 November 2026.
+
+Only `campaign_performance.csv` and `data_quality_summary.csv` of this bucket are connected to a Power BI semantic model.
+
+**Power BI Online.** All seven semantic models were refreshed on 23 November 2026 between 22:32 and 22:37 IST, with no warnings. Money columns and measures are shown in rupees (₹); counts, ratios and percentages are unchanged. The cards, at scale and as they were on 14 November at the default size:
+
+| Page | Card | 4,00,000 customers | Default size |
+|---|---|---|---|
+| Revenue Trends | Total Net Revenue | ₹3.28bn | 4.22M |
+| Revenue Trends | Total Orders | 1M | 2K |
+| Revenue Trends | Average Order Value | ₹2.74K | 2.80K |
+| Customer 360 | Total Customers | 400K | 497 |
+| Customer 360 | Average Customer Value | ₹7.86K | 7.92K |
+| Customer 360 | Total Lifetime Value | ₹3.14bn | 3.94M |
+| Customer 360 | Total Orders | 1M | 2K |
+| Campaign Performance | Total Campaign Spend | ₹1.39M | 1.39M |
+| Campaign Performance | Campaign Revenue | ₹1.81bn | 2.25M |
+| Campaign Performance | Campaign ROAS | 1.30K | 1.62 |
+| Product Performance | Total Product Revenue | ₹3.06bn | 3.82M |
+| Product Performance | Product Web Events | 8M | 10K |
+| Product Performance | Units Sold | 2M | 3K |
+| Product Performance | Average Selling Price | ₹1.45K | 1.45K |
+| Marketing Funnel | Total Events | 8M | 10K |
+| Marketing Funnel | Total Sessions | 3M | 4K |
+| Marketing Funnel | Total Purchases | 1M | 2K |
+| Marketing Funnel | Funnel Conversion Rate | 42.20% | 43.10% |
+| Executive Overview | Total Revenue | ₹3.14bn | 3.98M |
+| Executive Overview | Total Spend | ₹1.43M | 1.43M |
+| Executive Overview | Average ROAS | 810.75 | 1.07 |
+| Executive Overview | Total Orders | 1M | 2K |
+
+The Executive Overview table's totals are spend ₹1,434,179.14 and revenue ₹3,142,927,795.52. The Data Quality page shows 87 checks, every one PASS. The nine Power BI screenshots in the README (section 14) were taken after this refresh.
+
 ## What was not measured
 
 - **The tasks other than the build were not re-run after the speed-ups.** Their times are the full run's. The speed-ups changed only the build's SQL, and `66d77e0` the Spark heap of three jobs, which has not run at scale.
 - **dbt at scale after the speed-ups.** `dbt_run`, `dbt_test` and `dbt_docs` were timed only in the full run.
-- **`power_bi_export`, the route A export, `terraform apply` and a Power BI refresh at this size:** never run, by design. They would publish scaled files.
+- **The `power_bi_export` task at this size:** not run through `run_dag.py`, by design, because it writes into the checkout. Its script was run by hand instead (see "Power BI and S3").
 - **Airflow at this size.** The tasks ran through `run_dag.py`; Airflow's fixed task environment cannot pass the settings above.
 - **The build with its default settings, or after the server settings were reverted:** not timed at this size.
 - **Variation between runs:** each build was timed once.
