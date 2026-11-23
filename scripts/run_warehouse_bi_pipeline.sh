@@ -15,7 +15,7 @@ env -u PGPORT bash scripts/run_warehouse_sql.sh \
   sql/warehouse/reconciliation_report.sql
 
 echo "==> Final mart validation status"
-docker exec project2_postgres psql -U project2 -d marketing_analytics -c "
+docker exec "${PGCONTAINER:-project2_postgres}" psql -U project2 -d marketing_analytics -c "
 SELECT
     status,
     COUNT(*) AS check_count
@@ -25,7 +25,7 @@ ORDER BY status;
 "
 
 echo "==> Final warehouse reconciliation status"
-docker exec project2_postgres psql -U project2 -d marketing_analytics -c "
+docker exec "${PGCONTAINER:-project2_postgres}" psql -U project2 -d marketing_analytics -c "
 SELECT
     status,
     COUNT(*) AS check_count

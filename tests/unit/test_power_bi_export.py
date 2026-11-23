@@ -332,3 +332,31 @@ def test_the_validator_checks_the_committed_exports_against_the_contract(tmp_pat
     errors = []
     module.validate_dashboard_contract(errors)
     assert len(errors) == 1 and "exports/power_bi/product_sales.csv: column 1" in errors[0]
+
+
+def test_route_a_exports_to_a_folder_outside_the_checkout(load_job, tmp_path):
+    """--export-dir outside the checkout used to fail: relative_to() raised outside the try."""
+    export = load_job("scripts/export_power_bi_marts.py")
+    published = contract()["route_a"]["files"]["revenue_daily.csv"]
+
+    class Cursor:
+        description = [(column,) for column in published]
+
+        def execute(self, query):
+            self.query = query
+
+        def __iter__(self):
+            return iter([tuple(range(len(published)))])
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    mart = export.MART_EXPORTS[0]
+    assert mart.csv_file_name == "revenue_daily.csv"
+    record = export.export_mart(Cursor(), mart, outside, allow_empty=False)
+    assert record["status"] == "SUCCESS" and record["row_count"] == 1, record
+    assert record["csv_file_path"] == str(outside / "revenue_daily.csv")
+    with (outside / "revenue_daily.csv").open(encoding="utf-8") as handle:
+        assert next(csv.reader(handle)) == published
+    # Inside the checkout the manifest keeps the relative path it always had.
+    inside = export.DEFAULT_EXPORT_DIR / "revenue_daily.csv"
+    assert export.manifest_path_text(inside) == str(inside.relative_to(export.PROJECT_ROOT)) == "exports/power_bi/revenue_daily.csv"

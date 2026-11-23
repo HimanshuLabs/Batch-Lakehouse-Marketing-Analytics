@@ -139,6 +139,20 @@ def csv_value(value: Any) -> Any:
     return value
 
 
+def manifest_path_text(csv_path: Path) -> str:
+    """The CSV's path as the manifest records it.
+
+    Inside the checkout (the default folder, exports/power_bi) it is the path
+    relative to the checkout, as it always was; outside it (--export-dir
+    elsewhere) it is the absolute path. relative_to() used to raise there, and
+    the export failed as a "__connection__" error.
+    """
+    try:
+        return str(csv_path.relative_to(PROJECT_ROOT))
+    except ValueError:
+        return str(csv_path)
+
+
 def export_mart(cursor, mart: MartExport, export_dir: Path, allow_empty: bool) -> dict[str, Any]:
     validate_table_name(mart.table_name)
 
@@ -147,7 +161,7 @@ def export_mart(cursor, mart: MartExport, export_dir: Path, allow_empty: bool) -
 
     manifest_record: dict[str, Any] = {
         "table_name": mart.table_name,
-        "csv_file_path": str(csv_path.relative_to(PROJECT_ROOT)),
+        "csv_file_path": manifest_path_text(csv_path),
         "row_count": 0,
         "exported_at": exported_at,
         "status": "STARTED",

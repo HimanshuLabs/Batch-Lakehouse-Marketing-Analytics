@@ -19,7 +19,7 @@ env -u PGPORT bash scripts/run_warehouse_sql.sh \
 
 echo
 echo "==> Assert all reconciliation checks pass"
-docker exec project2_postgres psql -U project2 -d marketing_analytics -v ON_ERROR_STOP=1 -c "
+docker exec "${PGCONTAINER:-project2_postgres}" psql -U project2 -d marketing_analytics -v ON_ERROR_STOP=1 -c "
 DO \$\$
 DECLARE
     fail_count INTEGER;
