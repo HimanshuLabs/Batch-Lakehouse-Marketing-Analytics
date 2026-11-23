@@ -48,7 +48,7 @@ fi
 
 cleanup() {
     if [ -n "$STARTED_ID" ]; then
-        docker rm -f "$STARTED_ID" > /dev/null 2>&1 || true
+        docker rm -fv "$STARTED_ID" > /dev/null 2>&1 || true
     fi
     if [ "$KEEP" = "1" ]; then
         echo "kept: $WORK (container $CONTAINER removed)"

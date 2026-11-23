@@ -143,20 +143,29 @@ for other in new new-scale-settings; do
     if cmp -s "$WORK/old.tsv" "$WORK/$other.tsv"; then
         echo "PASS  old == $other"
     else
-        echo "FAIL  old != $other"; diff "$WORK/old.tsv" "$WORK/$other.tsv" | head -40; failed=1
+        # diff exits 1 here; under set -e and pipefail it must not end the script.
+        echo "FAIL  old != $other"; { diff "$WORK/old.tsv" "$WORK/$other.tsv" || true; } | head -40; failed=1
     fi
 done
 
 # Check 4j of the mart validation must plan as an anti-join, not as a subplan
-# run for every row.
-psql_db > "$WORK/4j-plan.txt" <<'SQL'
-EXPLAIN SELECT COUNT(*) FROM marts.mart_customer_daily_snapshot s
-WHERE s.snapshot_date = (SELECT MAX(snapshot_date) FROM marts.mart_customer_daily_snapshot)
-  AND NOT EXISTS (SELECT 1 FROM marts.mart_customer_360 m
-                  WHERE to_jsonb(m) - 'days_since_last_order'
-                        = to_jsonb(s) - 'snapshot_date' - 'days_since_last_order');
-SQL
-if grep -q "Anti Join" "$WORK/4j-plan.txt"; then
+# run for every row. The plan is of the build's own text, cut from the new
+# create_marts.sql: the copy of mart_customer_360 that it makes before 4j-4l
+# (with its ANALYZE), and check 4j's first subquery, which reads that copy.
+MARTS_SQL="$REPO/sql/warehouse/create_marts.sql"
+copy_4j=$(grep -x 'CREATE TEMP TABLE validation_customer_360 ON COMMIT DROP AS SELECT \* FROM marts\.mart_customer_360;' "$MARTS_SQL" || true)
+query_4j=$(awk '/^-- 4j\. / {f = 1}
+                f && /^        \(SELECT COUNT\(\*\) FROM marts\.mart_customer_daily_snapshot s$/ {q = 1}
+                q {print}
+                q && /= to_jsonb\(s\) - .snapshot_date. - .days_since_last_order.\)\)$/ {exit}' "$MARTS_SQL" \
+           | sed '1s/^        (//; $s/))$/)/')
+if [ "$(printf '%s\n' "$copy_4j" | grep -c .)" != 1 ] \
+   || [ "$(printf '%s\n' "$query_4j" | grep -c 'AND NOT EXISTS (SELECT 1 FROM pg_temp.validation_customer_360 m$')" != 1 ]; then
+    echo "FAIL  check 4j: its copy or its first subquery was not found in $MARTS_SQL"; failed=1
+elif ! printf '%s\n' 'BEGIN;' "$copy_4j" 'ANALYZE pg_temp.validation_customer_360;' "EXPLAIN $query_4j;" 'ROLLBACK;' \
+        | psql_db > "$WORK/4j-plan.txt" 2>&1; then
+    echo "FAIL  check 4j could not be planned (see $WORK/4j-plan.txt)"; failed=1
+elif grep -q "Anti Join" "$WORK/4j-plan.txt"; then
     echo "PASS  check 4j plans as an anti-join"
 else
     echo "FAIL  check 4j does not plan as an anti-join (plan: $WORK/4j-plan.txt)"; failed=1

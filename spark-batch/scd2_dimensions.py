@@ -175,6 +175,7 @@ def create_spark_session() -> SparkSession:
         .appName("Project2-SCD2-Dimensions")
         .config("spark.sql.session.timeZone", "UTC")
         .config("spark.sql.shuffle.partitions", "4")
+        .config("spark.driver.memory", "4g")
         .getOrCreate()
     )
 

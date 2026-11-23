@@ -565,7 +565,7 @@ Run the integration test locally without touching `data/`, `logs/`, or `project2
 bash tests/integration/run_local.sh            # add --keep to keep the work folder
 ```
 
-It runs a copy of the working tree under `/tmp` against a throwaway PostgreSQL 16.14 container, `p2it_postgres_<pid>` on port 5440. It removes only that container afterwards. Locally it skips the three dbt tasks; CI runs them.
+It runs a copy of the working tree under `/tmp` against a throwaway PostgreSQL 16.14 container, `p2it_postgres_<pid>` on port 5440. It removes only that container, with its data volume, afterwards. Locally it skips the three dbt tasks; CI runs them.
 
 pytest deselects the integration tests unless it is given `-m integration`: `pyproject.toml` sets `addopts = "-ra -m 'not integration'"`, so a bare `pytest tests/integration` selects nothing and reports them as deselected. `run_integration.sh` passes `-m integration` itself.
 
