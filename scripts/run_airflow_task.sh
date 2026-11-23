@@ -7,6 +7,14 @@ PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 PROJECT_PYTHON="${PROJECT_PYTHON:-${PROJECT_ROOT}/venv/bin/python}"
 DBT_BIN="${DBT_BIN:-${PROJECT_ROOT}/venv-dbt/bin/dbt}"
 
+# Spark starts its Python workers (the Spark jobs turn their report lists
+# into DataFrames with spark.createDataFrame) with PYSPARK_PYTHON, or else
+# with "python3" from PATH. A task gets only the DAG's DEFAULT_ENV, which has
+# no PATH, so that would be the system python3; on a version other than the
+# driver's the job fails with PYTHON_VERSION_MISMATCH. The workers use the
+# driver's python.
+export PYSPARK_PYTHON="${PYSPARK_PYTHON:-${PROJECT_PYTHON}}"
+
 cd "${PROJECT_ROOT}"
 
 # Every task runs under the pipeline run lock (scripts/pipeline_lock.py). The
