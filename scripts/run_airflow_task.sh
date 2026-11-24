@@ -177,12 +177,20 @@ case "${TASK_NAME}" in
     # all of it is built and every check has passed. A failing check rolls
     # the build back, fails the task and is written to
     # logs/warehouse/failed_build_<timestamp>.json.
+    # The missing-dates report describes the warehouse this task built, or none.
+    rm -f logs/missing_dates_report.json
     env -u PGPORT bash scripts/run_warehouse_sql.sh \
       sql/warehouse/begin_generation.sql \
       sql/warehouse/create_warehouse_tables.sql \
       sql/warehouse/scd2_validation_queries.sql \
       sql/warehouse/create_marts.sql \
       sql/warehouse/reconciliation_report.sql
+    # Business dates without orders or web events: a report, never a failure. It
+    # reads the database the build above wrote, through the same route and
+    # settings (RUN_MODE, PGCONTAINER, PG*; PGPORT unset as above). The script
+    # always exits 0; this guard also covers a crash of Python itself.
+    env -u PGPORT "${PROJECT_PYTHON}" scripts/report_missing_dates.py \
+      || echo "MISSING DATES: report not written (exit $?); the build is not affected"
     ;;
 
   dbt_run)

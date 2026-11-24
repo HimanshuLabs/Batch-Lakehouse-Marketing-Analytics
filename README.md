@@ -861,7 +861,7 @@ The shop's size is a setting; without it everything is as above (500 customers),
 
 | Setting | Default | What it does |
 |---|---|---|
-| `P2_NUM_CUSTOMERS` | 500 | Customers of the shop. Web events and the order ceiling follow at the default's per-customer rates; products, campaigns and ad spend keep their sizes. Every batch must use the same value (a different one is refused). |
+| `P2_NUM_CUSTOMERS` | 500 | Customers of the shop. Web events, the order ceiling, the campaign budgets (and with them the ad spend amounts, not the number of rows), the stock levels and the customer changes per batch (two tier rises and one move per 500 customers) follow at the default's rates, rounded down where a whole number is needed; the products, the campaigns and the number of ad spend rows keep their sizes. Every batch must use the same value (a different one is refused). |
 | `P2_EVENT_SPILL_ROWS` | 250,000 | Web events a batch holds in memory; beyond that they are sorted in runs on disk (`data/raw/.spill_*`, removed afterwards) and merged into the same `web_events.json`. |
 | `P2_LOAD_SLICE_ROWS` | 200,000 | Rows the two Gold loaders (`load_gold_scd2_to_staging`, `publish_gold_to_postgres`) hand to PostgreSQL at a time, all in one transaction per table. |
 

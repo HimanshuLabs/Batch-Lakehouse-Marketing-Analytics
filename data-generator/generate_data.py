@@ -36,9 +36,11 @@ BATCH_INDEX = (BATCH_DAY - ANCHOR_DATE).days
 IS_ANCHOR_BATCH = BATCH_INDEX == 0
 
 # The size of the shop: P2_NUM_CUSTOMERS customers (default 500). Orders and
-# web events scale with it at the default's per-customer rates; products,
-# campaigns and ad spend do not depend on the number of customers. 999999 is
-# the dirty records' unknown customer, so it can never be a real one.
+# web events scale with it at the default's per-customer rates, and so do the
+# campaign budgets (with them the ad spend amounts), the stock levels and the
+# customer changes per batch. The products, the campaigns and the number of
+# ad spend rows keep their sizes. 999999 is the dirty records' unknown
+# customer, so it can never be a real one.
 DEFAULT_NUM_CUSTOMERS = 500
 MAX_NUM_CUSTOMERS = 999_998
 
@@ -60,6 +62,25 @@ def num_customers_setting(value: str | None) -> int:
 
 NUM_CUSTOMERS = num_customers_setting(os.environ.get("P2_NUM_CUSTOMERS"))
 
+
+# Inputs that follow the shop's size use one rule, the one web events and the
+# order ceiling already use (scaled_counts): the default shop's value times
+# NUM_CUSTOMERS / 500, rounded down where it must be a whole number. At the
+# default size both helpers return their argument itself and compute nothing.
+def size_scaled(amount: float) -> float:
+    """An INR amount of this shop: the default shop's amount times NUM_CUSTOMERS / 500."""
+    if NUM_CUSTOMERS == DEFAULT_NUM_CUSTOMERS:
+        return amount
+    return amount * NUM_CUSTOMERS / DEFAULT_NUM_CUSTOMERS
+
+
+def size_scaled_count(count: int) -> int:
+    """A whole number of this shop: count times NUM_CUSTOMERS / 500, rounded down."""
+    if NUM_CUSTOMERS == DEFAULT_NUM_CUSTOMERS:
+        return count
+    return count * NUM_CUSTOMERS // DEFAULT_NUM_CUSTOMERS
+
+
 # Fact IDs are unique across batches: BATCH_INDEX * ID_BLOCK + n. Batch 0 keeps
 # the original 1..count IDs. Every count must stay below ID_BLOCK, and the IDs
 # fit Silver/Gold/staging INTEGER (int32): with the 100,000 block for ~21,000
@@ -76,7 +97,8 @@ INT32_MAX = 2_147_483_647
 ANCHOR_WINDOW_DAYS = 120
 FACT_WINDOW_DAYS = 14
 # The counts are those of the default shop (500 customers); web events and the
-# order ceiling grow with the number of customers, ad spend does not.
+# order ceiling grow with the number of customers. The ad spend rows do not
+# (their amounts follow the budgets, see CAMPAIGN_DAILY_BUDGET).
 CUSTOMER_DRIVEN_FACTS = ("web_events", "orders")
 
 
@@ -109,8 +131,12 @@ EVENT_SPILL_ROWS = spill_rows_setting(os.environ.get("P2_EVENT_SPILL_ROWS"))
 # Changed master records per batch. The anchor batch has a fixed change set
 # (customer 5, product 5, campaign 4) with its original timestamps; later
 # batches pick keys with a stream named after the batch date and stamp them
-# at 08:00:00 of that day.
-CHANGE_COUNTS = {"customers": 3, "products": 2, "campaigns": 1}   # Type 2 changes; see the change functions
+# at 08:00:00 of that day. A later batch's customer changes follow the shop:
+# per 500 customers two tier rises and one move (Type 2); the corrected email
+# (Type 1) and the ignored signup date (Type 0) stay one each.
+CUSTOMER_RISES = size_scaled_count(2)
+CUSTOMER_MOVES = size_scaled_count(1)
+CHANGE_COUNTS = {"customers": CUSTOMER_RISES + CUSTOMER_MOVES, "products": 2, "campaigns": 1}   # Type 2 changes; see the change functions
 CHANGE_TIME = "08:00:00"
 ANCHOR_CHANGE_TIMESTAMPS = {
     "customers": "2026-05-18T08:13:04.430089",
@@ -271,7 +297,8 @@ CAMPAIGN_STATUSES = ["planned", "active", "paused", "completed"]
 AB_TEST_GROUPS = ["A", "B", "control"]
 # A campaign starts between 150 days before and 45 days after the anchor date
 # and runs 15 to 90 days. Its lifetime budget is a daily amount in INR times
-# the days it runs.
+# the days it runs, for the default shop; a larger shop's budgets are
+# NUM_CUSTOMERS / 500 times that (size_scaled).
 CAMPAIGN_START_DAYS = (-150, 45)
 CAMPAIGN_RUN_DAYS = (15, 90)
 CAMPAIGN_DAILY_BUDGET = (500.0, 2000.0)
@@ -528,7 +555,7 @@ def generate_products(count: int = 150) -> pd.DataFrame:
                 "original_price": original_price,
                 "discount_percent": discount_percent,
                 "discounted_price": round(original_price * (1 - discount_percent / 100), 2),
-                "inventory_remaining": 0 if rng.random() < OUT_OF_STOCK_SHARE else rng.randint(5, 2000),
+                "inventory_remaining": 0 if rng.random() < OUT_OF_STOCK_SHARE else size_scaled_count(rng.randint(5, 2000)),
                 "schema_version": SCHEMA_VERSION,
                 "source": "product_catalog",
                 "updated_at": random_datetime(rng, ANCHOR_DATE, 90, 1).isoformat(),
@@ -590,8 +617,8 @@ def generate_campaigns(count: int = 40) -> pd.DataFrame:
                 "campaign_type": campaign_type,
                 "ab_test_group": rng.choice(AB_TEST_GROUPS),
                 "target_segment": rng.choice(USER_SEGMENTS),
-                # A lifetime budget in INR: a daily amount for every day it runs.
-                "budget": round(rng.uniform(*CAMPAIGN_DAILY_BUDGET) * run_days, 2),
+                # A lifetime budget in INR: a daily amount for every day it runs, for the shop's size.
+                "budget": round(size_scaled(rng.uniform(*CAMPAIGN_DAILY_BUDGET) * run_days), 2),
                 # The status on the anchor date, and since when it holds.
                 "campaign_status": status,
                 "start_date": start_date.isoformat(),
@@ -635,7 +662,7 @@ def change_stamp(day: date, entity: str) -> str:
 
 
 def customer_changes(df: pd.DataFrame, day: date) -> list[pd.DataFrame]:
-    """Customers who reached a higher tier by earning points, and one who moved."""
+    """Customers who reached a higher tier by earning points, customers who moved, one corrected email and one re-dated signup."""
     rng = stream("changes", "customers", day)
     stamp = change_stamp(day, "customers")
 
@@ -658,18 +685,25 @@ def customer_changes(df: pd.DataFrame, day: date) -> list[pd.DataFrame]:
     keys = changeable_keys(df, "user_id", "customers")
     current = df.drop_duplicates("user_id").set_index("user_id")
     can_rise = [user_id for user_id in keys if current.loc[user_id, "membership_tier"] != MEMBERSHIP_TIERS[-1]]
-    risers = sorted(rng.sample(can_rise, CHANGE_COUNTS["customers"] - 1))
+    risers = sorted(rng.sample(can_rise, CUSTOMER_RISES))
     changes = [earns_points(user_id) for user_id in risers]
-    # A move changes the city and its state together.
-    mover = base_row(df, "user_id", rng.choice([user_id for user_id in keys if user_id not in risers]))
-    mover["home_city"], mover["home_state"] = pick_city(rng, exclude=mover["home_city"].iloc[0])
-    mover["updated_at"] = stamp
+    # A move changes the city and its state together. Nobody rises and moves on
+    # the same day: one change row per customer and batch, so none undoes another.
+    rising = set(risers)
+    can_move = [user_id for user_id in keys if user_id not in rising]
+    movers = [rng.choice(can_move)] if CUSTOMER_MOVES == 1 else sorted(rng.sample(can_move, CUSTOMER_MOVES))
+    for user_id in movers:
+        mover = base_row(df, "user_id", user_id)
+        mover["home_city"], mover["home_state"] = pick_city(rng, exclude=mover["home_city"].iloc[0])
+        mover["updated_at"] = stamp
+        changes.append(mover)
 
-    # The three changes above are history (SCD Type 2). Two more show the other
+    # The changes above are history (SCD Type 2). Two more show the other
     # types: a corrected email address is overwritten on every version of the
     # customer (Type 1), and a signup date that the source now states
-    # differently is ignored, because the first one is kept (Type 0).
-    touched = {*risers, int(mover["user_id"].iloc[0])}
+    # differently is ignored, because the first one is kept (Type 0). Neither
+    # customer rose or moved today.
+    touched = rising | set(movers)
     corrected_id, redated_id = rng.sample([user_id for user_id in keys if user_id not in touched], 2)
     corrected = base_row(df, "user_id", corrected_id)
     local, domain = corrected["email"].iloc[0].split("@")
@@ -679,7 +713,7 @@ def customer_changes(df: pd.DataFrame, day: date) -> list[pd.DataFrame]:
     redated["signup_date"] = (date.fromisoformat(redated["signup_date"].iloc[0])
                               + timedelta(days=rng.randint(1, 30))).isoformat()
     redated["updated_at"] = stamp
-    return [*changes, mover, corrected, redated]
+    return [*changes, corrected, redated]
 
 
 def product_changes(df: pd.DataFrame, day: date) -> list[pd.DataFrame]:
@@ -718,9 +752,10 @@ def product_changes(df: pd.DataFrame, day: date) -> list[pd.DataFrame]:
     changes.append(changed)
 
     # And one is restocked: the stock level is overwritten, with no history (SCD Type 1).
+    # The delivery follows the shop's size, like the starting stock.
     touched = {int(change["product_id"].iloc[0]) for change in changes}
     restocked = base_row(df, "product_id", rng.choice([key for key in keys if key not in touched]))
-    restocked["inventory_remaining"] = int(restocked["inventory_remaining"].iloc[0]) + rng.randint(100, 500)
+    restocked["inventory_remaining"] = int(restocked["inventory_remaining"].iloc[0]) + size_scaled_count(rng.randint(100, 500))
     restocked["updated_at"] = stamp
     changes.append(restocked)
     return changes
@@ -880,13 +915,18 @@ def search_query(rng: random.Random, product: dict) -> str:
 
 
 def pick_campaign(rng: random.Random, versions: dict[int, list[dict]], day: date, user: dict,
-                  state: object) -> dict | None:
+                  state: object, last_day: date | None = None) -> dict | None:
     """The campaign that brought a session, or None for organic traffic.
 
-    Only a campaign running on that day can bring a visitor. One that targets
+    Only a campaign running on every day of the visit can bring a visitor. One that targets
     the customer's segment or advertises in the session's state is likelier.
     """
     running = [campaign for campaign in (campaign_runs_on(v, day) for _, v in sorted(versions.items())) if campaign]
+    # A visit that crosses midnight must not carry a campaign that has stopped by its
+    # last day; a visit inside one day keeps exactly the list above (no new draw).
+    if last_day is not None and last_day != day:
+        running = [campaign for campaign in running
+                   if campaign_runs_on(versions[int(campaign["campaign_id"])], last_day)]
     if not running or rng.random() < ORGANIC_SHARE:
         return None
     weights = [
@@ -963,7 +1003,7 @@ def generate_web_events(
             city, state = pick_city(rng, exclude=home_city)
         else:
             city, state = None, None
-        campaign = pick_campaign(rng, versions, start.date(), user, state)
+        campaign = pick_campaign(rng, versions, start.date(), user, state, end.date())
         device = weighted(rng, DEVICE_TYPES, DEVICE_WEIGHTS)
         system = rng.choice(sorted(DEVICE_PROFILES[device]))
         session = {
