@@ -33,3 +33,4 @@ DAG file:
 
 ```text
 airflow/dags/batch_lakehouse_pipeline.py
+```

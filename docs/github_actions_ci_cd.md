@@ -10,3 +10,4 @@ The CI pipeline focuses on safe validation, not cloud deployment.
 
 ```text
 .github/workflows/ci.yml
+```

@@ -39,6 +39,7 @@ Example:
 customer_id = 101
 customer_sk = 1 -> Silver tier from January to March
 customer_sk = 2 -> Gold tier from March onward
+```
 
 ## SCD Types 0, 1 and 2
 

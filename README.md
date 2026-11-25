@@ -14,6 +14,8 @@ Lakehouse engine → PostgreSQL warehouse → dbt validation → Airflow orchest
 
 All data is synthetic.
 
+The same pipeline has also run end to end at 4,00,000 customers: about 79 lakh web events and 13 lakh orders, every task of the DAG but the export, on one local machine with 16 hardware threads. The warehouse build took 88.6 minutes and the live database is about 36 GB. That run was made by hand on synthetic data, not in production; CI runs the default 500-customer shop and proves that the speed-ups change no output, not the scale. See [Scale run](#scale-run) and [`docs/scale_run_evidence.md`](docs/scale_run_evidence.md).
+
 ---
 
 ## 2. What This Platform Proves
@@ -27,6 +29,7 @@ This project demonstrates practical Data Engineering and Analytics Engineering c
 | Warehouse modeling | PostgreSQL staging, warehouse, marts, and audit schemas |
 | Historical correctness | Customer/product/campaign dimensions with SCD Type 0, 1 and 2 attributes, and point-in-time fact joins |
 | Reproducibility | Deterministic, incremental batches; reruns of a batch leave the lake and the warehouse unchanged |
+| Scale | The whole DAG at 4,00,000 customers on one machine with 16 hardware threads, measured once by hand on synthetic data, not in CI: 263.6 task minutes, of which the warehouse build 88.6 ([Scale run](#scale-run), [`docs/scale_run_evidence.md`](docs/scale_run_evidence.md)) |
 | BI readiness | Revenue, campaign, product, customer, and funnel marts built for reporting |
 | Analytics engineering | 24 dbt models and 82 dbt tests, docs, lineage, and exposures |
 | Orchestration | A single Airflow DAG (Airflow 3.2) with 20 tasks covering the lakehouse, warehouse, dbt and reporting |
@@ -306,7 +309,7 @@ The `_scd2` facts join each row to the dimension version that was valid at the e
 
 **Daily snapshots (no leakage).** `marts.mart_customer_daily_snapshot`, `marts.mart_product_daily_snapshot` and `marts.mart_campaign_daily_snapshot` have one row per entity and business date, from the entity's first activity to the last date in the data. A row holds the columns of the lifetime mart (`mart_customer_360`, `mart_product_sales`, `mart_campaign_performance`) as they were at the end of `snapshot_date`: orders placed up to that date, each order's status as of that date (an order returned later is still a completed sale), refunds up to it, spend and web events up to it, and the dimension versions in force on it. `days_since_last_order` is counted to `snapshot_date`. The snapshots are built in one pass over the facts, not one query per date: per entity, the changes of each date become running totals carried to every later date, computed with the lifetime marts' own expressions. The build checks that the last date's snapshot equals the lifetime mart column for column (mart validation 4j-4l), so a change to a lifetime mart that is not made in the snapshots as well fails the build. For a time-based split, take features from the snapshot at the cutoff date and outcomes from what happened after it; the lifetime marts contain the whole history and must not be used as features for a past date. The snapshots are in the consumer contract as available relations and in dbt.
 
-**Regional ad spend.** Each campaign targets two to five states. `fact_campaign_spend` has one row per campaign, day and region; a campaign's spend, and what is compared with its budget, is the sum over its regions. Each feed row repeats the platform's total for the campaign-day, and a reconciliation check requires the regional rows to sum to it. Spend and return on ad spend by channel and by region are two queries at the end of `sql/warehouse/dashboard_query_pack.sql`; the route B exports of the spend and order facts carry the same columns. Product prices are in a realistic INR range per catalogue item and most orders are one or two lines, so the average order value is a few thousand rupees and platform and warehouse ROAS are both in low single digits.
+**Regional ad spend.** Each campaign targets two to five states. `fact_campaign_spend` has one row per campaign, day and region; a campaign's spend, and what is compared with its budget, is the sum over its regions. Each feed row repeats the platform's total for the campaign-day, and a reconciliation check requires the regional rows to sum to it. Spend and return on ad spend by channel and by region are two queries at the end of `sql/warehouse/dashboard_query_pack.sql`; the route B exports of the spend and order facts carry the same columns. Product prices are in a realistic INR range per catalogue item and most orders are one or two lines, so the average order value is a few thousand rupees and, at the default size, platform and warehouse ROAS are both in low single digits. Budgets, and with them ad spend, follow the number of customers; the figures at 4,00,000 customers are in [`docs/scale_run_evidence.md`](docs/scale_run_evidence.md).
 
 **Marts tie out.** Every mart has one row for the unknown member and one for the invalid-reference member, flagged in `member_type` (`known`, `unknown_member`, `invalid_reference`); filter `member_type = 'known'` for real customers, products or campaigns only. With those rows each mart's revenue (sales less refunds), refunds, spend and units equal the fact totals, and the mart validation checks exactly that.
 
@@ -326,6 +329,8 @@ Main schemas:
 | `warehouse` | Star-schema dimensions and facts |
 | `marts` | BI-ready reporting marts |
 | `audit` | Reconciliation and validation checks |
+
+`publish_gold_to_postgres` also copies the Gold lakehouse tables (three dimensions, four facts and four Gold marts) from Parquet into a `gold` schema, with a `gold_publish_audit` table, so they can be queried with SQL. Nothing in this repository reads that schema: the warehouse is built from `staging`, and the DAG only orders the task before `scd2_dimensions`.
 
 Warehouse capabilities:
 
@@ -464,6 +469,8 @@ build_warehouse → dbt_run → dbt_test → dbt_docs → power_bi_export
 
 **A consumer's own view cannot go stale unnoticed.** A view that someone creates on a warehouse or mart table is bound to the generation it was created on, and nothing would ever replace it. So the build first looks for views and materialized views outside the pipeline's schemas (`staging`, `warehouse`, `marts`, `audit` and the dbt schemas) that read the warehouse. If it finds any it stops before changing anything and names each view and what it reads: drop them, run the build, and create them again. Consumers who only query `marts.*` or the dbt views are not affected.
 
+**Business dates without data are reported, never enforced.** After the build commits, `build_warehouse` runs `scripts/report_missing_dates.py`. It reads the business dates of `warehouse.fact_orders` and `warehouse.fact_web_events` from the database the build just wrote, and lists each run of dates between the first and the last date that has no orders or no web events. It prints the ranges in the task log and writes them to `logs/missing_dates_report.json`. It is a report only: it cannot fail the task, and if it cannot read the warehouse it says so and the build is unaffected. At the default size it lists three days, 2026-05-19 to 2026-05-21, for both feeds.
+
 The DAG has no schedule and allows one active run. Its tasks use `venv/bin/python` and `venv-dbt/bin/dbt`, and each task gets `BATCH_DATE = {{ (dag_run.logical_date or dag_run.run_after).astimezone(macros.dateutil.tz.gettz('Asia/Kolkata')) | ds }}`: the India date of the run. Every task also runs under a run lock (`scripts/pipeline_lock.py`, lock file `logs/pipeline_run.lock`): a task of a second run started by any route fails at once with exit code 75 until the first run finishes or fails; `python scripts/pipeline_lock.py --release --force` clears the lock of a run that died. The scripts that write to the lake or the warehouse take the same lock when they are started by hand: `scripts/run_airflow_task.sh <task>`, `scripts/run_warehouse_sql.sh` (and so `run_warehouse_bi_pipeline.sh` and `run_warehouse_reconciliation_pipeline.sh`), and `tests/integration/rebuild_warehouse.sh`.
 
 **Volume checks.** The Bronze checks fail a feed (one raw file) that is empty, unless the batch is declared empty by a file named `_EMPTY_BATCH` in its raw folder. They also fail a feed with fewer rows than half the median of the earlier batches (`P2_MIN_VOLUME_RATIO`, default 0.5). The first batch ever loaded is the initial load: it has no baseline and is never used as one, so the second batch only has to be non-empty. How many delivered rows must survive Silver is a separate check (the per-batch pass ratio).
@@ -515,7 +522,7 @@ exports/power_bi/export_manifest.json
 
 **Route A and S3.** Route A's five CSVs are served the same way, from a second S3 bucket that was set up by hand and is not managed by Terraform. Its policy allows public `s3:GetObject` on named files only. Each of the five route A semantic models (Revenue Trends, Campaign Performance, Product Performance, Customer 360, Marketing Funnel) reads one file by web URL and refreshes daily. A new export reaches the dashboard when its five CSVs replace the objects in that bucket.
 
-**Which size each copy is.** The CSVs committed in `exports/power_bi/` are the default-size run (500 customers): they are what CI checks. The files in S3, what Power BI Online shows and the screenshots in section 14 are the 4,00,000-customer run of 23 November 2026, with one exception: `customer_lifetime_value.csv`, the per-customer file in the Terraform bucket, stays the default-size file. At scale it is 11,22,12,255 bytes. The AWS provider uploads a file that large in parts, S3's ETag for it is then not an MD5, and `etag = filemd5(...)` in `main.tf` would show a change on every later `terraform plan`. No Power BI semantic model reads that file. The evidence is in [`docs/scale_run_evidence.md`](docs/scale_run_evidence.md#power-bi-and-s3).
+**Which size each copy is.** The CSVs committed in `exports/power_bi/` are the default-size run (500 customers): they are what CI checks. The files in S3, what Power BI Online shows and the screenshots in section 14 are the 4,00,000-customer run of 25 November 2026, with one exception: `customer_lifetime_value.csv`, the per-customer file in the Terraform bucket, stays the default-size file. At scale it is 11,23,96,740 bytes. The AWS provider uploads a file that large in parts, S3's ETag for it is then not an MD5, and `etag = filemd5(...)` in `main.tf` would show a change on every later `terraform plan`. No Power BI semantic model reads that file. The evidence is in [`docs/scale_run_evidence.md`](docs/scale_run_evidence.md#power-bi-and-s3).
 
 **The column order is a contract.** Power BI reads these CSVs by column position. `scripts/power_bi_dashboard_contract.json` records the columns each file of both routes was published with, in order. Both export scripts write those columns first, in that order, and append every newer column after them; `scripts/validate_powerbi_assets.py` (CI job `powerbi-assets`) and the tests fail when a published column is moved, renamed or dropped.
 
@@ -611,7 +618,7 @@ docs/screenshots/power_bi/02_campaign_performance.png
 docs/screenshots/power_bi/03_data_quality_reconciliation.png
 ```
 
-The dashboard screenshots were taken on 23 November 2026, after the 4,00,000-customer files were placed in S3 and every semantic model was refreshed; money is shown in rupees (₹). For example, the executive overview's totals (revenue INR 3,142,927,795.52, spend INR 1,434,179.14) are those of the scale run's route B `campaign_performance.csv`, which is not committed. The committed exports in `exports/power_bi/` are the default-size run and give smaller figures.
+The dashboard screenshots were taken on 25 November 2026, after the 4,00,000-customer files were placed in S3 and every semantic model was refreshed; money is shown in rupees (₹). For example, the executive overview's totals (revenue INR 3,142,927,795.52, spend INR 1,147,343,344.01) are those of the scale run's route B `campaign_performance.csv`, which is not committed. The committed exports in `exports/power_bi/` are the default-size run and give smaller figures.
 
 Airflow screenshot:
 
@@ -861,22 +868,21 @@ The shop's size is a setting; without it everything is as above (500 customers),
 
 | Setting | Default | What it does |
 |---|---|---|
-| `P2_NUM_CUSTOMERS` | 500 | Customers of the shop. Web events, the order ceiling, the campaign budgets (and with them the ad spend amounts, not the number of rows), the stock levels and the customer changes per batch (two tier rises and one move per 500 customers) follow at the default's rates, rounded down where a whole number is needed; the products, the campaigns and the number of ad spend rows keep their sizes. Every batch must use the same value (a different one is refused). |
+| `P2_NUM_CUSTOMERS` | 500 | Customers of the shop. Web events, the order ceiling, the campaign budgets and with them the ad platform's figures (spend, impressions, clicks, conversions and attributed revenue), the stock levels and the customer history (two tier rises and one move per 500 customers in each later batch) follow the shop size at the default's rates, rounded down where a whole number is needed. The catalogue of 150 products, the 40 campaigns and the number of ad spend rows do not. Every batch must use the same value (a different one is refused). |
 | `P2_EVENT_SPILL_ROWS` | 250,000 | Web events a batch holds in memory; beyond that they are sorted in runs on disk (`data/raw/.spill_*`, removed afterwards) and merged into the same `web_events.json`. |
 | `P2_LOAD_SLICE_ROWS` | 200,000 | Rows the two Gold loaders (`load_gold_scd2_to_staging`, `publish_gold_to_postgres`) hand to PostgreSQL at a time, all in one transaction per table. |
 
 Fact IDs (orders, order items, ad spend) are `BATCH_INDEX × ID_BLOCK + n`, kept within INTEGER (int32) in Silver, Gold and staging. Up to 10,000 customers `ID_BLOCK` is 100,000 (good for about 21,000 days after 2026-05-18). Above that it is 10,000,000, which allows `BATCH_INDEX` up to 213: the last valid batch date of a scaled shop is **2026-12-17**; a later one fails in the generator rather than overflow.
 
 **What was run, and how it was measured.** The scale run was done **once, by hand, on one machine; it is not part of CI**, which runs the default 500-customer shop only.
-- **The shop:** 4,00,000 customers (`P2_NUM_CUSTOMERS=400000`), three batches (2026-05-18, 2026-06-04, 2026-06-18), synthetic data: about 79 lakh web events, about 13 lakh orders and 152 days of daily snapshots. The PostgreSQL database then takes about 42 GB on disk.
+- **The shop:** 4,00,000 customers (`P2_NUM_CUSTOMERS=400000`), three batches (2026-05-18, 2026-06-04, 2026-06-18), synthetic data: about 79 lakh web events, about 13 lakh orders and 152 days of daily snapshots; `dim_customer` holds 4,04,800 versions, 4,787 customers have more than one. The live PostgreSQL database takes about 36 GB on disk; right after a rebuild the database is 73 GB, because the build keeps the previous generation for readers until the next build drops it.
 - **The machine:** one Linux desktop with 16 hardware threads, about 15 GB of RAM and an SSD; PostgreSQL 16.14 in Docker; `/tmp` is a 7.3 GB RAM disk there.
 - **The settings:** the ones in [Running at scale](#running-at-scale) below: the four `P2_BUILD_*` build settings, Spark scratch space on the SSD, a 4 GB Spark driver heap, and larger PostgreSQL server settings that were reverted afterwards.
-- **The full DAG run** (every task but `power_bi_export`, through `tests/integration/run_dag.py`) ran on 19-20 November 2026 on commit `01fdaae`. That commit added the build settings and the step timings. The warehouse build (`build_warehouse`) took **397.4 min** of the run's 570.7 task minutes.
-- **The warehouse build was then made faster** in eight commits (`96a02f6`, `9e9fd7a`, `6a19f35`, `1502186`, `eaab432`, `b075324`, `54e03fc`, `fa6a425`), each proven to give the same output at the default size. It was timed again at scale on `b223266`, on a copy of the same database: **88 min** instead of 397.4 (23 November 2026).
-  - **Same output:** the warehouse, marts and reports it built match the 4,00,000-customer warehouse of the full run, row for row (a fingerprint of 965 lines). The only difference is the five `warehouse.safe_*` function definitions that `b075324` changed on purpose.
-- **Not re-timed:** the other tasks.
+- **The full DAG run** (every task but `power_bi_export`, through `tests/integration/run_dag.py`) ran on 24-25 November 2026 on commit `79e0921`. The warehouse build (`build_warehouse`) took **88.6 min** of the run's 263.6 task minutes.
+- **Compared with the scale warehouse before it**, table by table and column by column: every difference is on the list of allowed ones (budgets, the ad platform's figures, stock, customer history, and the campaign of the few visits that run past a campaign's last day), and nothing else changed: PASS.
+- **How the build got this fast.** An earlier full run at this size (19-20 November 2026, commit `01fdaae`, before budgets, stock and customer history followed the shop size) took **397.4 min** for the build. Eight commits (`96a02f6`, `9e9fd7a`, `6a19f35`, `1502186`, `eaab432`, `b075324`, `54e03fc`, `fa6a425`) then made it faster, each proven to give the same output at the default size. Timed again at scale on `b223266`, on a copy of that database, it took **88 min**, and its warehouse, marts and reports matched the earlier ones row for row (a fingerprint of 965 lines), apart from the five `warehouse.safe_*` function definitions that `b075324` changed on purpose.
 
-Every step's time, the fingerprint chain, the disk use and what was not measured are in [`docs/scale_run_evidence.md`](docs/scale_run_evidence.md).
+Every task's time, the comparison, the fingerprint chain, the disk use and what was not measured are in [`docs/scale_run_evidence.md`](docs/scale_run_evidence.md).
 
 ### Running at scale
 
@@ -884,7 +890,7 @@ At the default size none of this is needed. At 4,00,000 customers, the run above
 
 1. **Run the tasks with `run_dag.py --env`, not through Airflow.** Each Airflow task gets a fixed environment (`DEFAULT_ENV` in the DAG), so the variables below cannot reach it.
 2. **Spark scratch space on a real disk.** Set `SPARK_LOCAL_DIRS` and `TMPDIR` to folders on a disk with room (the run used a folder on the SSD). By default Spark and Python write to `/tmp`; on the machine above that is a 7.3 GB RAM disk, and `silver_transformations` failed there.
-3. **A 4 GB Spark driver heap.** The Silver and Gold jobs set it themselves. `point_in_time_fact_joins` failed with the default 1 GB heap in the run (`OutOfMemoryError`), and the run was resumed with `SPARK_DRIVER_MEMORY=4g`. Since `66d77e0`, `point_in_time_fact_joins`, `scd2_dimensions` and `scd2_gold_marts` set 4 GB themselves too. That change has not been run at scale yet, so passing `SPARK_DRIVER_MEMORY=4g` as well does no harm.
+3. **A 4 GB Spark driver heap.** The Silver and Gold jobs set it themselves. `point_in_time_fact_joins` failed with the default 1 GB heap in the run (`OutOfMemoryError`), and the run was resumed with `SPARK_DRIVER_MEMORY=4g`. Since `66d77e0`, `point_in_time_fact_joins`, `scd2_dimensions` and `scd2_gold_marts` set 4 GB themselves too. The scale run of 24-25 November 2026 still passed `SPARK_DRIVER_MEMORY=4g` as well, so it does not show that their own setting is enough; passing it does no harm.
 4. **The warehouse build's session settings**, read by `scripts/run_warehouse_sql.sh` (`sql/warehouse/begin_generation.sql` applies the first three to the build transaction). The build always runs with parallel query off (`max_parallel_workers_per_gather = 0`): Docker's 64 MB `/dev/shm` cannot hold a parallel hash.
 
    | Variable | Default | Scale run |
@@ -899,14 +905,14 @@ At the default size none of this is needed. At 4,00,000 customers, the run above
    - **Revert afterwards:** `ALTER SYSTEM RESET ALL;` and another restart, which returns to the image's defaults. No code reads these settings, but every time above was measured with them, so a timing after the revert is not comparable.
 6. **Free disk.**
    - **Why:** a build writes the new warehouse beside the live one and drops the old one only when it commits, plus temporary files.
-   - **Measured:** the scale database is about 42 GB. The timed build on `b223266` started with 93 GB free on Docker's disk and had 32 GB left at its lowest, with up to 31.6 GB of temporary files and tables at once.
+   - **Measured:** the live scale database is about 36 GB, and 73 GB right after a rebuild, which keeps the previous generation until the next build drops it. The timed build on `b223266` started with 93 GB free on Docker's disk and had 32 GB left at its lowest, with up to 31.6 GB of temporary files and tables at once. In the run of 24-25 November 2026, where the new raw files and lake were on the same disk, the lowest free space was 68 GB.
    - **Recommendation:** start a scale build with at least 80 GB free.
 7. **Leave out `power_bi_export`, and export to a folder outside the checkout.**
    - **Why:** the task writes to `data/bi_exports/`, which `terraform apply` uploads, and the route A script writes by default to `exports/power_bi/`, whose committed files are the default-size run that CI checks.
-   - **How it was done on 23 November 2026:** both export scripts were run once by hand with `--export-dir` (and, for route B, `--report-path`) set to a folder outside the checkout, route B with `BATCH_DATE=2026-06-18`, and route A in a read-only session with parallel query off (`PGOPTIONS="-c default_transaction_read_only=on -c max_parallel_workers_per_gather=0"`).
+   - **How it was done on 25 November 2026:** both export scripts were run once by hand with `--export-dir` (and, for route B, `--report-path`) set to a folder outside the checkout, route B with `BATCH_DATE=2026-06-18`, and route A in a read-only session with parallel query off (`PGOPTIONS="-c default_transaction_read_only=on -c max_parallel_workers_per_gather=0"`).
    - **What was published:** route A's five CSVs, never its `export_manifest.json`, which holds local paths when written outside the checkout. Only four route B files went to the Terraform bucket: `customer_lifetime_value.csv` stays the default-size file there (section 12 says why).
 
-Silver, Gold and the warehouse are rebuilt from all of Bronze on every run, so a scale run takes every batch into Bronze first, in date order, and then runs everything from Silver on once, as the last batch. The Silver and Gold checks of the earlier batches run right after the last batch's: they only read the lake and write their own reports, and the Silver check of a batch looks at that batch's rows (by `ingestion_date`).
+Silver, Gold and the warehouse are rebuilt from all of Bronze on every run, so a scale run takes every batch into Bronze first, in date order, and then runs everything from Silver on once, as the last batch. The Silver and Gold checks of the earlier batches run right after the last batch's: they only read the lake and write their own reports, and the Silver check of a batch looks at that batch's rows (by `ingestion_date`). `publish_gold_to_postgres` runs last: nothing else reads the `gold` schema, so a failure before it leaves that schema as it was.
 
 ```bash
 W=$HOME/p2-scale; mkdir -p "$W/spark-tmp" "$W/tmp"     # on a disk with room, not /tmp
@@ -924,9 +930,9 @@ scale_run() {
     for task in generate_data bronze_ingestion bronze_quality_checks; do run "$day" "$task" || return 1; done
   done
   for task in silver_transformations silver_quality_checks gold_transformations gold_quality_checks \
-      duckdb_gold_analytics publish_gold_to_postgres scd2_dimensions point_in_time_fact_joins scd2_gold_marts \
+      duckdb_gold_analytics scd2_dimensions point_in_time_fact_joins scd2_gold_marts \
       scd2_duckdb_analytics create_postgresql_schemas load_gold_scd2_to_staging \
-      build_warehouse dbt_run dbt_test dbt_docs; do
+      build_warehouse dbt_run dbt_test dbt_docs publish_gold_to_postgres; do
     run 2026-06-18 "$task" || return 1
     case "$task" in
       silver_quality_checks|gold_quality_checks)
@@ -986,12 +992,14 @@ Expected: `PASS | 29`.
 
 ```bash
 docker exec project2_postgres psql -U project2 -d marketing_analytics -c "
-SELECT schemaname, viewname
-FROM pg_views
-WHERE schemaname = 'marts'
-ORDER BY viewname;
+SELECT table_name, table_type
+FROM information_schema.tables
+WHERE table_schema = 'marts'
+ORDER BY table_name;
 "
 ```
+
+Expected: 8 rows. Five views (`mart_campaign_performance`, `mart_customer_360`, `mart_marketing_funnel`, `mart_product_sales`, `mart_revenue_daily`) and the three daily snapshots, which are tables (`mart_campaign_daily_snapshot`, `mart_customer_daily_snapshot`, `mart_product_daily_snapshot`).
 
 ### SCD2 and mart validation
 

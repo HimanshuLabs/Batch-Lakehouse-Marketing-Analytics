@@ -47,6 +47,7 @@ required_files=(
   "docs/airflow_orchestration.md"
   "docs/github_actions_ci_cd.md"
   "docs/power_bi_dashboard_spec.md"
+  "docs/scale_run_evidence.md"
   "docs/terraform_aws_bi_exports.md"
   "docs/warehouse/airflow_working_state.md"
   "docs/warehouse/merged_architecture.md"

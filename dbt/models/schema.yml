@@ -2,7 +2,7 @@ version: 2
 
 sources:
   - name: warehouse_staging
-    description: "PostgreSQL staging schema loaded from Project 2 Gold and SCD2 lakehouse outputs."
+    description: "PostgreSQL staging schema loaded from the Batch-Lakehouse-Marketing-Analytics Gold and SCD2 lakehouse outputs."
     schema: staging
     tables:
       - name: stg_gold_dim_customers_scd2

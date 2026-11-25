@@ -30,6 +30,7 @@ warehouse star schema
 marts views
         ↓
 dashboard query pack / BI tool
+```
 
 ---
 

@@ -1,58 +1,68 @@
 # Scale run evidence
 
-What was measured when the pipeline ran at 4,00,000 customers, and what was not. Everything here was **measured by hand, once, on one machine**. CI runs the default 500-customer shop only and proves nothing at this size.
+What was measured when the pipeline ran at 4,00,000 customers, and what was not. Everything here was **measured by hand, once, on one machine**, on synthetic data; it is not a production system. CI runs the default 500-customer shop only: it proves that the default size works and that the speed-ups change no output, and it proves nothing at this size.
 
 ## The run
 
 | | |
 |---|---|
-| Shop | `P2_NUM_CUSTOMERS=400000`; batches 2026-05-18, 2026-06-04, 2026-06-18; synthetic data |
-| Size | about 79 lakh web events, about 13 lakh orders, 152 days of daily snapshots; the PostgreSQL database about 42 GB on disk |
+| Shop | `P2_NUM_CUSTOMERS=400000`; batches 2026-05-18, 2026-06-04, 2026-06-18; synthetic data. Web events, the order ceiling, the campaign budgets and the ad platform's figures, the stock levels and the customer history follow the shop size; the catalogue of 150 products and the 40 campaigns do not |
+| Size | about 79 lakh web events, about 13 lakh orders, 152 days of daily snapshots; `dim_customer` 4,04,800 versions, 4,787 customers with more than one; the PostgreSQL database about 36 GB live, 73 GB right after a rebuild (the previous generation is kept until the next build) |
 | Machine | one Linux desktop, 16 hardware threads, about 15 GB RAM, SSD; PostgreSQL 16.14 in Docker; `/tmp` a 7.3 GB RAM disk |
-| How | `tests/integration/run_dag.py`, one task at a time, as in the README's "Scale run"; every task but `power_bi_export` |
-| Full run | 19-20 November 2026, commit `01fdaae` (the run itself used a working-branch commit with the identical tree) |
-| Build timed again | the warehouse build only, on `b223266`, 23 November 2026, on a copy of the same database |
+| How | `tests/integration/run_dag.py`, one task at a time, as in the README's "Scale run"; every task but `power_bi_export`; `publish_gold_to_postgres` last |
+| When | 24-25 November 2026, commit `79e0921` |
 | Settings | `SPARK_LOCAL_DIRS` and `TMPDIR` on the SSD; Spark driver heap 4 GB (`SPARK_DRIVER_MEMORY=4g`); `P2_BUILD_WORK_MEM=256MB`, `P2_BUILD_HASH_MEM_MULTIPLIER=4`, `P2_BUILD_MAINTENANCE_WORK_MEM=1GB`, `P2_BUILD_TEMP_BUFFERS=1GB`; server `shared_buffers=2GB`, `max_wal_size=8GB`, `work_mem=128MB`, `maintenance_work_mem=1GB`, `dynamic_shared_memory_type=mmap`, reverted afterwards (README, "Running at scale") |
+| Free disk and memory | lowest free disk 68 GB, lowest available memory 2,708 MB (sampled once a minute) |
 
-The full run was stopped and resumed three times:
-1. `silver_transformations` ran out of space in the 7.3 GB `/tmp`, and resumed with Spark scratch on the SSD.
-2. `point_in_time_fact_joins` ran out of its 1 GB heap, and resumed with 4 GB.
-3. `build_warehouse` resumed on `01fdaae`'s tree, which added the build settings.
-
-Each task's time below is from its successful attempt.
-
-## Every task of the full run (`01fdaae`, minutes)
+## Every task (`79e0921`, minutes)
 
 | Batch | Task | Minutes |
 |---|---|---|
 | 2026-05-18 | generate_data | 12.3 |
-| 2026-05-18 | bronze_ingestion | 2.1 |
-| 2026-05-18 | bronze_quality_checks | 0.5 |
 | 2026-06-04 | generate_data | 2.6 |
+| 2026-06-18 | generate_data | 3.6 |
+| 2026-05-18 | bronze_ingestion | 2.0 |
+| 2026-05-18 | bronze_quality_checks | 0.5 |
 | 2026-06-04 | bronze_ingestion | 0.6 |
 | 2026-06-04 | bronze_quality_checks | 0.3 |
-| 2026-06-18 | generate_data | 2.9 |
 | 2026-06-18 | bronze_ingestion | 0.6 |
 | 2026-06-18 | bronze_quality_checks | 0.3 |
-| 2026-06-18 | silver_transformations | 35.3 |
-| all three | silver_quality_checks | 1.4 + 1.4 + 1.4 |
-| 2026-06-18 | gold_transformations | 5.2 |
-| all three | gold_quality_checks | 0.6 + 0.5 + 0.5 |
+| 2026-06-18 | silver_transformations | 35.7 |
+| all three | silver_quality_checks | 1.5 + 1.5 + 1.5 |
+| 2026-06-18 | gold_transformations | 5.3 |
+| all three | gold_quality_checks | 0.6 + 0.6 + 0.6 |
 | 2026-06-18 | duckdb_gold_analytics | 0.0 |
-| 2026-06-18 | publish_gold_to_postgres | 85.8 |
 | 2026-06-18 | scd2_dimensions | 0.5 |
 | 2026-06-18 | point_in_time_fact_joins | 1.1 |
 | 2026-06-18 | scd2_gold_marts | 2.0 |
 | 2026-06-18 | scd2_duckdb_analytics | 0.0 |
 | 2026-06-18 | create_postgresql_schemas | 0.0 |
-| 2026-06-18 | load_gold_scd2_to_staging | 14.1 |
-| 2026-06-18 | **build_warehouse** | **397.4** |
+| 2026-06-18 | load_gold_scd2_to_staging | 14.0 |
+| 2026-06-18 | **build_warehouse** | **88.6** |
 | 2026-06-18 | dbt_run | 0.1 |
-| 2026-06-18 | dbt_test | 1.3 |
+| 2026-06-18 | dbt_test | 0.6 |
 | 2026-06-18 | dbt_docs | 0.1 |
-| | **all tasks** | **570.7** |
+| 2026-06-18 | publish_gold_to_postgres | 86.5 |
+| | **all tasks** | **263.6** |
 
-## The warehouse build, before and after
+The build's checks all passed: 29 reconciliation checks, 20 mart checks and 9 SCD2 checks (the build fails otherwise), and dbt built its 24 models and passed its 82 tests. The missing-dates report of the build: 2026-05-19 to 2026-05-21 (3 days), in both orders and web events, as expected.
+
+## Compared with the scale warehouse before it
+
+Before the run, the scale warehouse built from the earlier data was recorded: `tests/sql/equivalence_fingerprint.sql` (row counts and order-independent hashes of every table, the audit reports' rows, and the catalog) and, for the tables where only some rows may change, one hash per row. After the run the same was taken again and compared table by table and column by column with a written list of allowed differences:
+
+- the campaign budgets and everything computed from them (the ad platform's spend, impressions, clicks, conversions and attributed revenue, ROAS and the other spend ratios);
+- the stock levels;
+- the customer history: the versions of the customers changed in a later batch, and the profile columns of those customers in the customer marts;
+- the campaign of the few visits that run past a campaign's last day, and of their orders.
+
+Every other row and column had to be identical, every row count the same except `dim_customer`'s and the funnel mart's (17 rows fewer: the days after a campaign's end that only those visits had reached), and every audit check PASS. Result: PASS.
+
+## How the build got faster (earlier data, 19-23 November 2026)
+
+These measurements were made on the scale data as it was before budgets, stock and customer history followed the shop size. They stay valid for what they show: how long each version of the build took on the same data, and that the speed-ups did not change its output.
+
+**The earlier full run.** 19-20 November 2026, commit `01fdaae` (the run itself used a working-branch commit with the identical tree), every task but `power_bi_export`. It was stopped and resumed three times: `silver_transformations` ran out of space in the 7.3 GB `/tmp` and resumed with Spark scratch on the SSD; `point_in_time_fact_joins` ran out of its 1 GB heap and resumed with 4 GB; `build_warehouse` resumed on `01fdaae`'s tree, which added the build settings. Its tasks took 570.7 minutes, of which `build_warehouse` 397.4.
 
 **How the times were taken.** Each build statement is timed by `\timing` in `scripts/run_warehouse_sql.sh`, and each time is assigned to its statement. Three builds were timed, all on the same machine, settings and data:
 
@@ -91,7 +101,7 @@ Each task's time below is from its successful attempt.
 
 The `01fdaae` step times were read from that build's log by hand; the other two columns come from the same statement-to-time pairing.
 
-## The output is the same
+### The output is the same
 
 Each fingerprint is `tests/sql/equivalence_fingerprint.sql`: row counts and order-independent hashes of every table and view in `warehouse` and `marts`, the audit reports' rows, and the catalog (columns, constraints, indexes, views, functions, comments, grants).
 
@@ -100,7 +110,7 @@ Each fingerprint is `tests/sql/equivalence_fingerprint.sql`: row counts and orde
 
 So the scale warehouse built by `b223266` has the same rows, marts, reports and catalog as the one built in the full run, apart from those five function definitions.
 
-## Disk and temporary space (the `b223266` build)
+### Disk and temporary space (the `b223266` build)
 
 | | |
 |---|---|
@@ -115,7 +125,7 @@ The peaks were sampled once a minute, so a shorter peak can have been higher.
 
 ## Power BI and S3
 
-On 23 November 2026, from the scale lake and warehouse above, on commit `ca25502`.
+On 25 November 2026, from the scale lake and warehouse above, on commit `79e0921`.
 
 **The exports.** Both export scripts were run once, by hand, writing to a folder outside the checkout:
 - route B with `BATCH_DATE=2026-06-18`;
@@ -139,46 +149,46 @@ Afterwards:
 
 The route B report's overall status was PASS. All five route A manifest records were SUCCESS. The three fact files are not published.
 
-**Route A: the second S3 bucket.** Route A's five semantic models read their CSVs by web URL from an S3 bucket that was set up by hand and is not in Terraform's state. On 14 November its five objects were byte-identical to the committed `exports/power_bi/` files. On 23 November they were replaced by hand in the S3 console. Two checks followed, for each object:
+**Route A: the second S3 bucket.** Route A's five semantic models read their CSVs by web URL from an S3 bucket that was set up by hand and is not in Terraform's state. Until 23 November 2026 its five objects were byte-identical to the committed `exports/power_bi/` files; since then they hold the scale run's files, replaced by hand in the S3 console, last on 25 November 2026. Two checks followed, for each object:
 - it was read back from S3 with the account's own credentials, and its md5 equals the export's;
 - a public HTTPS request for it, without credentials, returned HTTP 200 with the right Content-Length.
 
-| File | Bytes, 14 Nov | Bytes, 23 Nov | Public read | md5, 23 Nov |
+| File | Bytes, default size (committed) | Bytes, 25 November 2026 | Public read | md5, 25 November 2026 |
 |---|---|---|---|---|
-| `campaign_performance.csv` | 12,362 | 13,892 | HTTP 200 | `b96d1a8129ff3858285e641fc13afd23` |
-| `customer_360.csv` | 1,43,947 | 11,73,24,284 | HTTP 200 | `f098d82bb24fe09dbfa3dc035ca78a77` |
-| `marketing_funnel.csv` | 1,79,789 | 2,48,186 | HTTP 200 | `c8ee2500b5657cbdf69dad274932127d` |
-| `product_sales.csv` | 30,039 | 35,685 | HTTP 200 | `e6ddb180ad4c96eee07d877ad3dffdc6` |
+| `campaign_performance.csv` | 12,362 | 14,581 | HTTP 200 | `5965c99061aa21651280eeb06987c2b6` |
+| `customer_360.csv` | 1,43,947 | 11,73,25,125 | HTTP 200 | `d02507d92989a4679fc225449d8444b5` |
+| `marketing_funnel.csv` | 1,79,789 | 2,45,364 | HTTP 200 | `12b7df62a6fe99ab4f9e0ec18e3804da` |
+| `product_sales.csv` | 30,039 | 36,085 | HTTP 200 | `fe2b7d80c916bb3b0e2c2ddb83ff7e13` |
 | `revenue_daily.csv` | 23,173 | 30,739 | HTTP 200 | `a9421b2d5087e965f98dfc7ac6904556` |
 
-**Route B: the Terraform bucket.** Terraform v1.17.1 in AWS CloudShell, with the state unchanged since 14 November. Four summary files went up at scale. `customer_lifetime_value.csv` stays the default-size file of 14 November (1,36,893 bytes), for two reasons:
-- **Size:** at scale it is 11,22,12,255 bytes.
+**Route B: the Terraform bucket.** Terraform v1.17.1 in AWS CloudShell, with the state as the apply of 23 November 2026 left it. Four summary files went up at scale. `customer_lifetime_value.csv` stays the default-size file of 14 November (1,36,893 bytes), for two reasons:
+- **Size:** at scale it is 11,23,96,740 bytes.
 - **ETag:** the AWS provider uploads objects over 5 MiB in parts, and S3's ETag is then not an MD5. `etag = filemd5(...)` in `main.tf` would therefore show one change on every later plan.
 
 `main.tf` is unchanged. The steps:
 
-1. `terraform plan` with the 14 November files: `No changes. Your infrastructure matches the configuration.`
+1. `terraform plan` with the files of the previous apply: `No changes. Your infrastructure matches the configuration.`
 2. The four files placed, md5 checked; `terraform fmt -check -recursive` passed.
 
    | File | Bytes | md5 |
    |---|---|---|
-   | `campaign_performance.csv` | 26,081 | `620a2771ff9c0aa26ee964ef5720b8cf` |
-   | `product_performance.csv` | 44,129 | `da6f880307d3aa73563b8c6a54e8a555` |
-   | `marketing_funnel.csv` | 10,256 | `1f7645f6533e5c07fe26eb1709270e32` |
-   | `data_quality_summary.csv` | 7,124 | `86c77c54a9869b1204ca3a312cedc9dc` |
+   | `campaign_performance.csv` | 26,505 | `fbf137498360f712cabb62cb2111e8f0` |
+   | `product_performance.csv` | 44,129 | `f47d71f6a363a76e04003edd948cf054` |
+   | `marketing_funnel.csv` | 10,261 | `870c4a0bb6120db5c1328632c49e5d71` |
+   | `data_quality_summary.csv` | 7,124 | `2804f30b71fecaf0ddf74cb2256dde32` |
 
 3. `terraform plan`: four `aws_s3_object.power_bi_exports[...] will be updated in-place`, then `Plan: 0 to add, 4 to change, 0 to destroy.`
 4. `terraform apply`: four `Modifications complete`, then `Apply complete! Resources: 0 added, 4 changed, 0 destroyed.`
 5. `terraform plan` again: `No changes. Your infrastructure matches the configuration.`
 6. The bucket:
    - for all five objects, the S3 ETag equals the local md5;
-   - a public read of each returns HTTP 200 with Content-Length 26,081, 44,129, 10,256, 7,124 and 1,36,893;
+   - a public read of each returns HTTP 200 with Content-Length 26,505, 44,129, 10,261, 7,124 and 1,36,893;
    - another key returns HTTP 403, and so does listing the bucket;
-   - four objects are dated 23 November 2026 and `customer_lifetime_value.csv` 14 November 2026.
+   - four objects are dated 25 November 2026 and `customer_lifetime_value.csv` 14 November 2026.
 
 Only `campaign_performance.csv` and `data_quality_summary.csv` of this bucket are connected to a Power BI semantic model.
 
-**Power BI Online.** All seven semantic models were refreshed on 23 November 2026 between 22:32 and 22:37 IST, with no warnings. Money columns and measures are shown in rupees (₹); counts, ratios and percentages are unchanged. The cards, at scale and as they were on 14 November at the default size:
+**Power BI Online.** All seven semantic models were refreshed on 25 November 2026, with no warnings. Money columns and measures are shown in rupees (₹); counts, ratios and percentages are unchanged. The cards, at scale and as they were on 14 November at the default size:
 
 | Page | Card | 4,00,000 customers | Default size |
 |---|---|---|---|
@@ -189,9 +199,9 @@ Only `campaign_performance.csv` and `data_quality_summary.csv` of this bucket ar
 | Customer 360 | Average Customer Value | ₹7.86K | 7.92K |
 | Customer 360 | Total Lifetime Value | ₹3.14bn | 3.94M |
 | Customer 360 | Total Orders | 1M | 2K |
-| Campaign Performance | Total Campaign Spend | ₹1.39M | 1.39M |
+| Campaign Performance | Total Campaign Spend | ₹1.11bn | 1.39M |
 | Campaign Performance | Campaign Revenue | ₹1.81bn | 2.25M |
-| Campaign Performance | Campaign ROAS | 1.30K | 1.62 |
+| Campaign Performance | Campaign ROAS | 1.63 | 1.62 |
 | Product Performance | Total Product Revenue | ₹3.06bn | 3.82M |
 | Product Performance | Product Web Events | 8M | 10K |
 | Product Performance | Units Sold | 2M | 3K |
@@ -201,19 +211,17 @@ Only `campaign_performance.csv` and `data_quality_summary.csv` of this bucket ar
 | Marketing Funnel | Total Purchases | 1M | 2K |
 | Marketing Funnel | Funnel Conversion Rate | 42.20% | 43.10% |
 | Executive Overview | Total Revenue | ₹3.14bn | 3.98M |
-| Executive Overview | Total Spend | ₹1.43M | 1.43M |
-| Executive Overview | Average ROAS | 810.75 | 1.07 |
+| Executive Overview | Total Spend | ₹1.15bn | 1.43M |
+| Executive Overview | Average ROAS | 1.01 | 1.07 |
 | Executive Overview | Total Orders | 1M | 2K |
 
-The Executive Overview table's totals are spend ₹1,434,179.14 and revenue ₹3,142,927,795.52. The Data Quality page shows 87 checks, every one PASS. The nine Power BI screenshots in the README (section 14) were taken after this refresh.
+The Executive Overview table's totals are spend ₹1,147,343,344.01 and revenue ₹3,142,927,795.52. The Data Quality page shows 87 checks, every one PASS. The nine Power BI screenshots in the README (section 14) were taken after this refresh.
 
 ## What was not measured
 
-- **The tasks other than the build were not re-run after the speed-ups.** Their times are the full run's. The speed-ups changed only the build's SQL, and `66d77e0` the Spark heap of three jobs, which has not run at scale.
-- **dbt at scale after the speed-ups.** `dbt_run`, `dbt_test` and `dbt_docs` were timed only in the full run.
 - **The `power_bi_export` task at this size:** not run through `run_dag.py`, by design, because it writes into the checkout. Its script was run by hand instead (see "Power BI and S3").
 - **Airflow at this size.** The tasks ran through `run_dag.py`; Airflow's fixed task environment cannot pass the settings above.
+- **The jobs' own 4 GB Spark heap.** `point_in_time_fact_joins`, `scd2_dimensions` and `scd2_gold_marts` set it themselves since `66d77e0`, but the run also passed `SPARK_DRIVER_MEMORY=4g`, so it does not show that their own setting is enough.
 - **The build with its default settings, or after the server settings were reverted:** not timed at this size.
-- **Variation between runs:** each build was timed once.
-- **The integration suite at this size:** not run. Equality of output at scale rests on the fingerprints above. Every speed-up was also proven at the default size by the full integration suite and an old-against-new build comparison.
-- **Free disk during the full run:** not recorded.
+- **Variation between runs:** each task was timed once.
+- **The integration suite at this size:** not run. Equality of output at scale rests on the fingerprints and the comparison above. Every speed-up was also proven at the default size by the full integration suite and an old-against-new build comparison.

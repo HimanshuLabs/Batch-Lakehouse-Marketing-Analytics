@@ -19,7 +19,7 @@ Route B serves the dashboard through S3 because the available Microsoft account 
 
 Route A is also served through S3, from a second bucket that was set up by hand and is not in Terraform's state. Its policy allows public `s3:GetObject` on named files only. The five route A semantic models (Revenue Trends, Campaign Performance, Product Performance, Customer 360, Marketing Funnel) each read one CSV from it by web URL, with a daily scheduled refresh. `export_manifest.json` is never uploaded: written outside the checkout, it holds local paths.
 
-The committed `exports/power_bi/` files are the default-size run (500 customers), which CI checks. Since 23 November 2026 both buckets hold the 4,00,000-customer run's files, except `customer_lifetime_value.csv`, which stays the default-size file; see `docs/scale_run_evidence.md`, "Power BI and S3".
+The committed `exports/power_bi/` files are the default-size run (500 customers), which CI checks. Since 25 November 2026 both buckets hold the 4,00,000-customer run's files, except `customer_lifetime_value.csv`, which stays the default-size file; see `docs/scale_run_evidence.md`, "Power BI and S3".
 
 The rest of this document describes route A; the route B refresh steps are under "Recurring refresh".
 

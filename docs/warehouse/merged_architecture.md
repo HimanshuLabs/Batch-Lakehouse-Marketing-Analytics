@@ -39,3 +39,4 @@ PostgreSQL marts schema
 Audit and reconciliation checks
         ↓
 Dashboard query pack / BI reporting layer
+```
