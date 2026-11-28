@@ -1,6 +1,6 @@
 """Silver validity rules.
 
-P2-03 (fixed in 1831e6b): a rule that evaluates to NULL put a row in neither
+FINDING-03 (fixed in 1831e6b): a rule that evaluates to NULL put a row in neither
 Silver nor quarantine, so the row vanished.
 N-13 (fixed in 62b273d): 'NaN'-like text stayed as text, and NaN / Infinity
 passed every "<= 0" rule; non-rule doubles could carry NaN into averages.
@@ -57,7 +57,7 @@ def two_rows(table: str, column: str, value) -> tuple[list[dict], object, object
     return [{key: good}, {key: bad, column: value}], silver_key(table, good), silver_key(table, bad)
 
 
-# --- P2-03 -----------------------------------------------------------------
+# --- FINDING-03 ------------------------------------------------------------
 
 @pytest.mark.parametrize(
     "table, column",

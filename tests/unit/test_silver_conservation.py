@@ -1,9 +1,9 @@
 """No row is lost between Bronze and Silver, and Bronze keeps every batch.
 
-P2-03 (fixed in 1831e6b): the Silver check computed duplicates as
+FINDING-03 (fixed in 1831e6b): the Silver check computed duplicates as
 bronze - silver - quarantine and only failed below zero, so a lost row looked
 like a duplicate; a run with no invalid rows left last run's quarantine behind.
-P2-01 (fixed in 9b514db): Bronze was written with a plain overwrite, so each
+FINDING-01 (fixed in 9b514db): Bronze was written with a plain overwrite, so each
 run deleted every earlier ingestion_date partition.
 """
 from __future__ import annotations

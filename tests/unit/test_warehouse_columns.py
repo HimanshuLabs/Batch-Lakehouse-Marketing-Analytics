@@ -282,7 +282,7 @@ def test_the_consumer_contract_names_columns_that_exist_and_catches_every_breaki
     contract = module.CONSUMER_CONTRACT
     assert set(contract) == {"marts.mart_customer_360", "marts.mart_campaign_performance", "marts.mart_marketing_funnel",
                              "marts.mart_product_sales", "warehouse.fact_web_events", "warehouse.dim_customer"}, "the six relations ML-Pipeline-Anomaly-Detection reads"
-    assert module.CONSUMER_SCHEMAS == {"P5 contracts/project2_project3_sources.yaml": ["staging", "warehouse", "marts", "audit"]}
+    assert module.CONSUMER_SCHEMAS == {"AI-Decision-Intelligence-Layer contracts/project2_project3_sources.yaml": ["staging", "warehouse", "marts", "audit"]}
     # Without a database: every column a consumer reads is in the SQL that builds the relation.
     for relation, expected in contract.items():
         body = table_ddl(relation) if relation.startswith("warehouse.") else view_body(relation)
@@ -311,7 +311,7 @@ def test_the_consumer_contract_names_columns_that_exist_and_catches_every_breaki
     assert check({key: value for key, value in current.items() if key != "marts.mart_product_sales"}) == [
         "marts.mart_product_sales: the relation is gone"]
     assert check(current, rows={relation: 0 if relation == "marts.mart_marketing_funnel" else 5 for relation in contract}) == [
-        "marts.mart_marketing_funnel: no rows (P4 fails on an empty source)"]
+        "marts.mart_marketing_funnel: no rows (ML-Pipeline-Anomaly-Detection fails on an empty source)"]
     assert check(current, duplicates={"marts.mart_customer_360": 2}) == [
         "marts.mart_customer_360: 2 duplicate or NULL key(s) ['customer_id']"]
 

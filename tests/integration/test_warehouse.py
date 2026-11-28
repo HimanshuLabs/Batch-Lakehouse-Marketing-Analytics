@@ -1045,7 +1045,7 @@ AVAILABLE_RELATIONS = {
 }
 # AI-Decision-Intelligence-Layer reads no relation yet: it verifies that the database has these schemas
 # before it activates a source (its adapter says it does not extract rows yet).
-CONSUMER_SCHEMAS = {"P5 contracts/project2_project3_sources.yaml": ["staging", "warehouse", "marts", "audit"]}
+CONSUMER_SCHEMAS = {"AI-Decision-Intelligence-Layer contracts/project2_project3_sources.yaml": ["staging", "warehouse", "marts", "audit"]}
 
 
 def contract_violations(contract: dict, columns: dict[str, dict[str, str]], row_counts: dict[str, int],
@@ -1063,7 +1063,7 @@ def contract_violations(contract: dict, columns: dict[str, dict[str, str]], row_
             elif actual[column] != data_type:
                 problems.append(f"{relation}.{column}: type {actual[column]}, the consumer reads {data_type}")
         if row_counts.get(relation, 0) == 0:
-            problems.append(f"{relation}: no rows (P4 fails on an empty source)")
+            problems.append(f"{relation}: no rows (ML-Pipeline-Anomaly-Detection fails on an empty source)")
         if duplicate_keys.get(relation, 0):
             problems.append(f"{relation}: {duplicate_keys[relation]} duplicate or NULL key(s) {expected['key']}")
     return problems

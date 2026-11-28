@@ -26,7 +26,7 @@ ALTER DATABASE marketing_analytics SET timezone TO 'UTC';
 
 CREATE SCHEMA IF NOT EXISTS staging;
 COMMENT ON SCHEMA staging IS
-'Relational landing schema for trusted Project 2 Gold and SCD2 lakehouse outputs. Does not own raw, bronze, or silver processing.';
+'Relational landing schema for trusted Batch-Lakehouse-Marketing-Analytics Gold and SCD2 lakehouse outputs. Does not own raw, bronze, or silver processing.';
 
 CREATE SCHEMA IF NOT EXISTS warehouse;
 COMMENT ON SCHEMA warehouse IS

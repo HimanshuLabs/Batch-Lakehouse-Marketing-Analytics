@@ -1,13 +1,13 @@
 """Point-in-time fact joins.
 
-P2-02 (fixed in fa6f11a): a fact with no covering dimension version silently
+FINDING-02 (fixed in fa6f11a): a fact with no covering dimension version silently
 took the current version's key. Every fact key now resolves explicitly to
 in_range / unknown_member / invalid_reference / no_key / no_version_for_time.
 Part J: a key that is present but in no dimension version (invalid_reference)
 no longer rejects the fact; it is kept on the invalid-reference member. Only a
 missing required key (no_key) rejects a fact, and no_version_for_time (a
 corrupt dimension) fails the job.
-P2-05 (fixed in fa6f11a): order items whose order was rejected were filtered
+FINDING-05 (fixed in fa6f11a): order items whose order was rejected were filtered
 out silently; they are rejected with a reason, and the job checks that every
 Silver row is a valid fact or a reject.
 Order totals (p2-data-v2): every complete order's total must equal the sum of

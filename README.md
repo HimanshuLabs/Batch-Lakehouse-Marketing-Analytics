@@ -103,8 +103,8 @@ flowchart TD
 
     M --> O["dbt Layer<br/>models, tests, docs, lineage, exposures"]
     M --> P["Route A exports<br/>exports/power_bi/*.csv"]
-    J --> P2["Route B exports<br/>data/bi_exports/*.csv"]
-    P2 --> Q["S3 public HTTPS URLs<br/>five CSVs"]
+    J --> RB["Route B exports<br/>data/bi_exports/*.csv"]
+    RB --> Q["S3 public HTTPS URLs<br/>five CSVs"]
     P --> QA["Second S3 bucket, not in Terraform<br/>five CSVs, replaced by hand"]
     QA --> R["Power BI Online<br/>semantic model, reports, dashboard"]
     Q --> R
@@ -115,7 +115,7 @@ flowchart TD
     S --> K
     S --> L
     S --> O
-    S --> P2
+    S --> RB
 
     T["GitHub Actions CI/CD"] --> C
     T --> L

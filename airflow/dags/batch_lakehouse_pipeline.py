@@ -47,7 +47,7 @@ DEFAULT_ENV = {
 
 
 default_args = {
-    "owner": "project-2-batch-lakehouse",
+    "owner": "batch-lakehouse",
     "depends_on_past": False,
     "retries": 1,
     "retry_delay": timedelta(minutes=2),

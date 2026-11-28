@@ -1,9 +1,9 @@
 """SCD2 dimensions.
 
-P2-07 (fixed in ee30b39): tracked columns that did not exist in Silver were
+FINDING-07 (fixed in ee30b39): tracked columns that did not exist in Silver were
 filled with NULL, so tier / segment / price / channel changes never opened a
 version; a missing tracked column now raises.
-P2-12 (fixed in 39b545a): dimensions were built from current Silver rows only,
+FINDING-12 (fixed in 39b545a): dimensions were built from current Silver rows only,
 so earlier versions were lost; they are built from the Silver history tables.
 N-11 (fixed in a541e13): the first version opens at 1900-01-01 so earlier facts
 match it, while keys stay stable and source_updated_at keeps the real change
